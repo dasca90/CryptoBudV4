@@ -1,0 +1,838 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import './App.css';
+import { TradingEngine } from './core/trading/TradingEngine';
+import { MLPredictor } from './core/ml/MLPredictor';
+import { Journal } from './core/persistence/Journal';
+import { JsonExporter } from './core/persistence/JsonExporter';
+import { PaperExchangeAdapter } from './core/exchange/PaperExchangeAdapter';
+import { LiveBinanceAdapter } from './core/exchange/LiveBinanceAdapter';
+import { MarketDataFeed } from './utils/MarketDataFeed';
+import { BinancePublicClient } from './core/market-data/BinancePublicClient';
+import { logger } from './utils/logger';
+import { DiagnosticsEngine, type DiagnosticsSnapshot } from './core/diagnostics/DiagnosticsEngine';
+import { PerformanceGuard } from './core/diagnostics/PerformanceGuard';
+import { runLiveSafetyCheck } from './core/live/LiveSafetyCheck';
+import { canTransitionTo, INITIAL_SAFETY_STATE } from './core/live/LiveSafetyState';
+import { appStatePersistence } from './core/persistence/AppStatePersistence';
+import { backupService } from './core/persistence/BackupService';
+import { AppShell } from './components/layout/AppShell';
+import { TradePage } from './ui/pages/TradePage';
+import { JournalPage } from './ui/pages/JournalPage';
+import { MLLabPage } from './ui/pages/MLLabPage';
+import { LogsPage } from './ui/pages/LogsPage';
+import { SettingsPage } from './ui/pages/SettingsPage';
+import { createUIStore } from './state/ui-store';
+import { loadMLBrain, saveMLBrain } from './core/ml/ml-brain-store';
+import type { TraderBrainConfig, LiveSafetyState, LiveSafetyCheckResult, UniverseMode, MLBrainModel, ImportedMLRow, ScannerCandidate, Position, PlannedCandidate, BuySnapshot } from './core/types';
+import { SettingsPersistence } from './core/persistence/SettingsPersistence';
+import { TelegramNotifier } from './core/notifications/TelegramNotifier';
+import type { MainTab } from './state/ui-store';
+import packageJson from '../package.json';
+
+const RENDERER_BUILD_TIME = new Date().toISOString();
+const RENDERER_BUILD_ID = `runtime-${Date.now().toString(36)}`;
+
+export default function App() {
+  const [engine] = useState(() => {
+    const adapter = new PaperExchangeAdapter();
+    const ml = new MLPredictor();
+    const journal = new Journal();
+    return new TradingEngine(adapter, ml, journal);
+  });
+  const [exporter] = useState(() => new JsonExporter(engine['journal'] as Journal));
+
+  const store = createUIStore();
+
+  const [diagnosticsEngine] = useState(() => {
+    const de = new DiagnosticsEngine();
+    de.setPositionManager(engine.getPositionManager());
+    de.setOrderLockManager(engine.getOrderLockManager());
+    return de;
+  });
+  useEffect(() => {
+    logger.info(`APP_BUILD_VERSION_AUDIT: buildTime=${RENDERER_BUILD_TIME} gitHashIfAvailable=${(import.meta as any).env?.VITE_GIT_HASH ?? 'unavailable'} packageVersion=${packageJson.version} rendererVersion=${RENDERER_BUILD_ID}`);
+  }, []);
+  const [perfGuard] = useState(() => new PerformanceGuard());
+  const [diagSnapshot, setDiagSnapshot] = useState<DiagnosticsSnapshot | null>(null);
+
+  const [isRunning, setIsRunning] = useState(false);
+  const [liveState, setLiveState] = useState<LiveSafetyState>(INITIAL_SAFETY_STATE);
+  const [liveCheckResult, setLiveCheckResult] = useState<LiveSafetyCheckResult | null>(null);
+  const [totalEquity, setTotalEquity] = useState(0);
+  const [, forceUpdate] = useState(0);
+
+  const [brain, setBrain] = useState<MLBrainModel | null>(null);
+  const [importedRows, setImportedRows] = useState<ImportedMLRow[]>([]);
+  const [publicDataReady, setPublicDataReady] = useState(false);
+  const [publicDataRefreshing, setPublicDataRefreshing] = useState(false);
+  const [exchangeInfoLoaded, setExchangeInfoLoaded] = useState(false);
+  const [lastPublicUpdate, setLastPublicUpdate] = useState<number>(0);
+  const [positionBootRestoring, setPositionBootRestoring] = useState(true);
+  const [closedTradesBootRestoring, setClosedTradesBootRestoring] = useState(true);
+  const banlistRef = useRef<string[]>([]);
+
+  const refreshPublicData = useCallback(async () => {
+    logger.info('PUBLIC_DATA_MANUAL_REFRESH_START');
+    setPublicDataRefreshing(true);
+    try {
+      const publicClient = new BinancePublicClient();
+      const pingOk = await publicClient.ping();
+      if (!pingOk) {
+        setPublicDataReady(false);
+        logger.warn('PUBLIC_DATA_MANUAL_REFRESH_FAILED: ping failed');
+        setPublicDataRefreshing(false);
+        return false;
+      }
+      await MarketDataFeed.getInstance().fetchExchangeInfo();
+      const ex = MarketDataFeed.getInstance().getExchangeInfo();
+      if (!ex) {
+        logger.warn('PUBLIC_DATA_MANUAL_REFRESH_FAILED: exchangeInfo failed');
+        setPublicDataRefreshing(false);
+        return false;
+      }
+      setPublicDataReady(true);
+      setExchangeInfoLoaded(true);
+      setLastPublicUpdate(Date.now());
+      logger.info('PUBLIC_DATA_MANUAL_REFRESH_SUCCESS');
+      setPublicDataRefreshing(false);
+      return true;
+    } catch (err) {
+      logger.warn(`PUBLIC_DATA_MANUAL_REFRESH_FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      setPublicDataRefreshing(false);
+      return false;
+    }
+  }, []);
+
+  const journal = engine['journal'] as Journal;
+  const paperAdapter = engine.getAdapter() as PaperExchangeAdapter;
+  const [settingsPersistence] = useState(() => new SettingsPersistence());
+  const telegramNotifierRef = useRef(new TelegramNotifier());
+  useEffect(() => {
+    engine.setBanlistProvider(() => banlistRef.current);
+  }, [engine]);
+
+  // ── Startup: load persisted state ─────────────────
+  // Guard against React StrictMode double-mount
+  const startupGuardRef = useRef(false);
+  useEffect(() => {
+    if (startupGuardRef.current) return;
+    startupGuardRef.current = true;
+
+    (async () => {
+      logger.info(`POSITION_PERSISTENCE_BOOT_START: mode=demo storageKey=open_positions persistedOpenCount=0 positionManagerOpenCount=0 uiOpenRowsCount=0 restoredSymbols=none resetMetaDetected=false resetApplied=false reason=startup`);
+      // Journal init (Tauri availability check)
+      await journal.loadTrades();
+
+      // Restore app state
+      const appState = await appStatePersistence.load();
+      if (appState.liveSafetyState !== 'LIVE_DISABLED') {
+        setLiveState(appState.liveSafetyState);
+      }
+
+      // Restore selected coins
+      for (const coin of appState.selectedCoins) {
+        if (!engine.brains.has(coin)) {
+          const config: TraderBrainConfig = {
+            coin, mode: (appState.activeTradeMode as 'AUTO' | 'MANUAL' | 'SCALPER') ?? 'AUTO',
+            enabled: false, maxPositionSize: 100, stopLossPercent: 2, takeProfitPercent: 5,
+            maxLeverage: 1, cooldownSeconds: 30, mlEnabled: true, minConfidence: 0.6,
+          };
+          engine.addBrain(config);
+          logger.info(`PERSISTENCE: Restored brain for ${coin}`);
+        }
+      }
+
+      // Restore equity history
+      if (appState.equityHistory.length > 0) {
+        for (const pt of appState.equityHistory) {
+          store.addEquityPoint(pt.time, pt.equity);
+        }
+        logger.info(`PERSISTENCE: Restored ${appState.equityHistory.length} equity history points`);
+      }
+
+      // Restore open positions from persistence
+      logger.info(`POSITION_MANAGER_HYDRATION_START: mode=demo storageKey=open_positions backupKey=cryptobud_v4:open_positions_critical persistedOpenCount=0 backupOpenCount=0 positionManagerOpenCount=0 uiOpenRowsCount=0 restoredSymbols=none resetMetaDetected=false resetApplied=false hydrationComplete=false reason=begin_restore`);
+      const savedPositions = await journal.loadOpenPositions();
+      logger.info(`POSITION_PERSISTENCE_STORAGE_${savedPositions.length > 0 ? 'FOUND' : 'EMPTY'}: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=0 uiOpenRowsCount=0 restoredSymbols=${savedPositions.map(p => p.symbol).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=journal_load`);
+      if (savedPositions.length > 0) {
+        const restored: Position[] = [];
+        for (const sp of savedPositions) {
+          try {
+            const pos = JSON.parse(sp.position_json) as Position;
+            pos.coin = sp.symbol;
+            if (!pos.buySnapshot && sp.buy_snapshot_json) {
+              try {
+                pos.buySnapshot = JSON.parse(sp.buy_snapshot_json) as BuySnapshot;
+              } catch (snapshotErr) {
+                logger.warn(`PERSISTENCE_RESTORE_SNAPSHOT_PARSE_FAILED: ${sp.symbol} - ${snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr)}`);
+              }
+            }
+            if (!pos.buySnapshot) {
+              logger.warn(`POSITION_ENTRY_SNAPSHOT_MISSING_LEGACY_FALLBACK_USED: symbol=${sp.symbol} positionId=${pos.tradeId ?? `${sp.symbol}-${pos.openedAt ?? 0}`} availableFields=coin,quantity,avgEntryPrice,currentPrice,pnl,pnlPercent,mode,openedAt missingFields=buySnapshot`);
+            }
+            let brain = engine.brains.get(sp.symbol);
+            if (!brain) {
+              const config: TraderBrainConfig = {
+                coin: sp.symbol,
+                mode: (pos.mode as 'AUTO' | 'MANUAL' | 'SCALPER') ?? 'AUTO',
+                enabled: false,
+                maxPositionSize: 100,
+                stopLossPercent: pos.stopLossPercent ?? 2,
+                takeProfitPercent: pos.tp1Percent ?? 5,
+                maxLeverage: 1,
+                cooldownSeconds: 30,
+                mlEnabled: true,
+                minConfidence: 0.6,
+              };
+              engine.addBrain(config);
+              brain = engine.brains.get(sp.symbol);
+            }
+            if (brain && !brain.position) brain.position = pos;
+            restored.push(pos);
+          } catch (e) {
+            logger.warn(`PERSISTENCE_RESTORE_POSITION_FAILED: ${sp.symbol} - ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        engine.getPositionManager().restorePositions(restored);
+        if (restored.length > 0) {
+          logger.info(`RESTORED_POSITION_PRICE_WARMUP_START: symbols=${restored.map((p) => p.coin).join('|')} scannerRunning=${store.state.scannerRunning} cacheAvailable=true`);
+          for (const p of restored) {
+            try {
+              const warm = await MarketDataFeed.getInstance().getPrice(p.coin);
+              const resolvedPrice = warm.last > 0 ? warm.last : (warm.bid > 0 ? warm.bid : warm.ask);
+              if (resolvedPrice > 0) {
+                p.currentPrice = resolvedPrice;
+                p.lastPrice = resolvedPrice;
+                logger.info(`LIVE_PRICE_RESOLVED_FOR_RESTORED_POSITION: symbol=${p.coin} source=live_ticker_cache price=${resolvedPrice} ageMs=${Math.max(0, Date.now() - warm.timestamp)} scannerRunning=${store.state.scannerRunning} cacheAvailable=true`);
+                logger.info(`RESTORED_POSITION_PRICE_WARMUP_SUCCESS: symbol=${p.coin} source=live_ticker_cache price=${resolvedPrice} ageMs=${Math.max(0, Date.now() - warm.timestamp)} reason=warmup_price_available scannerRunning=${store.state.scannerRunning} cacheAvailable=true`);
+              } else {
+                logger.warn(`RESTORED_POSITION_PRICE_PENDING: symbol=${p.coin} source=none price=0 ageMs=0 reason=no_live_price_yet scannerRunning=${store.state.scannerRunning} cacheAvailable=true`);
+              }
+            } catch (warmErr) {
+              logger.warn(`RESTORED_POSITION_PRICE_UNAVAILABLE: symbol=${p.coin} source=none price=0 ageMs=0 reason=${warmErr instanceof Error ? warmErr.message : String(warmErr)} scannerRunning=${store.state.scannerRunning} cacheAvailable=false`);
+            }
+          }
+        }
+        logger.info(`POSITION_MANAGER_HYDRATED: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=0 restoredSymbols=${restored.map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=restore_positions`);
+        logger.info(`PERSISTENCE_RESTORE_POSITIONS_SUCCESS: restored ${restored.length} / ${savedPositions.length} positions`);
+        logger.info(`OPEN_POSITIONS_RESTORED: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=0 restoredSymbols=${restored.map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=boot_restore_success`);
+      }
+      journal.markOpenPositionsHydrated();
+      logger.info(`OPEN_POSITIONS_NOT_CLEARED_ON_BOOT: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=0 restoredSymbols=${engine.getPositionManager().getOpenPositions().map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=no_implicit_clear`);
+
+      // Load ML brain
+      const loadedBrain = loadMLBrain();
+      setBrain(loadedBrain);
+      if (loadedBrain.enabled) {
+        engine.getML().setBrain(loadedBrain);
+      }
+
+      logger.info('PERSISTENCE: Startup restore complete');
+      const settings = await settingsPersistence.loadSettings();
+      const telegramSettings = await settingsPersistence.loadTelegramSettings();
+      telegramNotifierRef.current.updateSettings(telegramSettings);
+      banlistRef.current = [...new Set((settings.scannerBanlist ?? settings.manualScannerBanlist ?? []).map((x) => String(x).toUpperCase().trim()).filter(Boolean))];
+      const scanner = engine.getAutoRuntime().getScanner();
+      scanner.setScannerConfig({
+        riskGroups: settings.scannerRiskGroups ?? {
+          top_caps: true,
+          large_caps: true,
+          mid_caps: true,
+          high_risk: true,
+          very_high_risk: true,
+        },
+        referencePeriod: settings.scannerReferencePeriod ?? '1h',
+        scannerBanlist: settings.scannerBanlist ?? settings.manualScannerBanlist ?? [],
+      });
+      scanner.setExecutionLimits({
+        maxPositions: settings.maxPositions ?? 10,
+        maxEntriesPerCycle: settings.maxEntriesPerCycle ?? 2,
+        capital: (settings as any).autoTradingCapital ?? 1000,
+        capitalPerTrade: (settings as any).capitalPerCoin ?? settings.capitalPerTrade ?? 100,
+      });
+      logger.info(`CAPITAL_PER_COIN_SETTINGS_AUDIT: symbol=none mode=demo strategySource=settings userCapitalPerCoin=${(settings as any).capitalPerCoin ?? 100} resolvedCapitalPerCoin=${(settings as any).capitalPerCoin ?? settings.capitalPerTrade ?? 100} finalOrderNotionalUsd=0 qty=0 entryPrice=0 minNotional=0 maxOpenPositions=${settings.maxPositions ?? 10} availableCapital=${(settings as any).autoTradingCapital ?? 1000} usedCapitalBefore=0 usedCapitalAfter=0 reason=scanner_execution_limits_applied source=settings`);
+      scanner.setExecutionContextProviders({
+        getUsedCapital: () => engine.getPositionManager().getOpenPositions().reduce((s, p) => s + (p.avgEntryPrice * p.quantity), 0),
+        getOpenSymbols: () => engine.getPositionManager().getOpenPositions().map(p => p.coin),
+        getPendingSymbols: () => engine.getOrderLockManager().getActiveLocks().filter(l => l.side === 'BUY').map(l => l.symbol),
+      });
+      scanner.setPaperAutoBuyFn(async (plannedCandidate: PlannedCandidate, candidate: ScannerCandidate) => {
+        const symbol = plannedCandidate.symbol;
+        const openBefore = engine.getPositionManager().getOpenPositions().length;
+        if (!plannedCandidate.entryPlan) {
+          logger.warn(`ENTRY_PLAN_MISSING: symbol=${symbol} source=App.setDemoAutoBuyFn adapterCalled=false`);
+          return {
+            attempted: false,
+            executed: false,
+            blocked: true,
+            symbol,
+            reason: 'Missing canonical entry plan',
+            gateResults: ['ENTRY_PLAN_MISSING'],
+            stage: 'ExecutionFailed' as const,
+            adapterCalled: false,
+            adapterResult: 'NOT_SUBMITTED',
+            positionCreateAttempted: false,
+            positionCreated: false,
+            openPositionsBefore: openBefore,
+            openPositionsAfter: openBefore,
+          };
+        }
+        const accountInfo = await paperAdapter.getAccountInfo();
+        if (!accountInfo.canTrade) {
+          logger.info(`DEMO_EXECUTION_ADAPTER_CONNECT_START: symbol=${symbol} source=App.setDemoAutoBuyFn reason=demo_auto_requires_connected_adapter`);
+          await paperAdapter.connect();
+          const afterConnect = await paperAdapter.getAccountInfo();
+          if (!afterConnect.canTrade) {
+            logger.warn(`DEMO_EXECUTION_ADAPTER_UNAVAILABLE: symbol=${symbol} source=App.setDemoAutoBuyFn reason=demo_adapter_not_connected`);
+            return {
+              attempted: false,
+              executed: false,
+              blocked: true,
+              symbol,
+              reason: 'Demo adapter unavailable - not connected',
+              gateResults: ['ENTRYGATE_ALLOW', 'RISKENGINE_ALLOW', 'DEMO_ADAPTER_NOT_CONNECTED'],
+              stage: 'ExecutionFailed' as const,
+              adapterCalled: false,
+              adapterResult: 'PAPER_REJECT_ADAPTER_NOT_CONNECTED',
+              positionCreateAttempted: false,
+              positionCreated: false,
+              openPositionsBefore: openBefore,
+              openPositionsAfter: openBefore,
+            };
+          }
+          logger.info(`DEMO_EXECUTION_ADAPTER_READY: symbol=${symbol} source=App.setDemoAutoBuyFn connected=true`);
+        }
+        logger.info(`POSITION_CREATE_ATTEMPT: symbol=${symbol} openPositionsBefore=${openBefore}`);
+        logger.info(`DEMO_EXECUTION_ADAPTER_CALLED: symbol=${symbol} source=App.setDemoAutoBuyFn`);
+        await engine.executePlannedScannerBuy(candidate, plannedCandidate);
+        const openAfter = engine.getPositionManager().getOpenPositions().length;
+        const created = engine.getPositionManager().hasOpenPosition(symbol) && openAfter > openBefore;
+        const lastPaperExec = paperAdapter.lastExecutionResult;
+        const finalRejectReason = lastPaperExec?.rejectReason
+          ?? (lastPaperExec?.status && lastPaperExec.status !== 'FILLED' ? `paper_status_${lastPaperExec.status}` : 'position_not_created_after_execution');
+        if (lastPaperExec?.success) {
+          logger.info(`DEMO_EXECUTION_FILL_CREATED: symbol=${symbol} status=${lastPaperExec.status} qty=${lastPaperExec.executedQuantity} price=${lastPaperExec.executedPrice}`);
+        }
+        if (created) logger.info(`POSITION_CREATED: symbol=${symbol} openPositionsAfter=${openAfter}`);
+        else logger.warn(`POSITION_CREATE_FAILED: symbol=${symbol} openPositionsBefore=${openBefore} openPositionsAfter=${openAfter} adapterResult=${lastPaperExec?.status ?? 'not_submitted'} rejectReason=${finalRejectReason}`);
+        if (!created) logger.warn(`POSITION_CREATE_FAILED_REASON_AUDIT: symbol=${symbol} adapterResult=${lastPaperExec?.status ?? 'not_submitted'} rejectReason=${finalRejectReason} executionSuccess=${String(!!lastPaperExec?.success)}`);
+        forceUpdate(n => n + 1);
+        const failReason = lastPaperExec?.success
+          ? 'Demo fill created but position not opened'
+          : `Demo execution failed: ${finalRejectReason}`;
+        if (!created) logger.warn(`DEMO_EXECUTION_FAILURE_REASON_AUDIT: symbol=${symbol} reason=${failReason} adapterStatus=${lastPaperExec?.status ?? 'not_submitted'} rejectReason=${finalRejectReason}`);
+        return {
+          attempted: true,
+          executed: created,
+          blocked: !created,
+          symbol,
+          reason: created
+            ? 'Demo fill created and position opened'
+            : failReason,
+          gateResults: created ? ['ENTRYGATE_ALLOW', 'RISKENGINE_ALLOW', 'DEMO_FILL_CREATED', 'POSITION_OPENED'] : ['ENTRYGATE_ALLOW', 'RISKENGINE_ALLOW', 'EXECUTION_FAILED'],
+          stage: created ? 'PositionOpened' : (lastPaperExec?.success ? 'DemoFillCreated' : 'ExecutionFailed'),
+          adapterCalled: true,
+          adapterResult: lastPaperExec?.status ?? 'UNKNOWN',
+          positionCreateAttempted: true,
+          positionCreated: created,
+          openPositionsBefore: openBefore,
+          openPositionsAfter: openAfter,
+        };
+      });
+      forceUpdate(n => n + 1);
+
+      // ── Auto-refresh public data on boot ──
+      logger.info('PUBLIC_DATA_BOOT_REFRESH_START');
+      setPublicDataRefreshing(true);
+      try {
+        const publicClient = new BinancePublicClient();
+        const pingOk = await publicClient.ping();
+        if (pingOk) {
+          await MarketDataFeed.getInstance().fetchExchangeInfo();
+          const ex = MarketDataFeed.getInstance().getExchangeInfo();
+          if (ex) {
+            logger.info('PUBLIC_DATA_BOOT_REFRESH_SUCCESS');
+            setPublicDataReady(true);
+            setExchangeInfoLoaded(true);
+            setLastPublicUpdate(Date.now());
+          } else {
+            logger.warn('PUBLIC_DATA_BOOT_REFRESH_PARTIAL: exchangeInfo failed');
+          }
+        } else {
+          logger.warn('PUBLIC_DATA_BOOT_REFRESH_FAILED: ping failed');
+        }
+      } catch (err) {
+        logger.warn(`PUBLIC_DATA_BOOT_REFRESH_FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      setPublicDataRefreshing(false);
+      setPositionBootRestoring(false);
+      setClosedTradesBootRestoring(false);
+      logger.info(`POSITION_PERSISTENCE_BOOT_COMPLETE: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=${engine.getPositionManager().getOpenPositions().length} restoredSymbols=${engine.getPositionManager().getOpenPositions().map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=complete`);
+    })();
+  }, []);
+
+  useEffect(() => {
+    engine.setEventCallbacks({
+      onTradeOpened: async (trade) => {
+        const sent = await telegramNotifierRef.current.notify('BUY_OPENED', {
+          event: 'BUY_OPENED',
+          symbol: trade.coin,
+          message: `BUY opened for ${trade.coin}`,
+          trade,
+        });
+        logger.info(`TELEGRAM_BUY_NOTIFY_${sent ? 'SENT' : 'SKIPPED'}: symbol=${trade.coin}`);
+      },
+      onTradeClosed: async (trade) => {
+        const reason = trade.closeSnapshot?.exitReason ?? '';
+        const event = reason === 'STOP_LOSS'
+          ? 'STOP_LOSS'
+          : (reason.startsWith('TP') ? 'TP_HIT' : 'SELL_CLOSED');
+        const sent = await telegramNotifierRef.current.notify(event, {
+          event,
+          symbol: trade.coin,
+          message: `Trade closed for ${trade.coin}`,
+          trade,
+        });
+        logger.info(`TELEGRAM_SELL_NOTIFY_${sent ? 'SENT' : 'SKIPPED'}: symbol=${trade.coin} event=${event}`);
+      },
+    });
+  }, [engine]);
+
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const telegramSettings = await settingsPersistence.loadTelegramSettings();
+        telegramNotifierRef.current.updateSettings(telegramSettings);
+      } catch {
+        // no-op: persistence read failure should not stop trading loop
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [settingsPersistence]);
+
+  // ── Periodic save of app state ────────────────────
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      const appState = await appStatePersistence.load();
+      await appStatePersistence.save({
+        ...appState,
+        selectedCoins: Array.from(engine.brains.keys()),
+        activeTradeMode: store.state.activeTradeMode,
+        paperStartingBalance: 10000,
+        equityHistory: store.state.equityHistory,
+      });
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [engine.brains.size, store.state.activeTradeMode, store.state.equityHistory]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTotalEquity(paperAdapter.getTotalEquity());
+      const now = Date.now();
+      store.addEquityPoint(now, paperAdapter.getTotalEquity());
+      forceUpdate(n => n + 1);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [paperAdapter, store]);
+
+  // Periodic diagnostics snapshot
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDiagSnapshot(diagnosticsEngine.snapshot({
+        chartPointCount: store.state.chartData.length,
+      }));
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [diagnosticsEngine, store]);
+
+  const openPositionCount = engine.getPositionManager().getOpenPositions().length;
+
+  // Subscribe to MarketDataFeed for all brains to feed chart data
+  useEffect(() => {
+    const feed = MarketDataFeed.getInstance();
+    const unsubs: (() => void)[] = [];
+    for (const brain of engine.brains.values()) {
+      const unsub = feed.subscribe(brain.coin, price => {
+        if (price.last > 0) {
+          store.addChartData(price.timestamp, price.last);
+        }
+      });
+      unsubs.push(unsub);
+    }
+    return () => { for (const u of unsubs) u(); };
+  }, [engine.brains.size]);
+
+  // ── Handlers ──────────────────────────────────────
+
+  const handleAddCoin = useCallback((coin: string) => {
+    if (engine.brains.has(coin)) return;
+    const config: TraderBrainConfig = {
+      coin, mode: 'AUTO', enabled: false,
+      maxPositionSize: 100, stopLossPercent: 2, takeProfitPercent: 5,
+      maxLeverage: 1, cooldownSeconds: 30, mlEnabled: true, minConfidence: 0.6,
+    };
+    engine.addBrain(config);
+    forceUpdate(n => n + 1);
+    logger.info(`Added brain for ${coin}`);
+  }, [engine]);
+
+  const handleRemoveCoin = useCallback((coin: string) => {
+    engine.removeBrain(coin);
+    forceUpdate(n => n + 1);
+    logger.info(`Removed brain for ${coin}`);
+  }, [engine]);
+
+  const handleSetMode = useCallback((coin: string, mode: 'AUTO' | 'MANUAL' | 'SCALPER') => {
+    const brain = engine.brains.get(coin);
+    if (brain) {
+      brain.config.mode = mode;
+      forceUpdate(n => n + 1);
+      logger.info(`Set ${coin} mode to ${mode}`);
+    }
+  }, [engine]);
+
+  const handleAnalyzeSymbol = useCallback(async (symbol: string) => {
+    const manualRuntime = engine.getManualRuntime();
+    const snapshot = await manualRuntime.analyzeSymbol(symbol);
+    store.setManualAnalysisSnapshot(snapshot);
+    forceUpdate(n => n + 1);
+  }, [engine, store]);
+
+  const handleManualBuy = useCallback(async (symbol: string) => {
+    const analysis = engine.getManualRuntime().getAnalysis();
+    if (!analysis || analysis.symbol !== symbol) return;
+    if (analysis.isStale) {
+      logger.warn('Manual buy blocked: analysis is stale');
+      return;
+    }
+    await engine.executeManualBuy(analysis, {
+      symbol,
+      analysisId: analysis.analysisId,
+      manualUserConfirmed: true,
+    });
+    forceUpdate(n => n + 1);
+  }, [engine]);
+
+  const handleManualSell = useCallback(async (symbol: string) => {
+    await engine.executeManualSell({ symbol, reason: 'MANUAL_EXIT' });
+    forceUpdate(n => n + 1);
+  }, [engine]);
+
+  const handleStartScanner = useCallback(async () => {
+    const autoRuntime = engine.getAutoRuntime();
+    logger.info('AUTO_START_REQUESTED');
+    if (autoRuntime.isRunning()) {
+      logger.warn('SCANNER_START_FAILED: SCANNER_ALREADY_RUNNING');
+      return;
+    }
+    try {
+      const settings = await settingsPersistence.loadSettings();
+      banlistRef.current = [...new Set((settings.scannerBanlist ?? settings.manualScannerBanlist ?? []).map((x) => String(x).toUpperCase().trim()).filter(Boolean))];
+      const riskGroups = settings.scannerRiskGroups ?? {
+        top_caps: true,
+        large_caps: true,
+        mid_caps: true,
+        high_risk: true,
+        very_high_risk: true,
+      };
+      const referencePeriod = settings.scannerReferencePeriod ?? '1h';
+      const universeMode = (settings.scannerUniverseMode === 'TOP_100' ? 'BINANCE_TOP_250' : settings.scannerUniverseMode ?? 'BINANCE_TOP_250') as UniverseMode;
+      logger.info(`SCANNER_RUNTIME_SETTINGS_APPLIED: source=3d_air_scanner_master universeMode=${universeMode} universeSize=${settings.scannerUniverseSize ?? 250} finalPoolSize=${settings.scannerFinalPoolSize ?? 20} refPeriod=${referencePeriod} enabledGroups=${Object.values(riskGroups).filter(Boolean).length}/${Object.keys(riskGroups).length}`);
+      autoRuntime.getScanner().setScannerConfig({
+        riskGroups,
+        referencePeriod,
+        scannerBanlist: settings.scannerBanlist ?? settings.manualScannerBanlist ?? [],
+      });
+      autoRuntime.getScanner().setExecutionLimits({
+        maxPositions: settings.maxPositions ?? 10,
+        maxEntriesPerCycle: settings.maxEntriesPerCycle ?? 2,
+        capital: (settings as any).autoTradingCapital ?? 1000,
+        capitalPerTrade: (settings as any).capitalPerCoin ?? settings.capitalPerTrade ?? 100,
+      });
+      logger.info(`CAPITAL_PER_COIN_SETTINGS_AUDIT: symbol=none mode=demo strategySource=settings userCapitalPerCoin=${(settings as any).capitalPerCoin ?? 100} resolvedCapitalPerCoin=${(settings as any).capitalPerCoin ?? settings.capitalPerTrade ?? 100} finalOrderNotionalUsd=0 qty=0 entryPrice=0 minNotional=0 maxOpenPositions=${settings.maxPositions ?? 10} availableCapital=${(settings as any).autoTradingCapital ?? 1000} usedCapitalBefore=0 usedCapitalAfter=0 reason=scanner_start_runtime_apply source=settings`);
+      autoRuntime.getScanner().setExecutionContextProviders({
+        getUsedCapital: () => engine.getPositionManager().getOpenPositions().reduce((s, p) => s + (p.avgEntryPrice * p.quantity), 0),
+        getOpenSymbols: () => engine.getPositionManager().getOpenPositions().map(p => p.coin),
+        getPendingSymbols: () => engine.getOrderLockManager().getActiveLocks().filter(l => l.side === 'BUY').map(l => l.symbol),
+      });
+      if (!Object.values(riskGroups).some(Boolean)) {
+        logger.warn('Enable at least one risk group.');
+        return;
+      }
+      logger.info('SCANNER_PUBLIC_DATA_CHECK_START');
+      if (publicDataReady) {
+        logger.info('SCANNER_PUBLIC_DATA_CHECK_SUCCESS: data already fresh from boot');
+      } else {
+        const publicClient = new BinancePublicClient();
+        const pingOk = await publicClient.ping();
+        if (!pingOk) {
+          logger.warn('SCANNER_PUBLIC_DATA_CHECK_FAILED: PUBLIC_DATA_OFFLINE');
+          logger.warn('SCANNER_START_FAILED: PUBLIC_DATA_OFFLINE');
+          return;
+        }
+        await MarketDataFeed.getInstance().fetchExchangeInfo();
+        const exchangeInfo = MarketDataFeed.getInstance().getExchangeInfo();
+        if (!exchangeInfo) {
+          logger.warn('SCANNER_PUBLIC_DATA_CHECK_FAILED: EXCHANGE_INFO_NOT_LOADED');
+          logger.warn('SCANNER_START_FAILED: EXCHANGE_INFO_NOT_LOADED');
+          return;
+        }
+        setPublicDataReady(true);
+        logger.info('SCANNER_PUBLIC_DATA_CHECK_SUCCESS');
+      }
+
+      autoRuntime.setCallbacks({
+        onCandidatesReady: (snapshot) => {
+          const prevCandidates = store.state.scannerSnapshot?.candidates?.length ?? 0;
+          const newCandidates = snapshot.candidates.length;
+          if (snapshot.emptyUniverseReason && ['WATCHLIST_EMPTY', 'ALL_RISK_GROUPS_DISABLED', 'ALL_SYMBOLS_FILTERED', 'UNKNOWN_EMPTY_UNIVERSE'].includes(snapshot.emptyUniverseReason)) {
+            store.setScannerRunning(false);
+            if (prevCandidates > 0) {
+              logger.throttled('INFO', `SCANNER_DATA_STALE: previous scan has ${prevCandidates} candidates — preserving until universe available`, 'scanner_stale', 60000);
+            }
+          }
+          if (newCandidates > 0 || prevCandidates === 0) {
+            store.setScannerSnapshot(snapshot);
+          } else {
+            const mergedSnapshot = {
+              ...snapshot,
+              candidates: store.state.scannerSnapshot?.candidates ?? [],
+            };
+            store.setScannerSnapshot(mergedSnapshot);
+            logger.throttled('INFO', `SCANNER_DATA_STALE_METADATA_UPDATED: ${prevCandidates} previous candidates preserved — ${snapshot.candidates.length} new candidates discarded, market/metadata updated`, 'scanner_stale_preserve', 30000);
+          }
+          if (snapshot.emptyUniverseReason) {
+            logger.throttled('INFO', `SCANNER_UNIVERSE_EMPTY: reason=${snapshot.emptyUniverseReason}`, `scanner_universe_empty_${snapshot.emptyUniverseReason}`, 60000);
+          } else if ((snapshot.diagnostics.universeAfterFilterCount ?? 0) === 0) {
+            logger.throttled('INFO', 'SCANNER_UNIVERSE_EMPTY: reason=UNKNOWN', 'scanner_universe_empty_unknown', 60000);
+          }
+          forceUpdate(n => n + 1);
+        },
+        executeBuy: (candidate) => engine.executeScannerBuy(candidate),
+      });
+      await autoRuntime.start(universeMode);
+      store.setScannerRunning(true);
+      logger.info('AUTO scanner started');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`SCANNER_PUBLIC_DATA_CHECK_FAILED: MARKET_DATA_CLIENT_ERROR ${msg}`);
+      logger.warn('SCANNER_START_FAILED: MARKET_DATA_CLIENT_ERROR');
+    }
+  }, [engine, store, settingsPersistence]);
+
+  const handleScannerConfigChange = useCallback((config: {
+    riskGroups: {
+      top_caps: boolean;
+      large_caps: boolean;
+      mid_caps: boolean;
+      high_risk: boolean;
+      very_high_risk: boolean;
+    };
+    referencePeriod: '1h' | '4h' | '1d' | '1w';
+    scannerBanlist?: string[];
+  }) => {
+    if (config.scannerBanlist) banlistRef.current = [...new Set(config.scannerBanlist.map((x) => String(x).toUpperCase().trim()).filter(Boolean))];
+    engine.getAutoRuntime().getScanner().setScannerConfig(config);
+  }, [engine]);
+
+  const handleStopScanner = useCallback(async () => {
+    const autoRuntime = engine.getAutoRuntime();
+    if (autoRuntime.isRunning()) {
+      await autoRuntime.stop();
+      store.setScannerRunning(false);
+      logger.info('AUTO scanner stopped');
+    }
+  }, [engine, store]);
+
+  const handleChangeUniverse = useCallback((mode: UniverseMode) => {
+    const autoRuntime = engine.getAutoRuntime();
+    autoRuntime.getScanner().setUniverseMode(mode);
+    store.setUniverseMode(mode);
+    logger.info(`Scanner universe changed to ${mode}`);
+  }, [engine, store]);
+
+  const handleStart = useCallback(async () => {
+    await engine.start();
+    setIsRunning(true);
+    logger.info('Trading engine started');
+  }, [engine]);
+
+  const handleStop = useCallback(async () => {
+    await engine.stop();
+    setIsRunning(false);
+    logger.info('Trading engine stopped');
+  }, [engine]);
+
+  const handleEmergencyStop = useCallback(async () => {
+    for (const [, brain] of engine.brains) {
+      if (brain.position) {
+        await engine.requestManualClose(brain.coin);
+      }
+    }
+    await engine.stop();
+    setIsRunning(false);
+    logger.warn('EMERGENCY STOP activated');
+  }, [engine]);
+
+  const handleClosePosition = useCallback(async (coin: string) => {
+    await engine.requestManualClose(coin);
+    forceUpdate(n => n + 1);
+  }, [engine]);
+
+  const handleRunLiveCheck = useCallback(async () => {
+    if (!canTransitionTo(liveState, 'LIVE_CHECK_RUNNING')) return;
+    setLiveState('LIVE_CHECK_RUNNING');
+    setLiveCheckResult(null);
+    logger.info('Running live safety check...');
+
+    await new Promise(r => setTimeout(r, 1500));
+
+    const result = runLiveSafetyCheck();
+    setLiveCheckResult(result);
+
+    if (result.passed) {
+      setLiveState('LIVE_READY');
+      logger.info('Live safety check PASSED. Ready to start live.');
+    } else {
+      setLiveState('LIVE_BLOCKED');
+      logger.warn(`Live safety check BLOCKED: ${result.blockedReason}`);
+      result.details.forEach(d => logger.warn(`  - ${d}`));
+    }
+  }, [liveState]);
+
+  const handleExportTrades = useCallback(async () => {
+    const { json, filename } = await exporter.exportTrades();
+    exporter.download(json, filename);
+    logger.info(`Exported journal: ${filename}`);
+  }, [exporter]);
+
+  const handleExportML = useCallback(async () => {
+    const { json, filename } = await exporter.exportML();
+    exporter.download(json, filename);
+    logger.info(`Exported ML dataset: ${filename}`);
+  }, [exporter]);
+
+  const handleExportTraining = useCallback(async () => {
+    const { json, filename } = await exporter.exportTrainingRows();
+    exporter.download(json, filename);
+    logger.info(`Exported training rows: ${filename}`);
+  }, [exporter]);
+
+  const handleExportAdvisory = useCallback(async () => {
+    const { json, filename } = await exporter.exportAdvisoryRows();
+    exporter.download(json, filename);
+    logger.info(`Exported advisory rows: ${filename}`);
+  }, [exporter]);
+
+  const handleExportExcluded = useCallback(async () => {
+    const { json, filename } = await exporter.exportExcludedRows();
+    exporter.download(json, filename);
+    logger.info(`Exported excluded rows: ${filename}`);
+  }, [exporter]);
+
+  const handleBrainUpdate = useCallback((newBrain: import('./core/types').MLBrainModel) => {
+    setBrain(newBrain);
+    saveMLBrain(newBrain);
+    engine.getML().setBrain(newBrain);
+  }, [engine]);
+
+  const handleImportedRowsUpdate = useCallback((rows: import('./core/types').ImportedMLRow[]) => {
+    setImportedRows(rows);
+  }, []);
+
+  const handleExportBackup = useCallback(async () => {
+    const appState = await appStatePersistence.load();
+    const trades = journal.getTrades();
+    const { json, filename } = await backupService.exportFullBackup(trades, appState);
+    backupService.download(json, filename);
+    logger.info(`Exported full backup: ${filename}`);
+  }, [journal]);
+
+  const renderPage = () => {
+    switch (store.state.activeMainTab) {
+      case 'trade':
+        return (
+          <TradePage
+            engine={engine}
+            store={store}
+            onClosePosition={handleClosePosition}
+            onAddCoin={handleAddCoin}
+            onRemoveCoin={handleRemoveCoin}
+            onSetMode={handleSetMode}
+            onStart={handleStart}
+            onStop={handleStop}
+            onStartScanner={handleStartScanner}
+            onStopScanner={handleStopScanner}
+            onChangeUniverse={handleChangeUniverse}
+            onAnalyzeSymbol={handleAnalyzeSymbol}
+            onManualBuy={handleManualBuy}
+            onManualSell={handleManualSell}
+            onScannerConfigChange={handleScannerConfigChange}
+            positionBootRestoring={positionBootRestoring}
+            closedTradesBootRestoring={closedTradesBootRestoring}
+          />
+        );
+      case 'journal':
+        return <JournalPage journal={journal} />;
+      case 'ml-lab':
+        return (
+          <MLLabPage
+            journal={journal}
+            onExportML={handleExportML}
+            onExportTraining={handleExportTraining}
+            onExportAdvisory={handleExportAdvisory}
+            onExportExcluded={handleExportExcluded}
+            equityHistory={store.state.equityHistory}
+            brain={brain}
+            onBrainUpdate={handleBrainUpdate}
+            importedRows={importedRows}
+            onImportedRowsUpdate={handleImportedRowsUpdate}
+          />
+        );
+      case 'logs':
+        return <LogsPage />;
+      case 'settings':
+        return (
+          <SettingsPage
+            liveState={liveState}
+            onRunLiveCheck={handleRunLiveCheck}
+            journal={journal}
+            onExportBackup={handleExportBackup}
+            engine={engine}
+            publicDataState={{
+              ready: publicDataReady,
+              refreshing: publicDataRefreshing,
+              exchangeInfoLoaded,
+              lastUpdate: lastPublicUpdate,
+            }}
+            onRefreshPublicData={refreshPublicData}
+          />
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <AppShell
+      engine={engine}
+      activeTab={store.state.activeMainTab}
+      onTabChange={store.setMainTab}
+      isRunning={isRunning}
+      liveState={liveState}
+      liveCheckResult={liveCheckResult}
+      totalEquity={totalEquity}
+      openPositionCount={openPositionCount}
+      persistenceStatus={journal.getPersistenceStatus()}
+      onStart={handleStart}
+      onStop={handleStop}
+      onEmergencyStop={handleEmergencyStop}
+      onRunLiveCheck={handleRunLiveCheck}
+      onExportTrades={handleExportTrades}
+      onExportML={handleExportML}
+      onExportTraining={handleExportTraining}
+    >
+      {renderPage()}
+    </AppShell>
+  );
+}

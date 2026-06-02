@@ -1,0 +1,164 @@
+.air-scanner-3d {
+  position: relative;
+  height: 100%;
+  min-height: 420px;
+  overflow: hidden;
+  border-radius: 14px;
+}
+
+.air-scanner-head {
+  position: absolute;
+  z-index: 5;
+  left: 14px;
+  right: 14px;
+  top: 12px;
+  display: flex;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.legend {
+  display: flex;
+  gap: 14px;
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 8px;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--cyan);
+}
+
+.dot-locked { background: var(--yellow); }
+.dot-approved { background: var(--green); }
+.dot-capturing { background: var(--violet); }
+
+.scanner-space {
+  position: absolute;
+  inset: 0;
+  perspective: 900px;
+  transform-style: preserve-3d;
+  background:
+    radial-gradient(circle at center, rgba(0,255,255,0.16), transparent 35%),
+    radial-gradient(circle at 50% 100%, rgba(0,136,255,0.16), transparent 45%),
+    linear-gradient(180deg, #030711, #01040a);
+}
+
+.scanner-grid {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(rgba(0,234,255,0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,234,255,0.05) 1px, transparent 1px);
+  background-size: 34px 34px;
+  transform: rotateX(62deg) translateY(160px) scale(1.3);
+  opacity: 0.7;
+}
+
+.scanner-core {
+  position: absolute;
+  left: 50%;
+  top: 56%;
+  transform: translate(-50%, -50%);
+  width: 240px;
+  height: 240px;
+  pointer-events: none;
+}
+
+.capture-beam {
+  position: absolute;
+  left: 50%;
+  top: -180px;
+  width: 24px;
+  height: 360px;
+  transform: translateX(-50%);
+  background: linear-gradient(180deg, transparent, rgba(0,234,255,0.86), transparent);
+  filter: blur(4px);
+  opacity: 0.8;
+}
+
+.capture-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border: 1px solid rgba(0,234,255,0.5);
+  border-radius: 50%;
+  transform: translate(-50%, -50%) rotateX(72deg);
+}
+
+.ring-a { width: 180px; height: 180px; animation: scanner-spin 8s linear infinite; }
+.ring-b { width: 280px; height: 280px; animation: scanner-spin 14s linear reverse infinite; }
+
+.air-coin {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 74px;
+  height: 74px;
+  margin-left: -37px;
+  margin-top: -37px;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  cursor: pointer;
+  transform-style: preserve-3d;
+  will-change: transform, opacity, filter;
+}
+
+.air-coin-orb {
+  display: grid;
+  place-items: center;
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(0,234,255,0.28), rgba(5,15,35,0.88) 62%);
+  border: 1px solid rgba(0,234,255,0.32);
+  box-shadow: 0 0 22px rgba(0,234,255,0.22);
+}
+
+.air-coin-symbol {
+  font-weight: 800;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.air-coin-ticker {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.08em;
+}
+
+.air-coin-confidence {
+  color: var(--green);
+  font-size: 11px;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.air-coin-locked .air-coin-orb {
+  border-color: var(--yellow);
+  box-shadow: 0 0 30px rgba(255,209,102,0.45);
+}
+
+.air-coin-approved .air-coin-orb,
+.air-coin-capturing .air-coin-orb {
+  border-color: var(--green);
+  box-shadow: 0 0 36px rgba(66,255,136,0.5);
+}
+
+.air-coin-rejected .air-coin-orb {
+  border-color: rgba(255,77,109,0.4);
+  opacity: 0.45;
+}
+
+@keyframes scanner-spin {
+  to { transform: translate(-50%, -50%) rotateX(72deg) rotateZ(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring-a, .ring-b { animation: none; }
+}

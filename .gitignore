@@ -1,0 +1,10 @@
+node_modules/
+dist/
+target/
+cryptobud_data/
+*.db
+*.log
+*.zip
+runtime-proof*.log
+scripts/runtime-proof*.log
+.tmp-*

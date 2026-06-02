@@ -1,0 +1,23 @@
+[package]
+name = "cryptobud-v4"
+version = "4.0.0"
+description = "CryptoBud V4 - Stable Crypto Trading App"
+authors = ["CryptoBud"]
+edition = "2021"
+
+[lib]
+name = "cryptobud_v4_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[package.metadata]
+icons = ["icons/icon.ico"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }

@@ -1,0 +1,53 @@
+{
+  "name": "cryptobud-v4",
+  "private": true,
+  "version": "4.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "lint": "tsc --noEmit",
+    "test": "npx tsx src/__tests__/paper-live-parity.ts && npx tsx src/__tests__/trader-brain.test.ts && npx tsx src/__tests__/exit-engine.test.ts && npx tsx src/__tests__/journal-ml.test.ts && npx tsx src/__tests__/ui-state.test.ts && npx tsx src/__tests__/persistence.test.ts && npx tsx src/__tests__/scanner.test.ts",
+    "test:paper-live-parity": "npx tsx src/__tests__/paper-live-parity.ts",
+    "test:demo-live-parity": "npx tsx src/__tests__/paper-live-parity.ts",
+    "test:demo-live-display": "npx tsx src/__tests__/demo-live-display.test.ts",
+    "test:trader-brain": "npx tsx src/__tests__/trader-brain.test.ts",
+    "test:exit-engine": "npx tsx src/__tests__/exit-engine.test.ts",
+    "test:journal-ml": "npx tsx src/__tests__/journal-ml.test.ts",
+    "test:ui-state": "npx tsx src/__tests__/ui-state.test.ts",
+    "test:persistence": "npx tsx src/__tests__/persistence.test.ts",
+    "test:scanner": "npx tsx src/__tests__/scanner.test.ts",
+    "test:scanner-universe": "npx tsx src/__tests__/scanner-universe.test.ts",
+    "test:diagnostics": "npx tsx src/__tests__/diagnostics.test.ts",
+    "test:settings": "npx tsx src/__tests__/settings.test.ts",
+    "test:position-locks": "npx tsx src/__tests__/position-locks.test.ts",
+    "test:market-data": "npx tsx src/__tests__/market-data.test.ts",
+    "test:risk-engine": "npx tsx src/__tests__/risk-engine.test.ts",
+    "test:manual": "npx tsx src/__tests__/manual.test.ts",
+    "test:scalper": "npx tsx src/__tests__/scalper.test.ts",
+    "test:telegram-notifications": "npx tsx src/__tests__/telegram-notifications.test.ts",
+    "test:settings-ui": "npx tsx src/__tests__/settings-ui.test.ts",
+    "test:trade-ui": "npx tsx src/__tests__/air-scanner-ui.test.ts",
+    "test:ui-polish": "npx tsx src/__tests__/ui-polish.test.ts",
+    "test:air-scanner-ui": "npx tsx src/__tests__/air-scanner-ui.test.ts",
+    "test:ml-trainer": "npx tsx src/__tests__/ml-trainer.test.ts",
+    "test:paper-simulation": "npx tsx src/__tests__/paper-simulation.test.ts"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^25.9.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.22.3",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0"
+  }
+}
