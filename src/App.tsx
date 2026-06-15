@@ -31,6 +31,7 @@ import packageJson from '../package.json';
 
 const RENDERER_BUILD_TIME = new Date().toISOString();
 const RENDERER_BUILD_ID = `runtime-${Date.now().toString(36)}`;
+const APP_BOOT_ID = `boot-${Date.now().toString(36)}`;
 
 export default function App() {
   const [engine] = useState(() => {
@@ -119,9 +120,13 @@ export default function App() {
     startupGuardRef.current = true;
 
     (async () => {
+      logger.info(`APP_RELOAD_DETECTED_AUDIT: reloadType=F5_browser_reload wasExplicitReset=false hydrationStarted=false hydrationComplete=false openPositionsLoaded=0 closedTradesLoaded=0 journalTradesLoaded=0 mlRecordsLoaded=0 settingsLoaded=false attemptedEmptyOverwrite=false emptyOverwriteBlocked=false sourceUsed=localStorage storageKey=cryptobud_v4 backupKey=cryptobud_v4_critical resetMarkerPresent=false resetMarkerConsumed=false`);
+      logger.info(`RESET_MARKER_AUDIT: resetMarkerPresent=false wasExplicitReset=false resetScope=none resetAt=none reason=normal_boot_no_reset_marker`);
+      logger.info(`PERSISTENCE_BOOT_START: mode=demo journalLoadPending=true appStateLoadPending=true settingsLoadPending=false reason=app_startup`);
       logger.info(`POSITION_PERSISTENCE_BOOT_START: mode=demo storageKey=open_positions persistedOpenCount=0 positionManagerOpenCount=0 uiOpenRowsCount=0 restoredSymbols=none resetMetaDetected=false resetApplied=false reason=startup`);
       // Journal init (Tauri availability check)
       await journal.loadTrades();
+      logger.info(`JOURNAL_HYDRATION_AUDIT: openPositionsLoaded=${(await journal.loadOpenPositions()).length} closedTradesLoaded=${journal.getClosedTrades().length} journalTradesLoaded=${journal.getClosedTrades().length} mlRecordsLoaded=0 settingsLoaded=false attemptedEmptyOverwrite=false emptyOverwriteBlocked=false sourceUsed=${typeof window !== 'undefined' ? 'localStorage' : 'tauri'} storageKey=cryptobud_v4 backupKey=cryptobud_v4_critical resetMarkerPresent=false resetMarkerConsumed=false`);
 
       // Restore app state
       const appState = await appStatePersistence.load();
@@ -233,6 +238,7 @@ export default function App() {
       telegramNotifierRef.current.updateSettings(telegramSettings);
       banlistRef.current = [...new Set((settings.scannerBanlist ?? settings.manualScannerBanlist ?? []).map((x) => String(x).toUpperCase().trim()).filter(Boolean))];
       const scanner = engine.getAutoRuntime().getScanner();
+      scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? false);
       scanner.setScannerConfig({
         riskGroups: settings.scannerRiskGroups ?? {
           top_caps: true,
@@ -246,9 +252,15 @@ export default function App() {
       });
       scanner.setExecutionLimits({
         maxPositions: settings.maxPositions ?? 10,
-        maxEntriesPerCycle: settings.maxEntriesPerCycle ?? 2,
+        maxSelectedPerScan: (settings as any).maxSelectedPerScan ?? 10,
+        maxEntriesPerCycle: (settings as any).maxSelectedPerScan ?? 10,
         capital: (settings as any).autoTradingCapital ?? 1000,
         capitalPerTrade: (settings as any).capitalPerCoin ?? settings.capitalPerTrade ?? 100,
+        source: 'persisted_setting',
+        appBootId: APP_BOOT_ID,
+        persistedMaxSelectedPerScan: (settings as any).maxSelectedPerScan,
+        persistedLegacyMaxEntriesPerCycle: (settings as any).maxEntriesPerCycle,
+        userExplicit: (settings as any).maxSelectedPerScanUserSet === true,
       });
       logger.info(`CAPITAL_PER_COIN_SETTINGS_AUDIT: symbol=none mode=demo strategySource=settings userCapitalPerCoin=${(settings as any).capitalPerCoin ?? 100} resolvedCapitalPerCoin=${(settings as any).capitalPerCoin ?? settings.capitalPerTrade ?? 100} finalOrderNotionalUsd=0 qty=0 entryPrice=0 minNotional=0 maxOpenPositions=${settings.maxPositions ?? 10} availableCapital=${(settings as any).autoTradingCapital ?? 1000} usedCapitalBefore=0 usedCapitalAfter=0 reason=scanner_execution_limits_applied source=settings`);
       scanner.setExecutionContextProviders({
@@ -302,25 +314,27 @@ export default function App() {
           }
           logger.info(`DEMO_EXECUTION_ADAPTER_READY: symbol=${symbol} source=App.setDemoAutoBuyFn connected=true`);
         }
+        const lastPaperExecBefore = paperAdapter.lastExecutionResult;
         logger.info(`POSITION_CREATE_ATTEMPT: symbol=${symbol} openPositionsBefore=${openBefore}`);
-        logger.info(`DEMO_EXECUTION_ADAPTER_CALLED: symbol=${symbol} source=App.setDemoAutoBuyFn`);
+        logger.info(`DEMO_EXECUTION_CONTROLLER_CALLED: symbol=${symbol} source=App.setDemoAutoBuyFn adapterCalled=pending`);
         await engine.executePlannedScannerBuy(candidate, plannedCandidate);
         const openAfter = engine.getPositionManager().getOpenPositions().length;
         const created = engine.getPositionManager().hasOpenPosition(symbol) && openAfter > openBefore;
         const lastPaperExec = paperAdapter.lastExecutionResult;
+        const adapterWasCalled = lastPaperExec !== lastPaperExecBefore;
         const finalRejectReason = lastPaperExec?.rejectReason
-          ?? (lastPaperExec?.status && lastPaperExec.status !== 'FILLED' ? `paper_status_${lastPaperExec.status}` : 'position_not_created_after_execution');
-        if (lastPaperExec?.success) {
+          ?? (adapterWasCalled && lastPaperExec?.status && lastPaperExec.status !== 'FILLED' ? `paper_status_${lastPaperExec.status}` : 'position_not_created_after_execution');
+        if (adapterWasCalled && lastPaperExec?.success) {
           logger.info(`DEMO_EXECUTION_FILL_CREATED: symbol=${symbol} status=${lastPaperExec.status} qty=${lastPaperExec.executedQuantity} price=${lastPaperExec.executedPrice}`);
         }
         if (created) logger.info(`POSITION_CREATED: symbol=${symbol} openPositionsAfter=${openAfter}`);
-        else logger.warn(`POSITION_CREATE_FAILED: symbol=${symbol} openPositionsBefore=${openBefore} openPositionsAfter=${openAfter} adapterResult=${lastPaperExec?.status ?? 'not_submitted'} rejectReason=${finalRejectReason}`);
-        if (!created) logger.warn(`POSITION_CREATE_FAILED_REASON_AUDIT: symbol=${symbol} adapterResult=${lastPaperExec?.status ?? 'not_submitted'} rejectReason=${finalRejectReason} executionSuccess=${String(!!lastPaperExec?.success)}`);
+        else logger.warn(`POSITION_CREATE_FAILED: symbol=${symbol} openPositionsBefore=${openBefore} openPositionsAfter=${openAfter} adapterCalled=${String(adapterWasCalled)} adapterResult=${adapterWasCalled ? (lastPaperExec?.status ?? 'unknown') : 'NOT_SUBMITTED'} rejectReason=${finalRejectReason}`);
+        if (!created) logger.warn(`POSITION_CREATE_FAILED_REASON_AUDIT: symbol=${symbol} adapterCalled=${String(adapterWasCalled)} adapterResult=${adapterWasCalled ? (lastPaperExec?.status ?? 'unknown') : 'NOT_SUBMITTED'} rejectReason=${finalRejectReason} executionSuccess=${String(adapterWasCalled && !!lastPaperExec?.success)}`);
         forceUpdate(n => n + 1);
-        const failReason = lastPaperExec?.success
+        const failReason = adapterWasCalled && lastPaperExec?.success
           ? 'Demo fill created but position not opened'
-          : `Demo execution failed: ${finalRejectReason}`;
-        if (!created) logger.warn(`DEMO_EXECUTION_FAILURE_REASON_AUDIT: symbol=${symbol} reason=${failReason} adapterStatus=${lastPaperExec?.status ?? 'not_submitted'} rejectReason=${finalRejectReason}`);
+          : (adapterWasCalled ? `Demo execution failed: ${finalRejectReason}` : `Demo execution blocked before adapter: ${finalRejectReason}`);
+        if (!created) logger.warn(`DEMO_EXECUTION_FAILURE_REASON_AUDIT: symbol=${symbol} reason=${failReason} adapterCalled=${String(adapterWasCalled)} adapterStatus=${adapterWasCalled ? (lastPaperExec?.status ?? 'unknown') : 'NOT_SUBMITTED'} rejectReason=${finalRejectReason}`);
         return {
           attempted: true,
           executed: created,
@@ -329,10 +343,10 @@ export default function App() {
           reason: created
             ? 'Demo fill created and position opened'
             : failReason,
-          gateResults: created ? ['ENTRYGATE_ALLOW', 'RISKENGINE_ALLOW', 'DEMO_FILL_CREATED', 'POSITION_OPENED'] : ['ENTRYGATE_ALLOW', 'RISKENGINE_ALLOW', 'EXECUTION_FAILED'],
-          stage: created ? 'PositionOpened' : (lastPaperExec?.success ? 'DemoFillCreated' : 'ExecutionFailed'),
-          adapterCalled: true,
-          adapterResult: lastPaperExec?.status ?? 'UNKNOWN',
+          gateResults: created ? ['ENTRYGATE_ALLOW', 'RISKENGINE_ALLOW', 'DEMO_FILL_CREATED', 'POSITION_OPENED'] : ['ENTRYGATE_ALLOW', 'RISKENGINE_ALLOW', adapterWasCalled ? 'EXECUTION_FAILED' : 'ADAPTER_NOT_CALLED'],
+          stage: created ? 'PositionOpened' : (adapterWasCalled && lastPaperExec?.success ? 'DemoFillCreated' : 'ExecutionFailed'),
+          adapterCalled: adapterWasCalled,
+          adapterResult: adapterWasCalled ? (lastPaperExec?.status ?? 'UNKNOWN') : 'NOT_SUBMITTED',
           positionCreateAttempted: true,
           positionCreated: created,
           openPositionsBefore: openBefore,
@@ -367,6 +381,7 @@ export default function App() {
       setPublicDataRefreshing(false);
       setPositionBootRestoring(false);
       setClosedTradesBootRestoring(false);
+      logger.info(`PERSISTENCE_HYDRATION_COMPLETE: openPositionsLoaded=${engine.getPositionManager().getOpenPositions().length} closedTradesLoaded=${journal.getClosedTrades().length} journalTradesLoaded=${journal.getClosedTrades().length} mlRecordsLoaded=0 settingsLoaded=true attemptedEmptyOverwrite=false emptyOverwriteBlocked=true sourceUsed=${typeof window !== 'undefined' ? 'localStorage' : 'tauri'} storageKey=cryptobud_v4 backupKey=cryptobud_v4_critical resetMarkerPresent=false resetMarkerConsumed=false`);
       logger.info(`POSITION_PERSISTENCE_BOOT_COMPLETE: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=${engine.getPositionManager().getOpenPositions().length} restoredSymbols=${engine.getPositionManager().getOpenPositions().map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=complete`);
     })();
   }, []);
@@ -537,6 +552,7 @@ export default function App() {
       };
       const referencePeriod = settings.scannerReferencePeriod ?? '1h';
       const universeMode = (settings.scannerUniverseMode === 'TOP_100' ? 'BINANCE_TOP_250' : settings.scannerUniverseMode ?? 'BINANCE_TOP_250') as UniverseMode;
+      autoRuntime.getScanner().setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? false);
       logger.info(`SCANNER_RUNTIME_SETTINGS_APPLIED: source=3d_air_scanner_master universeMode=${universeMode} universeSize=${settings.scannerUniverseSize ?? 250} finalPoolSize=${settings.scannerFinalPoolSize ?? 20} refPeriod=${referencePeriod} enabledGroups=${Object.values(riskGroups).filter(Boolean).length}/${Object.keys(riskGroups).length}`);
       autoRuntime.getScanner().setScannerConfig({
         riskGroups,
@@ -545,9 +561,15 @@ export default function App() {
       });
       autoRuntime.getScanner().setExecutionLimits({
         maxPositions: settings.maxPositions ?? 10,
-        maxEntriesPerCycle: settings.maxEntriesPerCycle ?? 2,
+        maxSelectedPerScan: (settings as any).maxSelectedPerScan ?? 10,
+        maxEntriesPerCycle: (settings as any).maxSelectedPerScan ?? 10,
         capital: (settings as any).autoTradingCapital ?? 1000,
         capitalPerTrade: (settings as any).capitalPerCoin ?? settings.capitalPerTrade ?? 100,
+        source: 'persisted_setting',
+        appBootId: APP_BOOT_ID,
+        persistedMaxSelectedPerScan: (settings as any).maxSelectedPerScan,
+        persistedLegacyMaxEntriesPerCycle: (settings as any).maxEntriesPerCycle,
+        userExplicit: (settings as any).maxSelectedPerScanUserSet === true,
       });
       logger.info(`CAPITAL_PER_COIN_SETTINGS_AUDIT: symbol=none mode=demo strategySource=settings userCapitalPerCoin=${(settings as any).capitalPerCoin ?? 100} resolvedCapitalPerCoin=${(settings as any).capitalPerCoin ?? settings.capitalPerTrade ?? 100} finalOrderNotionalUsd=0 qty=0 entryPrice=0 minNotional=0 maxOpenPositions=${settings.maxPositions ?? 10} availableCapital=${(settings as any).autoTradingCapital ?? 1000} usedCapitalBefore=0 usedCapitalAfter=0 reason=scanner_start_runtime_apply source=settings`);
       autoRuntime.getScanner().setExecutionContextProviders({

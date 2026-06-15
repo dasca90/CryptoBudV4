@@ -11,6 +11,7 @@ import { OpenPositionsPanel } from "./OpenPositionsPanel";
 import { ClosedPositionsPanel } from "./ClosedPositionsPanel";
 import { CandidatePoolSummaryPanel } from "./CandidatePoolSummaryPanel";
 import { MarketGroupSummaryCard } from "./MarketGroupSummaryCard";
+import { ExecutionInsightsCard } from "./ExecutionInsightsCard";
 import { TradingParametersCard } from "./TradingParametersCard";
 import { MicroScalperPanel } from "./MicroScalperPanel";
 import { getTabSymbol } from "../../lib/ui/uiSymbolMapper";
@@ -129,7 +130,7 @@ export function TradeV4Page(props: {
             <ControlTowerPanel
               scannerRunning={props.model.scannerRunning}
               candidateCount={props.model.candidates.length}
-              engineReviewCount={props.model.candidates.filter((c) => c.engineState === "locked").length}
+              engineReviewCount={props.model.executionPoolSize ?? props.model.candidates.filter((c) => c.finalExecutable === true || c.buyAllowed === true).length}
               openCount={props.model.openPositions.length}
               closedTodayCount={props.model.closedPositions.length}
               capital={props.model.capital} usedCapital={props.model.usedCapital}
@@ -179,13 +180,15 @@ export function TradeV4Page(props: {
           </div>
         </div>
 
-        {/* ── MAIN CENTER ── */}
-        <div className="trade-v4-center">
-          <div className="center-top-v4" data-testid="trade-v4-center-top">
+        {/* ── MAIN CENTER — 2x2 Dashboard Grid ── */}
+        <div className="trade-v4-center" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '2fr 1fr', gap: 6, overflow: 'hidden', minHeight: 0 }}>
+          {/* Top-Left: Scanner 3D */}
+          <div style={{ overflow: 'hidden', minHeight: 120, height: '100%' }}>
             <div
               ref={scannerRef}
               className={`scanner-v3 panel panel-shell panel-shell-scanner scanner-mode-${scannerMode}`}
               data-testid="air-scanner-3d-panel"
+              style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
             >
               <div className="scanner-toolbar">
                 <div className="panel-title">Scanner Size</div>
@@ -215,13 +218,16 @@ export function TradeV4Page(props: {
                 />
               )}
             </div>
-            <div className="open-v4" data-testid="open-positions-workspace">
-              <OpenPositionsPanel positions={props.model.openPositions} restoring={props.model.restoringOpenPositions} />
-            </div>
           </div>
 
-          <div className="center-bottom-v4" data-testid="trade-v4-center-bottom">
-            <div className="pool-v3 panel-shell panel-shell-candidate" data-testid="candidate-pool-panel">
+          {/* Top-Right: Open Positions */}
+          <div className="open-v4" data-testid="open-positions-workspace" style={{ overflow: 'hidden', minHeight: 120 }}>
+            <OpenPositionsPanel positions={props.model.openPositions} restoring={props.model.restoringOpenPositions} />
+          </div>
+
+          {/* Bottom-Left: Candidate Pool + Execution Insights stacked */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, overflow: 'hidden', minHeight: 160 }}>
+            <div className="pool-v3 panel-shell panel-shell-candidate" data-testid="candidate-pool-panel" style={{ flexShrink: 0 }}>
               <CandidatePoolSummaryPanel
                 candidates={props.model.candidates} executionPoolSize={props.model.executionPoolSize}
                 watchPoolSize={props.model.watchPoolSize} nearMissPoolSize={props.model.nearMissPoolSize}
@@ -229,11 +235,21 @@ export function TradeV4Page(props: {
                 paperAutoEnabled={props.model.paperAutoEnabled}
                 manualStrategy={props.parameters.strategySource === 'manual_override' && props.parameters.strategy !== 'smart' ? props.parameters.strategy : null}
                 marketGroupSummary={null}
+                executionPlan={props.model.executionPlan ?? null}
               />
             </div>
-            <div className="closed-v4" data-testid="closed-positions-workspace">
-              <ClosedPositionsPanel positions={props.model.closedPositions} restoring={props.closedTradesRestoring} />
+            <div style={{ flex: 1, minHeight: 60, overflow: 'hidden' }}>
+              <ExecutionInsightsCard
+                noBuyDisplay={props.model.noBuyDisplay}
+                candidates={props.model.candidates}
+                executionPlan={props.model.executionPlan ?? null}
+              />
             </div>
+          </div>
+
+          {/* Bottom-Right: Closed Positions */}
+          <div className="closed-v4" data-testid="closed-positions-workspace" style={{ overflow: 'hidden', minHeight: 160 }}>
+            <ClosedPositionsPanel positions={props.model.closedPositions} restoring={props.closedTradesRestoring} />
           </div>
         </div>
 

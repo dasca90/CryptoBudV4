@@ -150,12 +150,12 @@ export const ClosedPositionsPanel = memo(function ClosedPositionsPanel(props: { 
                     <td>{p.openedAtLabel ? (p.openedAtLabel.replace('T', ' ').slice(0, 19)) : 'n/a'}</td>
                     <td>{p.closedAtLabel ? (p.closedAtLabel.replace('T', ' ').slice(0, 19)) : 'n/a'}</td>
                     <td>{p.durationLabel}</td>
-                    <td><span className={`v3-pill ${closeReasonTone(p.closeReason)}`}>{p.closeReason}</span></td>
+                    <td><span className={`v3-pill ${closeReasonTone(p.closeReason)}`}>{p.exitReasonDisplay ?? p.closeReason}</span></td>
                     <td>{p.refPriceAtEntry != null ? p.refPriceAtEntry.toFixed(6) : (p.pnlBreakdown?.entryPrice != null ? Number(p.pnlBreakdown.entryPrice).toFixed(6) : (p.entryRule ?? 'n/a'))}</td>
                     <td>{p.dipReboundLabel?.split('/')[0]?.trim() ?? '--'}</td>
                     <td>{p.dipReboundLabel?.split('/')[1]?.trim() ?? '--'}</td>
                     <td>{p.groupTrendAtEntry ?? p.marketTrendAtEntry ?? '--'}</td>
-                    <td>{p.closeReason?.toLowerCase().includes('tp') ? 'tp trigger hit' : p.closeReason?.toLowerCase().includes('sl') ? 'stop trigger hit' : 'closed by plan'}</td>
+                    <td>{p.exitReasonDisplay ?? (p.closeReason?.toLowerCase().includes('tp') ? 'tp trigger hit' : p.closeReason?.toLowerCase().includes('sl') ? 'stop trigger hit' : 'closed by plan')}</td>
                     {detailed && <td>{p.tp1Pct != null ? `${p.tp1Pct.toFixed(2)}%` : (p.riskSnapshotStatus ? `${p.riskSnapshotStatus} / TP1 SNAPSHOT MISSING` : 'n/a')}</td>}
                     {detailed && <td>{typeof p.tp1TargetPrice === 'number' ? p.tp1TargetPrice.toFixed(6) : (p.riskSnapshotStatus ? `${p.riskSnapshotStatus} / TP1 SNAPSHOT MISSING` : 'n/a')}</td>}
                     {detailed && <td>{typeof p.tp1HitPrice === 'number' ? p.tp1HitPrice.toFixed(6) : (p.closeReason === 'TP1_FIXED' ? p.exitPrice.toFixed(6) : 'n/a')}</td>}

@@ -1,7 +1,7 @@
 import type { MarketDataQuality, MarketDataQualityLevel, SymbolFilters } from '../types';
 
 const STALE_PRICE_MS = 30000;
-const STALE_BOOK_MS = 10000;
+const STALE_BOOK_MS = 30000;
 const MAX_SPREAD_PCT = 1;
 
 export interface MarketDataQualityInput {

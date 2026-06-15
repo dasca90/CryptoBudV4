@@ -139,6 +139,14 @@ export function TradePage({
     scannerUniverseMode: 'BINANCE_TOP_250',
     scannerUniverseSize: 250,
     scannerFinalPoolSize: 20,
+    scannerCandidatePoolSize: 20,
+    min24hQuoteVolumeUsdt: 100000,
+    maxSymbolsScanned: 100,
+    momentumWeight: 0.55,
+    volumeSurgeWeight: 0.25,
+    breakoutWeight: 0.20,
+    newMoverBonus: 18,
+    enableNewMoverBonus: true,
     scannerBanlist: DEFAULT_BANNED_SYMBOLS,
     maxSpreadPct: 0.35,
     maxSlippagePct: 0.25,
@@ -150,7 +158,9 @@ export function TradePage({
     maxOverextensionPct: 5,
     requirePullbackAfterPump: true,
     bollingerOverextensionGuard: true,
-    maxEntriesPerCycle: 4,
+    maxEntriesPerCycle: 10,
+    maxSelectedPerScan: 10,
+    maxSelectedPerScanUserSet: false,
     maxEntryGateAttemptsPerScan: 10,
     maxEntriesPerCoinPerDay: 2,
     cooldownAfterBuyMs: 30000,
@@ -205,7 +215,33 @@ export function TradePage({
         trailPullbackPct: airParams.trailPullbackPct,
       });
     }
-  }, [airParams.strategySource, airParams.entryConfirmationMode, airParams.strategy, airParams.maxSpreadPct, airParams.maxSlippagePct, airParams.maxTotalEntryCostPct, airParams.maxPriceAgeMs, airParams.tp1Pct, airParams.tp2Pct, airParams.stopLossPct, airParams.dynamicTrailingEnabled, airParams.trailPullbackPct, engine]);
+    if (scanner && typeof scanner.setScannerRankingConfig === 'function') {
+      scanner.setScannerRankingConfig({
+        scannerCandidatePoolSize: airParams.scannerCandidatePoolSize,
+        min24hQuoteVolumeUsdt: airParams.min24hQuoteVolumeUsdt,
+        maxSymbolsScanned: airParams.maxSymbolsScanned,
+        momentumWeight: airParams.momentumWeight,
+        volumeSurgeWeight: airParams.volumeSurgeWeight,
+        breakoutWeight: airParams.breakoutWeight,
+        newMoverBonus: airParams.newMoverBonus,
+        enableNewMoverBonus: airParams.enableNewMoverBonus,
+        source: 'trade_page_parameters',
+        hydrated: true,
+      });
+    }
+    if (scanner && typeof scanner.setExecutionLimits === 'function') {
+      scanner.setExecutionLimits({
+        maxPositions: airParams.maxOpenPositions,
+        maxSelectedPerScan: airParams.maxSelectedPerScan,
+        maxEntriesPerCycle: airParams.maxSelectedPerScan,
+        capital: airParams.autoTradingCapital,
+        capitalPerTrade: airParams.capitalPerCoin,
+        source: 'ui_setting',
+        uiValue: airParams.maxSelectedPerScan,
+        userExplicit: airParams.maxSelectedPerScanUserSet === true,
+      });
+    }
+  }, [airParams.strategySource, airParams.entryConfirmationMode, airParams.strategy, airParams.maxSpreadPct, airParams.maxSlippagePct, airParams.maxTotalEntryCostPct, airParams.maxPriceAgeMs, airParams.tp1Pct, airParams.tp2Pct, airParams.stopLossPct, airParams.dynamicTrailingEnabled, airParams.trailPullbackPct, airParams.scannerCandidatePoolSize, airParams.min24hQuoteVolumeUsdt, airParams.maxSymbolsScanned, airParams.momentumWeight, airParams.volumeSurgeWeight, airParams.breakoutWeight, airParams.newMoverBonus, airParams.enableNewMoverBonus, airParams.maxOpenPositions, airParams.maxSelectedPerScan, airParams.autoTradingCapital, airParams.capitalPerCoin, engine]);
 
   useEffect(() => {
     (async () => {
@@ -243,6 +279,17 @@ export function TradePage({
         scannerUniverseMode,
         scannerUniverseSize,
         scannerFinalPoolSize,
+        scannerCandidatePoolSize: (s as any).scannerCandidatePoolSize ?? prev.scannerCandidatePoolSize,
+        min24hQuoteVolumeUsdt: (s as any).min24hQuoteVolumeUsdt ?? prev.min24hQuoteVolumeUsdt,
+        maxSymbolsScanned: (s as any).maxSymbolsScanned ?? prev.maxSymbolsScanned,
+        maxSelectedPerScan: (s as any).maxSelectedPerScan ?? 10,
+        maxEntriesPerCycle: (s as any).maxSelectedPerScan ?? 10,
+        maxSelectedPerScanUserSet: (s as any).maxSelectedPerScanUserSet === true,
+        momentumWeight: (s as any).momentumWeight ?? prev.momentumWeight,
+        volumeSurgeWeight: (s as any).volumeSurgeWeight ?? prev.volumeSurgeWeight,
+        breakoutWeight: (s as any).breakoutWeight ?? prev.breakoutWeight,
+        newMoverBonus: (s as any).newMoverBonus ?? prev.newMoverBonus,
+        enableNewMoverBonus: (s as any).enableNewMoverBonus ?? prev.enableNewMoverBonus,
         scannerBanlist,
         autoTradingCapital: (s as any).autoTradingCapital ?? prev.autoTradingCapital,
         capitalPerCoin: (s as any).capitalPerCoin ?? s.capitalPerTrade ?? prev.capitalPerCoin,
@@ -308,7 +355,9 @@ export function TradePage({
       maxTotalEntryCostPct: airParams.maxTotalEntryCostPct,
       maxPriceAgeMs: airParams.maxPriceAgeMs,
       antiFomoMode: airParams.antiFomoMode,
-      maxEntriesPerCycle: airParams.maxEntriesPerCycle,
+      maxEntriesPerCycle: airParams.maxSelectedPerScan,
+      maxSelectedPerScan: airParams.maxSelectedPerScan,
+      maxSelectedPerScanUserSet: airParams.maxSelectedPerScanUserSet === true,
       maxEntryGateAttemptsPerScan: airParams.maxEntryGateAttemptsPerScan,
       maxEntriesPerCoinPerDay: airParams.maxEntriesPerCoinPerDay,
       cooldownAfterBuyMs: airParams.cooldownAfterBuyMs,
@@ -320,6 +369,16 @@ export function TradePage({
       manualDipperSetup: airParams.manualDipperSetup as any,
       updatedAt: new Date().toISOString(),
     } as any);
+    engine.getAutoRuntime()?.getScanner()?.setExecutionLimits?.({
+      maxPositions: airParams.maxOpenPositions,
+      maxSelectedPerScan: airParams.maxSelectedPerScan,
+      maxEntriesPerCycle: airParams.maxSelectedPerScan,
+      capital: airParams.autoTradingCapital,
+      capitalPerTrade: airParams.capitalPerCoin,
+      source: 'ui_setting',
+      uiValue: airParams.maxSelectedPerScan,
+      userExplicit: airParams.maxSelectedPerScanUserSet === true,
+    });
     logger.info(`MANUAL_DIPPER_SETUP_SAVE_SUCCESS: momentumMinReboundPct=${airParams.manualDipperSetup.momentumMinReboundPct} balancedMinDipPct=${airParams.manualDipperSetup.balancedMinDipPct} balancedMinReboundPct=${airParams.manualDipperSetup.balancedMinReboundPct} dipReboundMinDipPct=${airParams.manualDipperSetup.dipReboundMinDipPct} dipReboundMinReboundPct=${airParams.manualDipperSetup.dipReboundMinReboundPct} conservativeMinDipPct=${airParams.manualDipperSetup.conservativeMinDipPct} conservativeMinReboundPct=${airParams.manualDipperSetup.conservativeMinReboundPct}`);
     logger.info(`MANUAL_DIPPER_SETUP_SETTINGS_AUDIT: autoBotsOn=${String(paperAutoEnabled)} strategySource=${airParams.strategySource} source=trade_parameters`);
     onScannerConfigChange?.({
@@ -457,7 +516,7 @@ export function TradePage({
           parameters={airParams}
           onChangeParameters={(next) => {
             const SAFETY_KEYS: (keyof TradingParametersView)[] = [
-              'maxOpenPositions', 'maxEntriesPerCycle', 'maxEntryGateAttemptsPerScan',
+              'maxOpenPositions', 'maxSelectedPerScan', 'maxEntriesPerCycle', 'maxEntryGateAttemptsPerScan',
               'maxEntriesPerCoinPerDay', 'autoTradingCapital', 'capitalPerCoin',
             ];
             for (const key of SAFETY_KEYS) {

@@ -1,4 +1,4 @@
-﻿import type { Position, ScannerCandidate, ScannerSnapshot, TradeRecord } from "../../core/types";
+﻿import type { CloseSnapshot, Position, ScannerCandidate, ScannerSnapshot, TradeRecord } from "../../core/types";
 import type { TradeV4CandidateView, TradeV4ClosedPositionView, TradeV4OpenPositionView, TradeV4PageModel } from "../../components/trade-v4/types";
 import { logger } from "../../utils/logger";
 import { resolveTradeSourceLabel } from "../../core/notifications/trade-source";
@@ -622,6 +622,54 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
   };
 }
 
+export function buildExitReasonDisplay(input: {
+  exitReason: string;
+  tp1Pct?: number | null;
+  slPct?: number | null;
+  trailStartPct?: number | null;
+  trailPullbackPct?: number | null;
+  cs?: CloseSnapshot;
+  snapshotAvailable?: boolean;
+}): string {
+  const r = String(input.exitReason ?? '').toUpperCase();
+  const tp1 = Number.isFinite(input.tp1Pct) ? input.tp1Pct! : null;
+  const sl = Number.isFinite(input.slPct) ? input.slPct! : null;
+  const trailStart = Number.isFinite(input.trailStartPct) ? input.trailStartPct! : null;
+  const trailPullback = Number.isFinite(input.trailPullbackPct) ? input.trailPullbackPct! : null;
+  const snapshotMissing = input.snapshotAvailable === false;
+  const missTag = snapshotMissing ? ' (snapshot missing)' : '';
+  if (r.includes('TP1_FIXED') || r.includes('TP1_HIT')) {
+    return tp1 != null ? `TP1 Hit (+${tp1.toFixed(2)}%)` : `TP1 Hit${missTag}`;
+  }
+  if (r.includes('TP2_FIXED') || r.includes('TP2_HIT')) {
+    const tp2 = Number.isFinite((input.cs as any)?.tp2Percent) ? (input.cs as any).tp2Percent : null;
+    return tp2 != null ? `TP2 Hit (+${tp2.toFixed(2)}%)` : `TP2 Hit${missTag}`;
+  }
+  if (r.includes('STOP_LOSS') || r.includes('SL')) {
+    return sl != null ? `Stop Loss (-${sl.toFixed(2)}%)` : `Stop Loss${missTag}`;
+  }
+  if (r.includes('DYNAMIC_TRAIL') || r.includes('TRAIL')) {
+    if (trailStart != null && trailPullback != null) {
+      return `Trailing Stop (+${trailStart.toFixed(2)}% / pullback ${trailPullback.toFixed(2)}%)`;
+    }
+    if (trailStart != null) return `Trailing Stop (+${trailStart.toFixed(2)}%)${missTag}`;
+    return `Trailing Stop${missTag}`;
+  }
+  if (r.includes('MANUAL') || r.includes('MANUAL_EXIT')) {
+    return 'Manual Close';
+  }
+  if (r.includes('INVALID_PRICE') || r.includes('EMERGENCY')) {
+    return 'Emergency Close';
+  }
+  if (r.includes('TIME_BASED')) {
+    return 'Time-Based Exit';
+  }
+  if (r === 'CLOSED') {
+    return 'Closed' + missTag;
+  }
+  return input.exitReason ?? 'Unknown';
+}
+
 export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4ClosedPositionView {
   const sourceResolved = resolveTradeSourceLabel(trade);
   const quality = trade.mlQuality?.dataQuality ?? "UNKNOWN";
@@ -663,6 +711,20 @@ export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4C
   const riskTp1TargetPrice = finiteNumber((riskParams as any)?.tp1TargetPrice);
   const riskTp2Pct = finiteNumber((riskParams as any)?.tp2Pct);
   const riskSlPct = finiteNumber((riskParams as any)?.slPct);
+  const riskTrailStartPct = finiteNumber((riskParams as any)?.trailStartPct);
+  const riskTrailPullbackPct = finiteNumber((riskParams as any)?.trailPullbackPct);
+  const riskSnapshotPresentForDisplay = !!riskParams;
+  const exitReasonRaw = cs?.exitReason ?? trade.status;
+  const resolvedExitReasonDisplay = buildExitReasonDisplay({
+    exitReason: exitReasonRaw,
+    tp1Pct: riskTp1Pct,
+    slPct: riskSlPct,
+    trailStartPct: riskTrailStartPct,
+    trailPullbackPct: riskTrailPullbackPct,
+    cs: cs ?? undefined,
+    snapshotAvailable: riskSnapshotPresentForDisplay,
+  });
+  logger.info(`CLOSED_POSITION_EXIT_REASON_DISPLAY_AUDIT: symbol=${trade.coin} tradeId=${trade.tradeId} closeReason=${exitReasonRaw} displayedExitReason=${resolvedExitReasonDisplay} tp1Pct=${riskTp1Pct ?? 'n/a'} tp2Pct=${riskTp2Pct ?? 'n/a'} slPct=${riskSlPct ?? 'n/a'} trailStartPct=${riskTrailStartPct ?? 'n/a'} trailPullbackPct=${riskTrailPullbackPct ?? 'n/a'} realizedPnlPct=${trade.pnlPercent ?? 0} realizedPnlUsd=${trade.pnl ?? 0} riskSnapshotPresent=${String(riskSnapshotPresentForDisplay)} sourceUsed=${riskSnapshotPresentForDisplay ? 'buySnapshot.entryConfigSnapshot.riskParams' : (cs ? 'closeSnapshot_fallback' : 'none')}`);
   const riskTp1Source = typeof (riskParams as any)?.tp1Source === 'string'
     ? (riskParams as any).tp1Source
     : typeof (riskParams as any)?.sourceTp1 === 'string'
@@ -694,7 +756,8 @@ export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4C
     exitPrice: trade.exitPrice ?? trade.entryPrice,
     pnlPct: trade.pnlPercent ?? 0,
     pnlUsd: trade.pnl ?? 0,
-    closeReason: cs?.exitReason ?? trade.status,
+    closeReason: exitReasonRaw,
+    exitReasonDisplay: resolvedExitReasonDisplay,
     dataQuality: toDataQuality(quality),
     mlEligibility: eligibility,
     strategy,
@@ -726,7 +789,8 @@ export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4C
     riskSnapshotStatus,
     tp2Pct: riskTp2Pct ?? (Number.isFinite(cs?.tp2Percent) ? cs?.tp2Percent : null),
     slPct: riskSlPct ?? (Number.isFinite(cs?.stopLossPercent) ? cs?.stopLossPercent : null),
-    trailPullbackPct: Number.isFinite(cs?.dynamicTrailAudit?.trailFromPeakPercent) ? cs?.dynamicTrailAudit?.trailFromPeakPercent : null,
+    trailStartPct: riskTrailStartPct ?? null,
+    trailPullbackPct: riskTrailPullbackPct ?? (Number.isFinite(cs?.dynamicTrailAudit?.trailFromPeakPercent) ? cs?.dynamicTrailAudit?.trailFromPeakPercent : null),
     dipPct: dipAtEntry,
     reboundPct: reboundAtEntry,
     score: Number.isFinite(bs?.candidateRank) ? bs?.candidateRank ?? null : null,
@@ -910,7 +974,8 @@ export function buildTradeV4PageModel(input: {
     logger.info(`TOP_CANDIDATES_DISPLAY_AUDIT: scannerRunning=${String(input.scannerRunning)} scannerCandidateCount=${rawCandidateCount} rawCandidateCount=${rawCandidateCount} filteredCandidateCount=${candidates.length} displayedTopCandidatesCount=${displayedTopCandidatesCount} filterReasons=${filterReasons} activeFilters=${activeFilters} source=tradeV4DataAdapter lastScanAt=${input.scannerSnapshot?.finishedAt ?? 'none'} scannerStateHydrated=${String(scannerStateHydrated)}`);
   }
   const lastScanAt = snap?.finishedAt ?? null;
-  const engineReviewCount = candidates.filter((c) => c.engineState === "locked").length;
+  const engineReviewCount = snap?.executionPoolSize
+    ?? candidates.filter((c) => c.finalExecutable === true || c.buyAllowed === true).length;
   const canonicalScannerStatus: "RUNNING" | "WAITING" | "STOPPED" = input.scannerRunning
     ? "RUNNING"
     : (lastScanAt ? "WAITING" : "STOPPED");

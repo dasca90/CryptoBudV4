@@ -41,121 +41,10 @@ export function SelectedCoinInspector(props: {
   }, [c?.symbol, detailedMode, c?.autoTpDecision?.reason, c?.groupTrend, c?.groupRecommendedStrategy, c?.effectiveStrategy]);
 
   if (!c) {
-    const nd = props.noBuyDisplay;
     return (
       <aside className="selected-coin-card" ref={cardRef}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}><div className="panel-title">{getTitleSymbol("SELECTED COIN")} SELECTED COIN</div>{c ? (<button className="panel-filter-btn" style={{ fontSize: 9, padding: "2px 8px" }} onClick={() => setDetailedMode(v => !v)}>{detailedMode ? "Detailed" : "Compact"}</button>) : null}</div>
-        {nd ? (
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 10, color: '#d29922', fontWeight: 600, marginBottom: 8 }}>
-              No BUY — {nd.marketAction ? `market is ${nd.marketAction.replace(/_/g, ' ')}` : 'candidates are waiting for confirmation.'}
-            </div>
-
-            {/* Market verdict panel */}
-            <div style={{ background: 'rgba(210,153,34,0.06)', borderRadius: 4, padding: '6px 8px', marginBottom: 8, fontSize: 9 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 12px' }}>
-                {nd.marketAction && <span><span style={{ color: '#8b949e' }}>Market Action:</span> <strong style={{ color: '#d29922' }}>{nd.marketAction.replace(/_/g, ' ').toUpperCase()}</strong></span>}
-                {nd.bestFit && <span><span style={{ color: '#8b949e' }}>Best Fit:</span> <strong style={{ color: '#58a6ff' }}>{nd.bestFit.replace(/_/g, ' ')}</strong></span>}
-                {nd.htf && <span><span style={{ color: '#8b949e' }}>HTF:</span> <strong style={{ color: nd.htf === 'bearish' ? '#f85149' : nd.htf === 'bullish' ? '#3fb950' : '#d29922' }}>{nd.htf.toUpperCase()}</strong></span>}
-                {nd.primary && <span><span style={{ color: '#8b949e' }}>Primary:</span> <strong>{nd.primary.replace(/_/g, ' ')}</strong></span>}
-                {nd.ltf && <span><span style={{ color: '#8b949e' }}>LTF:</span> <strong style={{ color: nd.ltf === 'confirmed' ? '#3fb950' : nd.ltf === 'not_confirmed' ? '#f85149' : '#d29922' }}>{nd.ltf.replace(/_/g, ' ')}</strong></span>}
-                {nd.marketConfidence != null && <span><span style={{ color: '#8b949e' }}>Market confidence:</span> <strong style={{ color: nd.marketConfidence >= 60 ? '#3fb950' : '#d29922' }}>{nd.marketConfidence}%</strong></span>}
-                {nd.marketBias && <span><span style={{ color: '#8b949e' }}>Bias:</span> <strong>{nd.marketBias.replace(/_/g, ' ')}</strong></span>}
-                <span><span style={{ color: '#8b949e' }}>Executable now:</span> <strong style={{ color: '#3fb950' }}>{nd.buyReadyCount ?? 0}</strong></span>
-                <span><span style={{ color: '#8b949e' }}>Waiting setup:</span> <strong style={{ color: '#d29922' }}>{nd.watchPoolSize ?? 0}</strong></span>
-                <span><span style={{ color: '#8b949e' }}>Blocked spread/slippage:</span> <strong style={{ color: '#f85149' }}>{(nd.blockedBySpread ?? 0) + (nd.blockedBySlippage ?? 0)}</strong></span>
-                <span><span style={{ color: '#8b949e' }}>Blocked dip/rebound:</span> <strong style={{ color: '#f85149' }}>{(nd.blockedByDip ?? 0) + (nd.blockedByRebound ?? 0)}</strong></span>
-                <span><span style={{ color: '#8b949e' }}>Blocked TP1/TP room:</span> <strong style={{ color: '#f85149' }}>{(nd.blockedByTp1Invalid ?? 0) + (nd.blockedByTpRoom ?? 0)}</strong></span>
-              </div>
-              {nd.primary && nd.ltf && (
-                <div style={{ color: '#d29922', marginTop: 4, fontSize: 9, lineHeight: '14px' }}>
-                  No BUY — market is {nd.marketAction ? nd.marketAction.replace(/_/g, ' ') : 'risk_off'}.{nd.primary ? ` Price is near ${nd.primary.replace(/_/g, ' ')}` : ''}.{nd.ltf === 'not_confirmed' ? ' LTF rebound is not confirmed.' : ''}{nd.marketBias ? ` Bias: ${nd.marketBias.replace(/_/g, ' ')}.` : ''} bestFit={nd.bestFit ?? '?'} confidence={nd.marketConfidence ?? '?'}%
-                </div>
-              )}
-            </div>
-
-            {/* Top blockers */}
-            {nd.topBlockers && nd.topBlockers.length > 0 && (
-              <div style={{ fontSize: 9, color: '#f85149', marginBottom: 4 }}>
-                Top block: <strong>{nd.topBlockers[0]}</strong>
-              </div>
-            )}
-            {nd.topBlockers && nd.topBlockers.length > 1 && (
-              <div style={{ fontSize: 9, color: '#8b949e', marginBottom: 4 }}>
-                Also: {nd.topBlockers.slice(1).join(', ')}
-              </div>
-            )}
-
-            {/* Required next condition for dip_and_rebound strategies */}
-            {nd.requiredNextCondition && nd.requiredNextCondition.length > 0 && (
-              <div style={{ background: 'rgba(88,166,255,0.08)', borderRadius: 4, padding: '4px 6px', marginTop: 4, marginBottom: 6 }}>
-                <div style={{ fontSize: 9, color: '#58a6ff', fontWeight: 600, marginBottom: 2 }}>Required next:</div>
-                <div style={{ fontSize: 8, color: '#8b949e', display: 'flex', flexWrap: 'wrap', gap: '2px 8px' }}>
-                  {nd.requiredNextCondition.map((cond, i) => (
-                    <span key={i} style={{ color: i === 0 ? '#d29922' : '#8b949e' }}>{cond}{i < nd.requiredNextCondition!.length - 1 ? ',' : ''}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Nearest candidates */}
-            {nd.nearestCandidates.length > 0 && (
-              <div style={{ fontSize: 9, color: '#8b949e', marginTop: 4 }}>
-                Nearest: {nd.nearestCandidates.slice(0, 4).join(', ')}
-              </div>
-            )}
-
-            {/* Momentum pockets */}
-            {nd.momentumPockets && (
-              <div style={{ background: nd.momentumPockets.detected ? 'rgba(88,166,255,0.08)' : 'rgba(139,148,158,0.05)', borderRadius: 4, padding: '4px 6px', marginTop: 4 }}>
-                <div style={{ fontSize: 9, color: nd.momentumPockets.detected ? '#58a6ff' : '#8b949e', fontWeight: 600, marginBottom: 2 }}>
-                  Momentum pockets: {nd.momentumPockets.detected ? `found (${nd.momentumPockets.count})` : 'none found'}
-                </div>
-                {nd.momentumPockets.detected && nd.momentumPockets.entries.slice(0, 5).map((entry, i) => (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 8, color: '#8b949e', marginTop: 1 }}>
-                    <span style={{ color: '#c9d1d9' }}>{entry.symbol.replace('USDT', '')}</span>
-                    <span>+{entry.momentum.toFixed(1)}% <span style={{ color: entry.entryGatePassed ? '#3fb950' : '#da3633' }}>{entry.entryGatePassed ? 'EG?' : entry.entryGateRan ? 'EG?' : 'EG–'}</span> {entry.blocker ? (<span style={{ color: '#da3633' }}>?{entry.blocker.slice(0, 18)}</span>) : (<span style={{ color: '#3fb950' }}>?no blocker</span>)} <span style={{ color: entry.volumeRel > 0.5 ? '#3fb950' : '#da3633' }}>V{entry.volumeRel.toFixed(1)}</span> <span style={{ color: (entry.spreadPct ?? 999) < 0.5 ? '#3fb950' : '#da3633' }}>S{entry.spreadPct.toFixed(1)}%</span> {entry.tpRoomOk ? (<span style={{ color: '#3fb950' }}>TP?</span>) : (<span style={{ color: '#da3633' }}>TP?</span>)} {entry.priceAgeMs > 30000 ? (<span style={{ color: '#d29922' }}>age{Math.round(entry.priceAgeMs / 1000)}s</span>) : null}
-                    </span>
-                    <span style={{ color: '#8b949e' }}>{entry.riskGroup.replace('_', ' ')}</span>
-                  </div>
-                ))}
-                {nd.momentumPockets.count > 5 && (
-                  <div style={{ fontSize: 8, color: '#484f58', marginTop: 1 }}>
-                    +{nd.momentumPockets.count - 5} more
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Top movers — separate lists by risk group */}
-            {nd.topMomentum && nd.topMomentum.length > 0 && (
-              <div style={{ fontSize: 8, color: '#8b949e', marginTop: 4 }}>
-                <span style={{ fontWeight: 600 }}>Top momentum: </span>
-                {nd.topMomentum.slice(0, 5).map((m, i) => (
-                  <span key={i} style={{ fontSize: 8 }}>{m.symbol.replace('USDT', '')} +{m.momentum.toFixed(1)}%<span style={{ color: m.entryGatePassed ? '#3fb950' : '#da3633' }}>{m.entryGatePassed ? '?' : '?'}</span>{i < Math.min(5, nd.topMomentum!.length) - 1 ? ', ' : ''}</span>
-                ))}
-              </div>
-            )}
-            {nd.topHighRiskMomentum && nd.topHighRiskMomentum.length > 0 && (
-              <div style={{ fontSize: 8, color: '#f0883e', marginTop: 1 }}>
-                <span style={{ fontWeight: 600 }}>High-risk momentum: </span>
-                {nd.topHighRiskMomentum.slice(0, 3).map((m, i) => (
-                  <span key={i}>{m.symbol.replace('USDT', '')} +{m.momentum.toFixed(1)}%{i < Math.min(3, nd.topHighRiskMomentum!.length) - 1 ? ', ' : ''}</span>
-                ))}
-              </div>
-            )}
-            {nd.topVeryHighRiskMomentum && nd.topVeryHighRiskMomentum.length > 0 && (
-              <div style={{ fontSize: 8, color: '#f85149', marginTop: 1 }}>
-                <span style={{ fontWeight: 600 }}>Very high-risk momentum: </span>
-                {nd.topVeryHighRiskMomentum.slice(0, 3).map((m, i) => (
-                  <span key={i}>{m.symbol.replace('USDT', '')} +{m.momentum.toFixed(1)}%{i < Math.min(3, nd.topVeryHighRiskMomentum!.length) - 1 ? ', ' : ''}</span>
-                ))}
-              </div>
-            )}
-          </div>
-        ) : (
-          <p>No coin selected</p>
-        )}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}><div className="panel-title">{getTitleSymbol("SELECTED COIN")} SELECTED COIN</div></div>
+        <p style={{ marginTop: 12, color: '#8b949e', fontSize: 10 }}>Select a coin to see details. Market info moved to Execution Insights below Candidate Pool.</p>
       </aside>
     );
   }
@@ -349,6 +238,28 @@ export function SelectedCoinInspector(props: {
         }
         return null;
       })()}
+
+      {!props.executionPlan?.selectedCandidates?.some(sc => sc.symbol === c.symbol) && !props.executionPlan?.skippedCandidates?.some(sc => sc.symbol === c.symbol) && props.noBuyDisplay && (
+        <section className="panel" style={{ padding: 8, marginTop: 8 }}>
+          <div className="panel-title">NO-BUY DIAGNOSTICS</div>
+          <div style={{ fontSize: 10, color: '#8b949e', marginTop: 4 }}>
+            Final reason: <span style={{ color: '#f85149' }}>{sanitizeExecutionDisplayText(props.noBuyDisplay.finalNoBuyReason ?? c.primaryBlocker ?? c.mainReason ?? 'waiting_for_confirmation')}</span>
+          </div>
+          <div style={{ fontSize: 10, color: '#8b949e' }}>
+            Ready: {props.noBuyDisplay.buyReadyCount ?? 0} | Blocked: {props.noBuyDisplay.blockedCount ?? 0} | Exec selected: {props.noBuyDisplay.selectedForExecutionCount ?? 0}
+          </div>
+          {(props.noBuyDisplay.requiredNextCondition?.length ?? 0) > 0 && (
+            <div style={{ fontSize: 10, color: '#58a6ff', marginTop: 4 }}>
+              Need: {props.noBuyDisplay.requiredNextCondition!.slice(0, 4).join(', ')}
+            </div>
+          )}
+          {props.noBuyDisplay.topReasons.length > 0 && (
+            <div style={{ fontSize: 9, color: '#d29922', marginTop: 4 }}>
+              Top reasons: {props.noBuyDisplay.topReasons.slice(0, 4).map(sanitizeExecutionDisplayText).join(' | ')}
+            </div>
+          )}
+        </section>
+      )}
 
       {c && props.paperAutoResult && props.paperAutoResult.symbol === c.symbol && (
         <section className="panel" style={{ padding: 8, marginTop: 8 }}>

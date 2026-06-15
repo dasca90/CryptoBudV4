@@ -32,6 +32,10 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
   const auto = props.paperAutoEnabled ?? v.paperAutoEnabled;
   const manualOverrideActive = v.strategySource === 'manual_override';
   const patch = <K extends keyof TradingParametersView>(k: K, val: TradingParametersView[K]) => props.onChange({ ...v, [k]: val });
+  const patchMaxSelectedPerScan = (raw: string) => {
+    const next = Math.max(1, Math.min(20, Math.floor(Number(raw) || 10)));
+    props.onChange({ ...v, maxSelectedPerScan: next, maxEntriesPerCycle: next, maxSelectedPerScanUserSet: true });
+  };
   const rg = ensureAllGroups(v.scannerRiskGroups as Record<string, boolean>);
 
   const [banInput, setBanInput] = useState("");
@@ -39,6 +43,7 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
   const [bansExpanded, setBansExpanded] = useState(false);
   const [banFeedback, setBanFeedback] = useState("");
   const [manualSetupError, setManualSetupError] = useState("");
+  const numStyle: React.CSSProperties = { width: 70, padding: '2px 4px', fontSize: 10, background: 'rgba(9,15,32,0.85)', color: '#cfe2ff', border: '1px solid rgba(0,234,255,0.15)', borderRadius: 4 };
 
   const addBan = () => {
     const normalized = normalizeBannedCoinInput(banInput);
@@ -286,20 +291,41 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
         </select>
 
         <label>Universe Size</label>
-        <select value={v.scannerUniverseSize} onChange={(e) => patch("scannerUniverseSize", Number(e.target.value))}>
-          <option value="250">Top 250</option>
-          <option value="100">Top 100</option>
-          <option value="50">Top 50</option>
-          <option value="20">Top 20</option>
-        </select>
+        <input type="number" value={v.scannerUniverseSize} onChange={(e) => patch("scannerUniverseSize", Math.max(1, Number(e.target.value) || 1))} min={1} step={10} style={numStyle} />
 
         <label>Final Pool Size</label>
-        <select value={v.scannerFinalPoolSize} onChange={(e) => patch("scannerFinalPoolSize", Number(e.target.value))}>
-          <option value="20">20</option>
-          <option value="50">50</option>
-          <option value="100">100</option>
-          <option value="10">10</option>
-        </select>
+        <input type="number" value={v.scannerFinalPoolSize} onChange={(e) => patch("scannerFinalPoolSize", Math.max(1, Number(e.target.value) || 1))} min={1} step={5} style={numStyle} />
+
+        <label>Candidate Pool Size</label>
+        <input type="number" value={v.scannerCandidatePoolSize} onChange={(e) => patch("scannerCandidatePoolSize", Math.max(1, Number(e.target.value) || 1))} min={1} step={5} style={numStyle} />
+
+        <label>Max Symbols Scanned</label>
+        <input type="number" value={v.maxSymbolsScanned} onChange={(e) => patch("maxSymbolsScanned", Math.max(1, Number(e.target.value) || 1))} min={1} step={5} style={numStyle} />
+
+        <label>Min 24h Volume (K$)</label>
+        <input type="number" value={v.min24hQuoteVolumeUsdt} onChange={(e) => patch("min24hQuoteVolumeUsdt", Math.max(0, Number(e.target.value) || 0))} min={0} step={50000} style={numStyle} />
+      </div>
+
+      <div style={{ height: 1, background: 'rgba(255,255,255,0.06)', margin: '8px 0' }} />
+
+      <div style={{ fontSize: 10, color: '#d29922', marginBottom: 4 }}>Scanner Ranking Weights</div>
+      <div className="param-grid">
+        <label>Momentum Weight</label>
+        <input type="number" value={v.momentumWeight} onChange={(e) => patch("momentumWeight", Math.max(0, Number(e.target.value) || 0))} min={0} step={0.05} style={numStyle} />
+
+        <label>Volume Surge Weight</label>
+        <input type="number" value={v.volumeSurgeWeight} onChange={(e) => patch("volumeSurgeWeight", Math.max(0, Number(e.target.value) || 0))} min={0} step={0.05} style={numStyle} />
+
+        <label>Breakout Weight</label>
+        <input type="number" value={v.breakoutWeight} onChange={(e) => patch("breakoutWeight", Math.max(0, Number(e.target.value) || 0))} min={0} step={0.05} style={numStyle} />
+
+        <label>New Mover Bonus</label>
+        <input type="number" value={v.newMoverBonus} onChange={(e) => patch("newMoverBonus", Math.max(0, Number(e.target.value) || 0))} step={1} min={0} style={numStyle} />
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input type="checkbox" checked={v.enableNewMoverBonus} onChange={(e) => patch("enableNewMoverBonus", e.target.checked)} />
+          Enable New Mover
+        </label>
       </div>
 
       <div style={{ height: 1, background: 'rgba(255,255,255,0.06)', margin: '8px 0' }} />
@@ -340,9 +366,9 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
       </div>
       {advExpanded && (
         <div className="param-grid">
-          <label>Max New Buys / Scan</label>
-          <input type="number" value={v.maxEntriesPerCycle} onChange={(e) => patch("maxEntriesPerCycle", Math.max(1, Number(e.target.value)))}
-            min={1} max={20} title="Max new BUY orders AutoBots can open per scan cycle. Does not force buys." />
+          <label>Max selected per scan</label>
+          <input type="number" value={v.maxSelectedPerScan} onChange={(e) => patchMaxSelectedPerScan(e.target.value)}
+            min={1} max={20} title="How many otherwise BUY_READY candidates can be selected in one scan. Safety gates and max open positions still apply." />
 
           <label>Entry Gate Attempt Limit</label>
           <input type="number" value={v.maxEntryGateAttemptsPerScan} onChange={(e) => patch("maxEntryGateAttemptsPerScan", Math.max(1, Number(e.target.value)))}

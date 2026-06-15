@@ -11,6 +11,7 @@ export interface TradingTargetConfigInput {
   stopLossPct: number;
   dynamicTrailingEnabled: boolean;
   trailPullbackPct: number;
+  isScannerAutoTrade?: boolean;
 }
 
 export interface TradingTargetOwnershipSnapshot {
@@ -55,7 +56,8 @@ function clampPct(v: number): number {
 export function resolveTradingTargetOwnership(candidate: ScannerCandidate, cfg: TradingTargetConfigInput): TradingTargetOwnershipSnapshot {
   const sl = clampPct(cfg.stopLossPct);
   const pullback = clampPct(cfg.trailPullbackPct);
-  if (cfg.strategySource === 'autobots') {
+  const effectiveSource: StrategySourceMode = cfg.isScannerAutoTrade ? 'autobots' : cfg.strategySource;
+  if (effectiveSource === 'autobots') {
     const confidence = Math.round((candidate.confidence ?? 0) * 100);
     const autoTp = computeAutoTp({
       riskGroup: candidate.riskGroup ?? 'unknown',
@@ -68,8 +70,9 @@ export function resolveTradingTargetOwnership(candidate: ScannerCandidate, cfg: 
     const tp1Value = clampPct(autoTp.tp1Pct);
     const entryPrice = Number.isFinite(candidate.price) ? Number(candidate.price) : null;
     const tp1TargetPrice = entryPrice != null ? entryPrice * (1 + (tp1Value / 100)) : null;
-    logger.info(`AUTOBOTS_TP1_SELECTION_AUDIT: symbol=${candidate.symbol} riskGroup=${candidate.riskGroup ?? 'unknown'} confidence=${confidence} strategy=${candidate.selectedStrategy ?? 'unknown'} entryRule=${candidate.traderBrainDecision?.selectedPlaybook ?? candidate.selectedPlaybook ?? candidate.mainReason ?? 'unknown'} entryPrice=${entryPrice ?? 'n/a'} tp1Pct=${tp1Value} tp1TargetPrice=${tp1TargetPrice ?? 'n/a'} tp1Source=AutoBots dynamic per coin tp1Reason=${autoTp.reason} tp1Min=${autoTp.rangeMin} tp1Max=${autoTp.rangeMax} tp2Pct=0 slPct=${sl} snapshotPresent=false riskSnapshotPresent=false`);
-    logger.info(`AUTOBOTS_TP1_V3_PARITY_AUDIT: symbol=${candidate.symbol} v3Reference=hybrid_group_or_smart_strength v4Source=AutoTpCalculator riskGroup=${candidate.riskGroup ?? 'unknown'} confidence=${confidence} tp1Pct=${tp1Value} tp1Min=${autoTp.rangeMin} tp1Max=${autoTp.rangeMax} tp2Pct=0 slPct=${sl} parityStatus=behavior_reference_preserved reason=dynamic_per_coin_tp1_positive_tp2_zero_user_sl`);
+    const enforcedNote = cfg.isScannerAutoTrade && cfg.strategySource !== 'autobots' ? ' (enforced: scanner auto trade overrides manual_override)' : '';
+    logger.info(`AUTOBOTS_TP1_SELECTION_AUDIT: symbol=${candidate.symbol} riskGroup=${candidate.riskGroup ?? 'unknown'} confidence=${confidence} strategy=${candidate.selectedStrategy ?? 'unknown'} entryRule=${candidate.traderBrainDecision?.selectedPlaybook ?? candidate.selectedPlaybook ?? candidate.mainReason ?? 'unknown'} entryPrice=${entryPrice ?? 'n/a'} tp1Pct=${tp1Value} tp1TargetPrice=${tp1TargetPrice ?? 'n/a'} tp1Source=AutoBots dynamic per coin tp1Reason=${autoTp.reason} tp1Min=${autoTp.rangeMin} tp1Max=${autoTp.rangeMax} tp2Pct=0 slPct=${sl} snapshotPresent=false riskSnapshotPresent=false${enforcedNote}`);
+    logger.info(`AUTOBOTS_TP1_V3_PARITY_AUDIT: symbol=${candidate.symbol} v3Reference=hybrid_group_or_smart_strength v4Source=AutoTpCalculator riskGroup=${candidate.riskGroup ?? 'unknown'} confidence=${confidence} tp1Pct=${tp1Value} tp1Min=${autoTp.rangeMin} tp1Max=${autoTp.rangeMax} tp2Pct=0 slPct=${sl} parityStatus=behavior_reference_preserved reason=dynamic_per_coin_tp1_positive_tp2_zero_user_sl${enforcedNote}`);
     return {
       strategySource: 'autobots',
       tp1Source: 'AutoBots dynamic per coin',

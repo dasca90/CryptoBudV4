@@ -4,6 +4,7 @@ import { buildCanonicalEntryGateSnapshot } from '../entry-gate/EntryGate';
 import { buildStrategyAuditSnapshotFromCandidate } from '../strategy-audit/strategy-audit-builder';
 import { resolveEntryRiskParams } from '../trading/entry-risk-resolver';
 import { resolveAutoTargetOwnership, resolveTradingTargetOwnership } from '../trading/TradingTargetOwnership';
+import { resolveMaxSelectedPerScanConfig, type MaxSelectedPerScanSource } from '../settings/max-selected-per-scan';
 
 export interface ExecutionPlannerInput {
   scannerSnapshot: ScannerSnapshot;
@@ -15,7 +16,13 @@ export interface ExecutionPlannerInput {
   capital: number;
   usedCapital: number;
   maxPositions: number;
-  maxEntriesPerCycle: number;
+  maxSelectedPerScan?: number;
+  maxEntriesPerCycle?: number;
+  maxSelectedPerScanSource?: MaxSelectedPerScanSource;
+  maxSelectedPerScanMigrationApplied?: boolean;
+  maxSelectedPerScanClamped?: boolean;
+  maxSelectedPerScanReason?: string;
+  maxSelectedPerScanUserExplicit?: boolean;
   capitalPerTrade: number;
   maxSpreadPct: number;
   decisionMode: 'unified';
@@ -81,15 +88,27 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
     openSymbols, pendingOrderSymbols, capital, usedCapital,
     maxPositions, maxEntriesPerCycle, capitalPerTrade, maxSpreadPct, decisionMode, executionAdapter, enabledRiskGroups,
   } = input;
+  const resolvedMaxSelected = resolveMaxSelectedPerScanConfig({
+    scanId: scannerSnapshot?.scanId,
+    plannerInputValue: input.maxSelectedPerScan,
+    persistedLegacyMaxEntriesPerCycle: maxEntriesPerCycle,
+    maxSelectedPerScan: input.maxSelectedPerScan,
+    maxEntriesPerCycle,
+    userExplicit: input.maxSelectedPerScanUserExplicit,
+    sourceHint: input.maxSelectedPerScanSource,
+    reason: input.maxSelectedPerScanReason ?? 'execution_planner_input_canonicalized',
+  });
+  const maxSelectedPerScan = resolvedMaxSelected.value;
   const availableSlots = Math.max(0, maxPositions - openSymbols.length);
   const capitalAvailable = Math.max(0, capital - usedCapital);
   const capitalLimitedSlots = capitalPerTrade > 0 ? Math.floor(capitalAvailable / capitalPerTrade) : 0;
   logger.info(`CAPITAL_PER_COIN_ORDER_SIZE_AUDIT: symbol=none mode=${executionAdapter === 'paper_simulated' ? 'demo' : 'live'} userTradingCapital=${capital} userCapitalPerCoin=${capitalPerTrade} persistedCapitalPerCoin=${capitalPerTrade} resolvedCapitalPerCoin=${capitalPerTrade} finalOrderNotionalUsd=0 qty=0 entryPrice=0 availableCapital=${capital} usedCapitalBefore=${usedCapital} usedCapitalAfter=${usedCapital} adjustmentReason=planner_limits source=persisted`);
-  const hardSelectionLimit = Math.max(0, Math.min(availableSlots, capitalLimitedSlots, Math.max(1, maxEntriesPerCycle)));
+  const selectionLimit = Math.max(0, Math.min(availableSlots, capitalLimitedSlots, maxSelectedPerScan));
   const noBuyReasons: string[] = [];
   const selectedCandidates: PlannedCandidate[] = [];
   const skippedCandidates: SkippedCandidate[] = [];
   const skippedReasons: string[] = [];
+  const skippedBySelectionLimitSymbols: string[] = [];
   let generatedEntryPlanCount = 0;
   let plannerInputWithEntryPlan = 0;
   let entryPlanBlockedCount = 0;
@@ -145,22 +164,6 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
       );
     };
 
-    if (selectedCandidates.length >= hardSelectionLimit) {
-      let limitReason = 'Execution selection limit reached';
-      let limitToken = 'SELECTION_LIMIT_REACHED';
-      if (availableSlots <= 0) {
-        limitReason = 'BLOCK_MAX_POSITIONS';
-        limitToken = 'MAX_POSITIONS_REACHED';
-      } else if (capitalLimitedSlots <= 0) {
-        limitReason = 'BLOCK_CAPITAL_LIMIT';
-        limitToken = 'CAPITAL_BLOCKED';
-      }
-      skippedCandidates.push({ symbol: candidate.symbol, status: candidate.status, reason: limitReason, gate: 'ExecutionPlannerLimit', isRetryable: true });
-      skippedReasons.push(limitToken);
-      if (!noBuyReasons.includes(limitToken)) noBuyReasons.push(limitToken);
-      auditIntegrity(false, limitToken);
-      continue;
-    }
     const symbol = candidateWithPlan.symbol;
     const decision = candidateWithPlan.autoStrategyDecision;
     const checks: string[] = [];
@@ -296,7 +299,39 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
 
     if (skipped) {
       skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: skipReason, gate: skipGate, isRetryable });
-      auditIntegrity(false, skipReason);
+      const isOverextended = Array.isArray(candidateWithPlan.blockReasons) && candidateWithPlan.blockReasons.some(r => String(r).toLowerCase().includes('overextended'));
+      const isCandleExhaustion = Array.isArray(candidateWithPlan.blockReasons) && candidateWithPlan.blockReasons.some(r => String(r).toLowerCase().includes('candle'));
+      const OVEREXTENSION_THRESHOLD_PCT = 1.8;
+      const CANDLE_ATR_THRESHOLD = 2.5;
+      const overextendedValPct = isOverextended ? Number((candidateWithPlan as any).extensionAboveRefPct ?? OVEREXTENSION_THRESHOLD_PCT + 0.1) : 0;
+      const candleAtrVal = isCandleExhaustion ? Number((candidateWithPlan as any).candleAtrMultiple ?? CANDLE_ATR_THRESHOLD + 0.1) : 0;
+      const hasSpreadOk = !isOverextended && !isCandleExhaustion && candidateWithPlan.bookFresh !== false && (candidateWithPlan.spreadPct ?? 0) <= maxSpreadPct;
+      const hasTpRoomOk = candidateWithPlan.tpRoomOk !== false;
+      const hasBookFresh = candidateWithPlan.bookFresh !== false;
+      const hasMarketOnline = (candidateWithPlan as any).marketDataOnline !== false;
+      const confirmationOk = !(Array.isArray(candidateWithPlan.blockReasons) && candidateWithPlan.blockReasons.some(r => String(r).toLowerCase().includes('confirmation')));
+      const wouldBuyIf = !isOverextended && !isCandleExhaustion && hasBookFresh && hasMarketOnline && hasSpreadOk && hasTpRoomOk && confirmationOk
+        ? 'candidate_passes_all_safety'
+        : (isOverextended ? 'wait_for_pullback' : isCandleExhaustion ? 'wait_for_candle_settle' : !hasBookFresh ? 'fix_book_stale' : !hasSpreadOk ? 'fix_spread' : !hasTpRoomOk ? 'fix_tp_room' : 'fix_confirmation');
+      logger.info(`FINAL_SELECTION_BLOCKER_VALUES_AUDIT: symbol=${symbol} finalBlocker=${skipReason} selectedForExecution=false overextendedValuePct=${overextendedValPct.toFixed(2)} overextendedThresholdPct=${OVEREXTENSION_THRESHOLD_PCT} overextendedBlockValid=${String(overextendedValPct > OVEREXTENSION_THRESHOLD_PCT)} candleAtrMultiple=${candleAtrVal.toFixed(2)} candleAtrThreshold=${CANDLE_ATR_THRESHOLD} candleExhaustionBlockValid=${String(candleAtrVal > CANDLE_ATR_THRESHOLD)} spreadPct=${(candidateWithPlan.spreadPct ?? 0).toFixed(2)} maxSpreadPct=${maxSpreadPct} bookFresh=${String(hasBookFresh)} marketDataOnline=${String(hasMarketOnline)} tpRoomOk=${String(hasTpRoomOk)} confirmationOk=${String(confirmationOk)} wouldBuyIf=${wouldBuyIf}`);      auditIntegrity(false, skipReason);
+      continue;
+    }
+
+    if (selectedCandidates.length >= selectionLimit) {
+      let limitReason = `Execution selection limit reached selectedCount=${selectedCandidates.length} maxSelectedPerScan=${maxSelectedPerScan} skippedBySelectionLimitCount=${skippedBySelectionLimitSymbols.length + 1}`;
+      let limitToken = 'SELECTION_LIMIT_REACHED';
+      if (availableSlots <= 0) {
+        limitReason = 'BLOCK_MAX_POSITIONS';
+        limitToken = 'MAX_POSITIONS_REACHED';
+      } else if (capitalLimitedSlots <= 0) {
+        limitReason = 'BLOCK_CAPITAL_LIMIT';
+        limitToken = 'CAPITAL_BLOCKED';
+      }
+      skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: limitReason, gate: 'ExecutionPlannerLimit', isRetryable: true });
+      skippedReasons.push(limitToken);
+      if (limitToken === 'SELECTION_LIMIT_REACHED') skippedBySelectionLimitSymbols.push(symbol);
+      if (!noBuyReasons.includes(limitToken)) noBuyReasons.push(limitToken);
+      auditIntegrity(false, limitToken);
       continue;
     }
 
@@ -343,9 +378,14 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
 
   const topNoBuy = [...new Set(noBuyReasons)].slice(0, 5);
   const canExecute = selectedCandidates.some(c => c.plannedAction === 'BUY');
+  const selectedSymbols = selectedCandidates.map((s) => s.symbol);
+  const projectedCapitalRequired = selectedCandidates.reduce((sum, c) => sum + (c.entryPlan ? c.entryPlan.price * c.entryPlan.quantity : c.capitalAllocation ?? 0), 0);
+  const maxCapitalAtRisk = capital;
+  const projectedCapitalAtRisk = usedCapital + projectedCapitalRequired;
+  const safetyLimitApplied = selectionLimit < maxSelectedPerScan;
   logger.info(`BUY_READY_FINAL_GATE_AUDIT: plannerInputCount=${executionPool.length} finalExecutableReadyCount=${selectedCandidates.length} blockedByFinalGate=${skippedCandidates.filter((s) => s.gate === 'ExecutionPlannerFinalGate').length} selectedSymbols=${selectedCandidates.map((s) => s.symbol).join('|') || 'none'}`);
   logger.info(`EXECUTION_POOL_FINAL_FILTER_AUDIT: executionPoolIn=${executionPool.length} selectedOut=${selectedCandidates.length} skippedOut=${skippedCandidates.length} topNoBuyReasons=${topNoBuy.join('|') || 'none'}`);
-  logger.info(`EXECUTION_SELECTION_LIMIT_AUDIT: buyReadyCount=${executionPool.length} requestedSelectedCount=${scoredExecutionPool.length} maxOpenPositions=${maxPositions} openPositions=${openSymbols.length} availableSlots=${availableSlots} capitalAvailable=${capitalAvailable} capitalPerTrade=${capitalPerTrade} capitalLimitedSlots=${capitalLimitedSlots} finalSelectedCount=${selectedCandidates.length} skippedCount=${skippedCandidates.length} skippedReasons=${[...new Set(skippedReasons)].join('|') || 'none'}`);
+  logger.info(`EXECUTION_SELECTION_LIMIT_AUDIT: scanId=${scannerSnapshot?.scanId ?? 'unknown'} buyReadyCount=${executionPool.length} maxSelectedPerScan=${maxSelectedPerScan} selectedCount=${selectedCandidates.length} skippedBySelectionLimitCount=${skippedBySelectionLimitSymbols.length} selectedSymbols=${selectedSymbols.join('|') || 'none'} skippedSymbols=${skippedBySelectionLimitSymbols.join('|') || 'none'} maxOpenPositions=${maxPositions} currentOpenPositions=${openSymbols.length} availableSlots=${availableSlots} capitalPerTrade=${capitalPerTrade} projectedCapitalRequired=${projectedCapitalRequired.toFixed(4)} maxCapitalAtRisk=${maxCapitalAtRisk} projectedCapitalAtRisk=${projectedCapitalAtRisk.toFixed(4)} safetyLimitApplied=${String(safetyLimitApplied)} requestedSelectedCount=${scoredExecutionPool.length} capitalAvailable=${capitalAvailable} capitalLimitedSlots=${capitalLimitedSlots} effectiveSelectionLimit=${selectionLimit} skippedCount=${skippedCandidates.length} skippedReasons=${[...new Set(skippedReasons)].join('|') || 'none'} source=${resolvedMaxSelected.source} migrationApplied=${String(resolvedMaxSelected.migrationApplied)} clamped=${String(resolvedMaxSelected.clamped)} reason=${resolvedMaxSelected.reason}`);
 
   return {
     canExecute,
@@ -361,7 +401,8 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
     executionPoolSize: executionPool.length,
     watchPoolSize: watchPool.length,
     nearMissPoolSize: nearMissPool.length,
-    maxEntriesPerCycle,
+    maxEntriesPerCycle: maxSelectedPerScan,
+    maxSelectedPerScan,
     availableSlots,
     capitalAvailable,
     decisionMode,

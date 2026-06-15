@@ -185,7 +185,8 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
         : baseWhy.label;
       logger.info(`TOP_CANDIDATE_STATUS_REASON_AUDIT: symbol=${c.symbol} status=${c.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} why=${resolvedWhy} primaryBlocker=${c.primaryBlocker ?? 'none'} setupResult=${c.strategyAudit?.dynamicSetupContext?.setupResult ?? 'none'}`);
       if (c.finalExecutable && !selectedForExecution) {
-        logger.warn(`TOP_CANDIDATE_BUY_READY_NOT_EXECUTED_AUDIT: symbol=${c.symbol} status=${c.status} why=${resolvedWhy} skipReason=${skipReason || 'none'} finalNoBuyReason=${props.noBuyDisplay?.finalNoBuyReason ?? 'none'}`);
+        const perCandidateFinalReason = skipReason || props.noBuyDisplay?.finalNoBuyReason || 'selection_limit_reached';
+        logger.warn(`TOP_CANDIDATE_BUY_READY_NOT_EXECUTED_AUDIT: symbol=${c.symbol} status=${c.status} why=${resolvedWhy} skipReason=${skipReason || 'none'} finalNoBuyReason=${perCandidateFinalReason}`);
       }
     }
   }, [top, props.executionPlan, props.noBuyDisplay, viewMode]);
@@ -278,14 +279,27 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
         <span><span style={{ color: '#f85149' }}>BLOCK</span>=safety blocked</span>
         <span>Trend = arrow + direction</span>
         <span>Conf = confidence %</span>
-        <span>Conf = confidence %</span>
-        <span>Reason: why blocked/allowed</span>
+        <span>Why = block reason</span>
         {props.noBuyDisplay?.marketAction === 'selective_entries' && (
           <span style={{ color: '#8b949e' }}>
             Selective Entries active | Exec now {props.noBuyDisplay.buyReadyCount ?? 0} | Wait {props.noBuyDisplay.watchPoolSize ?? 0} | Spread block {props.noBuyDisplay.blockedBySpread ?? 0}
           </span>
         )}
       </div>
+
+      {props.executionPlan && (
+        <div style={{ display: 'flex', gap: 12, padding: '4px 6px', fontSize: 8, background: 'rgba(0,234,255,0.03)', borderBottom: '1px solid rgba(255,255,255,0.03)', flexShrink: 0, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ color: '#8b949e' }}>Exec:</span>
+          <span style={{ color: '#58a6ff' }}>Pool <b style={{ color: '#cfe2ff' }}>{props.executionPlan.executionPoolSize ?? (props.executionPlan as any)?.executionPoolIn ?? (props.executionPlan as any)?.buyReadyCount ?? '?'}</b></span>
+          <span style={{ color: props.executionPlan.selectedCandidates?.length > 0 ? '#3fb950' : '#f85149' }}>Selected <b>{props.executionPlan.selectedCandidates?.length ?? 0}</b></span>
+          <span style={{ color: '#d29922' }}>Skipped <b>{props.executionPlan.skippedCandidates?.length ?? 0}</b></span>
+          {props.executionPlan.noBuyReasons?.length > 0 && (
+            <span style={{ color: '#f85149', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              Blockers: {props.executionPlan.noBuyReasons.slice(0, 3).join(' | ')}
+            </span>
+          )}
+        </div>
+      )}
 
       {!hasBuy && filtered.length === 0 ? (
         <div className="empty-state-small">{props.noBuyDisplay ? 'No top candidates after filters.' : 'Scanner waiting for cycle.'}</div>
@@ -327,7 +341,6 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
 
               {top.map((c) => {
                 const trend = renderTrendLabel(c.displayTrend || c.groupTrend || c.periodTrend);
-                const statusColor = c.status === 'BUY' ? '#2ea043' : c.status === 'WAIT' ? '#d29922' : c.status === 'BLOCK' ? '#f85149' : '#8b949e';
                 const confDisplay = c.confidence > 0 ? `${c.confidence.toFixed(0)}%` : 'n/a';
                 const confColor = c.confidence >= 70 ? '#2ea043' : c.confidence >= 45 ? '#d29922' : c.confidence > 0 ? '#f85149' : '#8b949e';
                 const primaryBlocker = c.primaryBlocker || c.gateAudit?.blocker || c.mainReason || 'none';
@@ -335,12 +348,23 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
                 const finalStrategy = c.strategyAudit?.dynamicSetupContext?.finalStrategy ?? c.strategy;
                 const spreadVsMax = c.gateAudit ? `${c.gateAudit.spreadPct.toFixed(2)}%/${c.gateAudit.maxSpreadUsedByEntryGate.toFixed(2)}%` : (c.spreadPct != null ? `${c.spreadPct.toFixed(2)}%` : 'n/a');
                 const executionSelected = !!props.executionPlan?.selectedCandidates?.some((s) => s.symbol === c.symbol);
+                const executionSkipped = !!props.executionPlan?.skippedCandidates?.some((s) => s.symbol === c.symbol);
                 const executionSkipReason = props.executionPlan?.skippedCandidates?.find((s) => s.symbol === c.symbol)?.reason ?? '';
+                const isNotExecutable = c.finalExecutable === false || c.buyAllowed === false;
+                const displayStatus = isNotExecutable ? (c.status === 'BUY' ? 'WAIT' : c.status) : c.status;
+                const statusColor = displayStatus === 'BUY' ? '#2ea043' : displayStatus === 'WAIT' ? '#d29922' : displayStatus === 'BLOCK' ? '#f85149' : '#8b949e';
                 const baseWhy = resolveWhyNoBuy(c);
-                const whyLabel = c.finalExecutable && !executionSelected
-                  ? mapExecutionSkipReason(executionSkipReason || props.noBuyDisplay?.finalNoBuyReason || 'execution_not_triggered')
-                  : baseWhy.label;
-                const whyColor = whyLabel === 'BUY_READY' ? '#2ea043' : whyLabel.startsWith('WAITING_') ? '#d29922' : whyLabel === 'EXECUTION_NOT_TRIGGERED' ? '#d29922' : '#f85149';
+                const effectiveSkipReason = executionSkipReason && executionSkipReason !== 'none'
+                  ? executionSkipReason
+                  : (executionSkipped && !executionSelected ? (primaryBlocker !== 'none' ? primaryBlocker : c.mainReason || 'execution_not_triggered') : '');
+                const isBlockedBuyCandidate = (c.status === 'BUY' && !executionSelected && c.finalExecutable !== false) || (isNotExecutable && c.status === 'BUY');
+                const skipMapped = mapExecutionSkipReason(effectiveSkipReason || props.noBuyDisplay?.finalNoBuyReason || 'execution_not_triggered');
+                const whyLabel = isBlockedBuyCandidate
+                  ? `BLOCKED: ${skipMapped}`
+                  : (c.finalExecutable && !executionSelected
+                    ? skipMapped
+                    : baseWhy.label);
+                const whyColor = isBlockedBuyCandidate ? '#f85149' : whyLabel.startsWith('BLOCKED') ? '#f85149' : whyLabel === 'BUY_READY' ? '#2ea043' : whyLabel.startsWith('WAITING_') ? '#d29922' : whyLabel === 'EXECUTION_NOT_TRIGGERED' ? '#d29922' : '#f85149';
 
                 return (
                   <div key={c.candidateId} className={`top-cand-row ${props.selectedSymbol === c.symbol ? 'selected' : ''}`} onClick={() => props.onSelectSymbol(c.symbol)}>
@@ -356,7 +380,7 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
                           <span style={{ color: '#8b949e', fontSize: 8 }}>{c.momentum != null ? `${c.momentum.toFixed(1)}%` : 'n/a'}</span>
                         </>
                       )}
-                      <span style={{ color: statusColor, fontWeight: 700, fontSize: 9 }}>{c.status}</span>
+                      <span style={{ color: statusColor, fontWeight: 700, fontSize: 9 }}>{displayStatus}</span>
                       <span style={{ color: whyColor, fontSize: 8, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{whyLabel}</span>
                       {viewMode === 'detailed' && (
                         <>

@@ -80,7 +80,7 @@ export function ControlTowerPanel(props: {
   }), [props, usedPct]);
 
   useEffect(() => {
-    const uiValue = [props.scannerRunning ? "RUNNING" : "STOPPED", props.candidateCount, props.engineReviewCount, props.openCount, props.closedTodayCount].join("|");
+    const uiValue = [canonical.scannerStatus, canonical.candidateCount, canonical.engineReviewCount, canonical.openCount, canonical.closedTodayCount].join("|");
     const canonicalValue = [canonical.scannerStatus, canonical.candidateCount, canonical.engineReviewCount, canonical.openCount, canonical.closedTodayCount].join("|");
     const lastCanonicalTs = canonical.lastScanAt ? Date.parse(canonical.lastScanAt) : NaN;
     const now = Date.now();

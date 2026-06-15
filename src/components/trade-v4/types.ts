@@ -222,6 +222,7 @@ export type TradeV4ClosedPositionView = {
   pnlPct: number;
   pnlUsd: number;
   closeReason: string;
+  exitReasonDisplay?: string;
   dataQuality: "GOOD" | "MEDIUM" | "BAD" | "UNKNOWN";
   mlEligibility: "eligible" | "analysis_only" | "not_eligible";
   strategy: string;
@@ -250,6 +251,7 @@ export type TradeV4ClosedPositionView = {
   riskSnapshotStatus?: "VALID_RISK_SNAPSHOT" | "LEGACY_PRE_FIX" | "SNAPSHOT_MISSING" | "BUG_TP1_INVALID";
   tp2Pct?: number | null;
   slPct?: number | null;
+  trailStartPct?: number | null;
   trailPullbackPct?: number | null;
   dipPct?: number | null;
   reboundPct?: number | null;
@@ -304,6 +306,14 @@ export type TradingParametersView = {
   scannerUniverseMode: "BINANCE_TOP_250" | "TOP_100" | "TOP_50" | "TOP_20" | "WATCHLIST";
   scannerUniverseSize: number;
   scannerFinalPoolSize: number;
+  scannerCandidatePoolSize: number;
+  min24hQuoteVolumeUsdt: number;
+  maxSymbolsScanned: number;
+  momentumWeight: number;
+  volumeSurgeWeight: number;
+  breakoutWeight: number;
+  newMoverBonus: number;
+  enableNewMoverBonus: boolean;
   scannerBanlist: string[];
   maxSpreadPct: number;
   maxSlippagePct: number;
@@ -316,6 +326,8 @@ export type TradingParametersView = {
   requirePullbackAfterPump: boolean;
   bollingerOverextensionGuard: boolean;
   maxEntriesPerCycle: number;
+  maxSelectedPerScan: number;
+  maxSelectedPerScanUserSet?: boolean;
   maxEntryGateAttemptsPerScan: number;
   maxEntriesPerCoinPerDay: number;
   cooldownAfterBuyMs: number;
@@ -507,6 +519,7 @@ export interface TradeV4PageModel {
     watchPoolSize: number;
     nearMissPoolSize: number;
     maxEntriesPerCycle: number;
+    maxSelectedPerScan?: number;
     availableSlots: number;
     capitalAvailable: number;
     decisionMode: string;

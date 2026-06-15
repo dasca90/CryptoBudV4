@@ -30,7 +30,8 @@ export const settingsWiringAudit = {
   bollingerOverextensionGuard:{ status: 'NOT_WIRED', ui: 'TradingParametersCard', persist: 'TradingParametersView', consumer: 'None' },
 
   // ── Entry Limits ──
-  maxEntriesPerCycle:         { status: 'NOT_WIRED', ui: 'TradingParametersCard', persist: 'AppSettings', consumer: 'ExecutionPlanner does not read this', note: 'Partially exists via maxEntriesPerCycle in ExecutionPlan but not driven by this setting' },
+  maxEntriesPerCycle:         { status: 'WIRED', ui: 'TradingParametersCard', persist: 'AppSettings', consumer: 'ExecutionPlanner maxSelectedPerScan legacy mirror', note: 'Kept only for backward compatibility; maxSelectedPerScan is canonical' },
+  maxSelectedPerScan:         { status: 'WIRED', ui: 'TradingParametersCard', persist: 'AppSettings', consumer: 'ExecutionPlanner', note: 'Controls how many BUY_READY candidates can be selected in one scan; does not replace maxOpenPositions or risk gates' },
   maxEntryGateAttemptsPerScan:{ status: 'NOT_WIRED', ui: 'TradingParametersCard', persist: 'AppSettings', consumer: 'None' },
   maxEntriesPerCoinPerDay:    { status: 'NOT_WIRED', ui: 'TradingParametersCard', persist: 'AppSettings', consumer: 'None' },
   cooldownAfterBuyMs:         { status: 'NOT_WIRED', ui: 'TradingParametersCard', persist: 'AppSettings', consumer: 'None' },

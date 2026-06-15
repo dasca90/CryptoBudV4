@@ -2,6 +2,7 @@ import type { AppSettings, ApiConfig, TelegramSettings, ResetResult, ResetType }
 import { createDefaultAppSettings, createDefaultApiConfig, createDefaultTelegramSettings } from '../types';
 import { tauriDb, isTauriAvailable } from './TauriBridge';
 import { logger } from '../../utils/logger';
+import { resolveMaxSelectedPerScanConfig } from '../settings/max-selected-per-scan';
 
 const SETTINGS_KEY = 'app_settings';
 const API_CONFIG_KEY = 'api_config';
@@ -81,7 +82,21 @@ export class SettingsPersistence {
   // ── App Settings ──────────────────────────────────────
 
   async saveSettings(settings: AppSettings): Promise<void> {
-    const updated = { ...settings, updatedAt: new Date().toISOString() };
+    const resolvedMaxSelected = resolveMaxSelectedPerScanConfig({
+      uiValue: (settings as any).maxSelectedPerScan,
+      persistedLegacyMaxEntriesPerCycle: (settings as any).maxEntriesPerCycle,
+      userExplicit: (settings as any).maxSelectedPerScanUserSet === true,
+      sourceHint: 'ui_setting',
+      reason: 'settings_save_canonicalized',
+    });
+    const maxSelectedPerScan = resolvedMaxSelected.value;
+    const updated = {
+      ...settings,
+      maxSelectedPerScan,
+      maxEntriesPerCycle: maxSelectedPerScan,
+      maxSelectedPerScanUserSet: (settings as any).maxSelectedPerScanUserSet === true,
+      updatedAt: new Date().toISOString(),
+    };
     logger.info(`USER_SETTINGS_SAVE_REQUESTED: tradingCapital=${(updated as any).autoTradingCapital ?? 1000} capitalPerCoin=${(updated as any).capitalPerCoin ?? updated.capitalPerTrade ?? 100} maxOpenPositions=${updated.maxPositions ?? 10} bannedCoinsCount=${(updated.scannerBanlist ?? []).length} source=persistence storageKey=${SETTINGS_KEY} hydrationComplete=true`);
     await this.setItem(SETTINGS_KEY, JSON.stringify(updated));
     logger.info(`USER_SETTINGS_SAVE_SUCCESS: tradingCapital=${(updated as any).autoTradingCapital ?? 1000} capitalPerCoin=${(updated as any).capitalPerCoin ?? updated.capitalPerTrade ?? 100} maxOpenPositions=${updated.maxPositions ?? 10} bannedCoinsCount=${(updated.scannerBanlist ?? []).length} source=persistence storageKey=${SETTINGS_KEY}`);
@@ -93,12 +108,33 @@ export class SettingsPersistence {
     const raw = await this.getItem(SETTINGS_KEY);
     if (!raw) {
       logger.info(`USER_SETTINGS_STORAGE_EMPTY: storageKey=${SETTINGS_KEY}`);
+      resolveMaxSelectedPerScanConfig({
+        reason: 'settings_storage_empty_default_10',
+      });
       return createDefaultAppSettings();
     }
     try {
       const parsed = JSON.parse(raw) as AppSettings;
+      const defaults = createDefaultAppSettings();
+      const hasCanonical = Object.prototype.hasOwnProperty.call(parsed as any, 'maxSelectedPerScan');
+      const resolvedMaxSelected = resolveMaxSelectedPerScanConfig({
+        persistedMaxSelectedPerScan: hasCanonical ? (parsed as any).maxSelectedPerScan : undefined,
+        persistedLegacyMaxEntriesPerCycle: (parsed as any).maxEntriesPerCycle,
+        maxSelectedPerScan: hasCanonical ? (parsed as any).maxSelectedPerScan : undefined,
+        userExplicit: (parsed as any).maxSelectedPerScanUserSet === true,
+        sourceHint: hasCanonical ? 'persisted_setting' : undefined,
+        reason: hasCanonical ? 'settings_load_persisted_canonical' : ((parsed as any).maxEntriesPerCycle != null ? 'settings_load_legacy_migrated_to_default_10' : 'settings_load_default_10'),
+      });
+      const maxSelectedPerScan = resolvedMaxSelected.value;
+      const normalized = {
+        ...defaults,
+        ...parsed,
+        maxSelectedPerScan,
+        maxEntriesPerCycle: maxSelectedPerScan,
+        maxSelectedPerScanUserSet: (parsed as any).maxSelectedPerScanUserSet === true,
+      };
       logger.info(`USER_SETTINGS_STORAGE_FOUND: storageKey=${SETTINGS_KEY} tradingCapital=${(parsed as any).autoTradingCapital ?? 1000} capitalPerCoin=${(parsed as any).capitalPerCoin ?? parsed.capitalPerTrade ?? 100} maxOpenPositions=${parsed.maxPositions ?? 10} bannedCoinsCount=${(parsed.scannerBanlist ?? []).length}`);
-      return parsed;
+      return normalized;
     } catch {
       return createDefaultAppSettings();
     }

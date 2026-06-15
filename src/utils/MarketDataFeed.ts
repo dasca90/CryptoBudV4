@@ -1,6 +1,7 @@
 import type { MarketPrice, SymbolFilters, MarketDataQualityLevel } from '../core/types';
 import { parseSymbolFilters, isSymbolTradable } from '../core/market-data/symbol-filters';
-import { evaluateMarketDataQuality } from '../core/market-data/market-data-quality';
+import { evaluateMarketDataQuality, getStalePriceAgeMs, getStaleBookAgeMs } from '../core/market-data/market-data-quality';
+import { logger } from './logger';
 
 type PriceCallback = (price: MarketPrice) => void;
 
@@ -175,6 +176,8 @@ export class MarketDataFeed {
       volumeRel: 1, ticker24hAvailable: false, klineAvailable: false,
       exchangeInfoAvailable: this.exchangeInfo !== null, filters,
     });
+
+    logger.throttled('INFO', `BOOK_TICKER_FRESHNESS_THRESHOLD_AUDIT: symbol=${symbol} priceAgeMs=${priceAgeMs} bookAgeMs=${bookAgeMs} stalePriceMs=${getStalePriceAgeMs()} staleBookMs=${getStaleBookAgeMs()} sameTimestamp=${priceAgeMs === bookAgeMs ? 'true' : 'false'} priceFresh=${String(result.priceFresh)} bookFresh=${String(result.bookFresh)} blockBookStale=${String(!result.bookFresh)}`, `book_freshness_${symbol}`, 30000);
 
     return {
       quality: result.quality,

@@ -69,9 +69,11 @@ function resolveCanonicalPrimaryBlocker(input: {
   const has = (needle: string) => reasons.some((r) => r.includes(needle));
   if (!input.spreadOk || has('spread_slippage_too_high') || has('spread_too_high') || has('block_spread') || has('block_slippage')) return 'spread_slippage_too_high';
   if (!input.tpRoomOk || has('tp_room') || has('no_tp_room')) return 'tp_room_missing';
-  if (!input.priceFresh || has('price_not_fresh') || has('price_stale') || has('block_book_stale') || has('stale')) return 'price_not_fresh';
-  if (!input.dipConfirmed || has('dip_not_confirmed')) return 'dip_not_confirmed';
-  if (!input.reboundConfirmed || has('rebound_not_confirmed')) return 'rebound_not_confirmed';
+  if (!input.priceFresh) return 'price_not_fresh';
+  if (has('overextended') || has('over_extension')) return 'overextended';
+  if (has('candle') || has('exhaustion')) return 'candle_exhaustion';
+  if (!input.dipConfirmed) return 'dip_not_confirmed';
+  if (!input.reboundConfirmed) return 'rebound_not_confirmed';
   if (!input.finalExecutable) return 'finalExecutable_false';
   if (has('breakout_not_confirmed') || has('block_breakout_not_confirmed')) return 'breakout_not_confirmed';
   return reasons[0] ?? 'none';
@@ -145,13 +147,14 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     : (baseReboundConfirmed && reboundPct != null && reboundPct >= requiredReboundPct);
   const momentumRequired = strategyDef.momentumRequirement === 'required';
   const reboundRequired = strategyDef.reboundRequirement === 'required';
+  const dipRequired = strategyDef.metricRoles.dip === 'required';
   const priceFresh = !candidate.blockReasons?.some((b) => b.toLowerCase().includes('stale'));
   const fallingKnifeBlocked = candidate.blockReasons?.some((b) => b.toLowerCase().includes('falling_knife')) ?? false;
   const conservativeOverlay = strategySelected === 'balanced' && strategySource.toLowerCase().includes('fallback');
   const requiredSetupPassed =
     (!momentumRequired || momentumConfirmed)
     && (!reboundRequired || reboundConfirmed)
-    && dipConfirmed
+    && (!dipRequired || dipConfirmed)
     && spreadOk
     && tpRoomOk
     && priceFresh;

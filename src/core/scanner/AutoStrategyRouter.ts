@@ -37,8 +37,9 @@ export interface AutoStrategyRouterInput {
 }
 
 function getConfidenceTier(confidence: number): StrategyConfidenceTier {
-  if (confidence >= 80) return 'A_80_PLUS';
-  if (confidence >= 70) return 'B_70_80';
+  const pct = confidence > 1 ? confidence : Math.round(confidence * 100);
+  if (pct >= 80) return 'A_80_PLUS';
+  if (pct >= 70) return 'B_70_80';
   return 'C_BELOW_70';
 }
 
@@ -139,8 +140,20 @@ export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrateg
   }
 
   if (groupTrend === 'bearish' || groupTrend === 'bearish_or_unsafe') {
-    if (tier === 'A_80_PLUS' && momentumConfirmed && !overextended) {
-      return ret('conservative', 'AutoBots_SafeFallback', 'safety_downgrade', 'Group trend bearish - downgraded to conservative', ['GROUP_BEARISH_DOWNGRADE'], { blockedByGroupRegime: true });
+    if (tier === 'C_BELOW_70') {
+      return ret('wait', 'AutoBots_SafeFallback', 'confidence_below_tier', 'Bearish group and confidence below tier — waiting for safer setup', ['CONFIDENCE_BELOW_TIER'], { blockedByConfidence: true, confidenceAdjustment: 0 });
+    }
+    if (tier === 'A_80_PLUS' && !overextended) {
+      if (momentumConfirmed && reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh) {
+        return ret('momentum', 'AutoBots', 'per_coin_selector', 'Bearish group but A-tier with momentum+rebound — momentum selected', ['GROUP_BEARISH_PROMOTED']);
+      }
+      if (reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh) {
+        return ret('balanced', 'AutoBots', 'per_coin_selector', 'Bearish group but A-tier with strong rebound — balanced selected', ['GROUP_BEARISH_PROMOTED']);
+      }
+      return ret('conservative', 'AutoBots_SafeFallback', 'safety_downgrade', 'Group trend bearish - A-tier downgraded to conservative', ['GROUP_BEARISH_DOWNGRADE'], { blockedByGroupRegime: true });
+    }
+    if (confidence >= 75 && momentumConfirmed && reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh && !overextended) {
+      return ret('balanced', 'AutoBots', 'per_coin_selector', 'Bearish group but strong per-symbol balance — balanced selected', ['GROUP_BEARISH_PROMOTED']);
     }
     if (reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh) {
       return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Dip and rebound setup selected for bearish group', ['GROUP_BEARISH']);
@@ -149,6 +162,9 @@ export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrateg
   }
 
   if (groupTrend === 'caution') {
+    if (tier === 'C_BELOW_70') {
+      return ret('wait', 'AutoBots_SafeFallback', 'confidence_below_tier', 'Caution group and confidence below tier — waiting', ['CONFIDENCE_BELOW_TIER', 'GROUP_VOLATILITY_CAUTION'], { blockedByConfidence: true, confidenceAdjustment: 0 });
+    }
     warnings.push('GROUP_VOLATILITY_CAUTION');
     if (confidence >= 70 && reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh) {
       return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Caution group - dip and rebound selected with confirmation', ['GROUP_VOLATILITY_CAUTION']);
@@ -157,6 +173,9 @@ export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrateg
   }
 
   if (groupTrend === 'waiting_for_rebound') {
+    if (tier === 'C_BELOW_70') {
+      return ret('wait', 'AutoBots_SafeFallback', 'confidence_below_tier', 'Waiting for rebound and confidence below tier', ['CONFIDENCE_BELOW_TIER'], { blockedByConfidence: true, confidenceAdjustment: 0 });
+    }
     if (reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh) {
       return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Dip and rebound setup detected', []);
     }
@@ -165,7 +184,7 @@ export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrateg
 
   if (groupTrend === 'sideways') {
     if (reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh && !overextended) return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Sideways group - dip and rebound selected', []);
-    if (confidence >= 70 && momentumConfirmed && spreadPct < 0.3 && priceFresh && tpRoomOk && tier !== 'C_BELOW_70') return ret('balanced', 'AutoBots', 'per_coin_selector', 'Sideways group - balanced selected', []);
+    if (confidence >= 70 && momentumConfirmed && spreadPct < 0.3 && priceFresh && tpRoomOk) return ret('balanced', 'AutoBots', 'per_coin_selector', 'Sideways group - balanced selected', []);
     if (momentumPct > 1 && volumeRelative >= 0.5 && spreadPct < 0.3 && !fallingKnife) return ret('momentum', 'AutoBots', 'per_coin_selector', 'Sideways group - momentum selected', []);
     if (momentumPct > 0.5 && volumeRelative >= 0.8 && spreadPct < 0.4) return ret('momentum', 'AutoBots', 'per_coin_selector', 'Sideways group - momentum with volume', []);
     if (dipPct < -1 && tpRoomOk && !fallingKnife) return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Sideways group - dip and rebound with strong dip', []);
@@ -174,7 +193,10 @@ export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrateg
   }
 
   if (tier === 'A_80_PLUS' && momentumConfirmed && volumeRelative >= 0.5 && !overextended && spreadPct < 0.3 && priceFresh) return ret('momentum', 'AutoBots', 'per_coin_selector', 'Bullish group momentum strategy with high confidence', []);
-  if (tier !== 'C_BELOW_70' && momentumConfirmed && spreadPct < 0.5 && priceFresh && tpRoomOk) return ret('balanced', 'AutoBots', 'per_coin_selector', 'Bullish group balanced strategy', []);
+  if (tier === 'C_BELOW_70') {
+    return ret('wait', 'AutoBots_SafeFallback', 'confidence_below_tier', `Bullish group but confidence below tier — tier=${tier} confidence=${confidence}`, ['CONFIDENCE_BELOW_TIER'], { blockedByConfidence: true, confidenceAdjustment: 0 });
+  }
+  if (momentumConfirmed && spreadPct < 0.5 && priceFresh && tpRoomOk) return ret('balanced', 'AutoBots', 'per_coin_selector', 'Bullish group balanced strategy', []);
   if (reboundConfirmed && dipPct < 0 && tpRoomOk && spreadPct < 0.5 && priceFresh && !fallingKnife) return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Bullish group dip and rebound strategy', []);
   if (momentumPct > 0.5 && volumeRelative >= 0.8 && spreadPct < 0.4 && !fallingKnife && !overextended) return ret('momentum', 'AutoBots', 'per_coin_selector', 'Bullish group momentum via per-candidate features', []);
   if (momentumPct > 0.3 && volumeRelative > 1 && spreadPct < 0.4) return ret('balanced', 'AutoBots', 'per_coin_selector', 'Bullish group balanced via per-candidate features', []);
@@ -183,7 +205,7 @@ export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrateg
   if (momentumPct > 0.5 && volumeRelative >= 0.8 && spreadPct < 0.4) return ret('momentum', 'AutoBots', 'per_coin_selector', 'Default momentum via per-candidate features', []);
   if (momentumPct > 0.3 && volumeRelative >= 0.5 && spreadPct < 0.5) return ret('balanced', 'AutoBots', 'per_coin_selector', 'Default balanced via per-candidate features', []);
   if (dipPct < -0.5 && tpRoomOk) return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Default dip and rebound via dipPct', []);
-  return ret('conservative', 'AutoBots_SafeFallback', 'fallback_conservative', 'Default conservative fallback', []);
+  return ret('conservative', 'AutoBots_SafeFallback', 'fallback_conservative', `Default conservative fallback — tier=${tier} confidence=${confidence} momentumConfirmed=${momentumConfirmed} spreadPct=${spreadPct.toFixed(2)}`, confidence < 70 ? ['CONFIDENCE_BELOW_TIER'] : ['NO_STRATEGY_MATCHED']);
 }
 
 export function buildAutoStrategySummary(decisions: AutoStrategyDecision[]): {

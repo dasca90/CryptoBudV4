@@ -935,6 +935,7 @@ export type StrategySourceDetail =
   | 'per_coin_selector'
   | 'group_fallback'
   | 'safety_downgrade'
+  | 'confidence_below_tier'
   | 'market_context'
   | 'fallback_conservative'
   | 'data_stale_safe_fallback';
@@ -952,6 +953,7 @@ export interface AutoStrategyDecision {
   confidenceAdjustment: number;
   blockedByGroupRegime: boolean;
   blockedBySafety: boolean;
+  blockedByConfidence?: boolean;
   reason: string;
   warnings: string[];
   marketAnalyzerBestFit?: AutoStrategyName | null;
@@ -1269,6 +1271,7 @@ export interface ExecutionPlan {
   watchPoolSize: number;
   nearMissPoolSize: number;
   maxEntriesPerCycle: number;
+  maxSelectedPerScan: number;
   availableSlots: number;
   capitalAvailable: number;
   decisionMode: 'unified';
@@ -1638,8 +1641,18 @@ export interface AppSettings {
   scannerUniverseMode: 'BINANCE_TOP_250' | 'TOP_100' | 'TOP_50' | 'TOP_20' | 'WATCHLIST';
   scannerUniverseSize: number;
   scannerFinalPoolSize: number;
+  scannerCandidatePoolSize: number;
+  min24hQuoteVolumeUsdt: number;
+  maxSymbolsScanned: number;
+  momentumWeight: number;
+  volumeSurgeWeight: number;
+  breakoutWeight: number;
+  newMoverBonus: number;
+  enableNewMoverBonus: boolean;
   antiFomoMode: 'off' | 'balanced' | 'strict';
   maxEntriesPerCycle: number;
+  maxSelectedPerScan: number;
+  maxSelectedPerScanUserSet?: boolean;
   maxEntryGateAttemptsPerScan: number;
   maxEntriesPerCoinPerDay: number;
   cooldownAfterBuyMs: number;
@@ -1702,8 +1715,18 @@ export function createDefaultAppSettings(): AppSettings {
     scannerUniverseMode: 'BINANCE_TOP_250',
     scannerUniverseSize: 250,
     scannerFinalPoolSize: 20,
+    scannerCandidatePoolSize: 20,
+    min24hQuoteVolumeUsdt: 100000,
+    maxSymbolsScanned: 100,
+    momentumWeight: 0.55,
+    volumeSurgeWeight: 0.25,
+    breakoutWeight: 0.20,
+    newMoverBonus: 18,
+    enableNewMoverBonus: true,
     antiFomoMode: 'balanced',
-    maxEntriesPerCycle: 4,
+    maxEntriesPerCycle: 10,
+    maxSelectedPerScan: 10,
+    maxSelectedPerScanUserSet: false,
     maxEntryGateAttemptsPerScan: 10,
     maxEntriesPerCoinPerDay: 2,
     cooldownAfterBuyMs: 30000,
