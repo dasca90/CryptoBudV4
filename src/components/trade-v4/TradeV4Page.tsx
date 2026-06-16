@@ -1,4 +1,4 @@
-﻿import { useMemo, useState, useEffect, useRef } from "react";
+﻿import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import type { TradeV4PageModel, TradingParametersView } from "./types";
 import { TopStatusBar } from "./TopStatusBar";
 import { SideNavigation } from "./SideNavigation";
@@ -13,8 +13,10 @@ import { CandidatePoolSummaryPanel } from "./CandidatePoolSummaryPanel";
 import { MarketGroupSummaryCard } from "./MarketGroupSummaryCard";
 import { ExecutionInsightsCard } from "./ExecutionInsightsCard";
 import { TradingParametersCard } from "./TradingParametersCard";
+import { RecentExecutionsCard } from "./RecentExecutionsCard";
 import { MicroScalperPanel } from "./MicroScalperPanel";
 import { getTabSymbol } from "../../lib/ui/uiSymbolMapper";
+import { logger } from "../../utils/logger";
 import "./trade-v4.css";
 
 export function TradeV4Page(props: {
@@ -95,7 +97,20 @@ export function TradeV4Page(props: {
     ro.observe(el); return () => ro.disconnect();
   }, []);
 
-  const selectSymbol = (s: string) => { setLocalSelected(s); props.onSelectSymbol(s); };
+  useEffect(() => {
+    const id = setInterval(() => {
+      const openWs = document.querySelector('[data-testid="open-positions-workspace"]');
+      const closedWs = document.querySelector('[data-testid="closed-positions-workspace"]');
+      const openTable = openWs?.querySelector('.table-scroll-both') as HTMLElement | null;
+      const closedTable = closedWs?.querySelector('.table-scroll-both') as HTMLElement | null;
+      const openPanel = openWs?.querySelector('.v3-positions-window') as HTMLElement | null;
+      const closedPanel = closedWs?.querySelector('.v3-positions-window') as HTMLElement | null;
+      logger.info(`POSITIONS_PANEL_LAYOUT_AUDIT: viewportHeight=${window.innerHeight} openPanelHeight=${openPanel?.offsetHeight ?? 0} closedPanelHeight=${closedPanel?.offsetHeight ?? 0} openTableScrollHeight=${openTable?.scrollHeight ?? 0} openTableClientHeight=${openTable?.clientHeight ?? 0} closedTableScrollHeight=${closedTable?.scrollHeight ?? 0} closedTableClientHeight=${closedTable?.clientHeight ?? 0} openCanScrollVertical=${String((openTable?.scrollHeight ?? 0) > (openTable?.clientHeight ?? 0))} closedCanScrollVertical=${String((closedTable?.scrollHeight ?? 0) > (closedTable?.clientHeight ?? 0))}`);
+    }, 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  const selectSymbol = useCallback((s: string) => { setLocalSelected(s); props.onSelectSymbol(s); }, [props.onSelectSymbol]);
 
   return (
     <div className="trade-v4-grid-v3">
@@ -180,16 +195,18 @@ export function TradeV4Page(props: {
           </div>
         </div>
 
-        {/* ── MAIN CENTER — 2x2 Dashboard Grid ── */}
-        <div className="trade-v4-center" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gridTemplateRows: '2fr 1fr', gap: 6, overflow: 'hidden', minHeight: 0 }}>
-          {/* Top-Left: Scanner 3D */}
-          <div style={{ overflow: 'hidden', minHeight: 120, height: '100%' }}>
-            <div
-              ref={scannerRef}
-              className={`scanner-v3 panel panel-shell panel-shell-scanner scanner-mode-${scannerMode}`}
-              data-testid="air-scanner-3d-panel"
-              style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
-            >
+        {/* ── MAIN CENTER — Left grid + Right positions flex column ── */}
+        <div className="trade-v4-center" style={{ display: 'flex', gap: 6, overflow: 'hidden', minHeight: 0 }}>
+          {/* Left Column: scanner + candidates stacked */}
+          <div style={{ flex: '1 1 55%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, overflow: 'hidden', minHeight: 0 }}>
+            {/* Top-Left: Scanner 3D */}
+            <div style={{ flex: 1, overflow: 'hidden', minHeight: 120 }}>
+              <div
+                ref={scannerRef}
+                className={`scanner-v3 panel panel-shell panel-shell-scanner scanner-mode-${scannerMode}`}
+                data-testid="air-scanner-3d-panel"
+                style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+              >
               <div className="scanner-toolbar">
                 <div className="panel-title">Scanner Size</div>
                 <div className="scanner-toolbar-actions">
@@ -198,7 +215,7 @@ export function TradeV4Page(props: {
                   <button className={`btn btn-sm ${scannerMode === 'hidden' ? 'btn-primary' : 'btn-default'}`} onClick={() => setScannerMode('hidden')}>Hidden</button>
                 </div>
               </div>
-              {scannerMode === 'hidden' ? (
+              {scannerMode === 'hidden' && (
                 <div className="scanner-summary-bar" data-testid="scanner-summary-bar">
                   <span>Scanner {props.model.scannerRunning ? 'running' : 'stopped'}</span>
                   <span>candidates {props.model.candidates.length}</span>
@@ -207,7 +224,8 @@ export function TradeV4Page(props: {
                   <span>blocked {props.model.candidates.filter(c => c.status === 'BLOCK').length}</span>
                   <span>last scan {props.model.referencePeriod ?? 'n/a'}</span>
                 </div>
-              ) : (
+              )}
+              <div style={{ display: scannerMode === 'hidden' ? 'none' : 'block', height: scannerMode === 'hidden' ? 0 : '100%', overflow: 'hidden' }}>
                 <AirScanner3D
                   candidates={props.model.candidates} openPositions={props.model.openPositions}
                   closedPositions={props.model.closedPositions}
@@ -216,17 +234,12 @@ export function TradeV4Page(props: {
                   selectedSymbol={selectedSymbol} onSelectSymbol={selectSymbol}
                   active={props.model.scannerRunning} emptyUniverseReason={props.model.emptyUniverseReason}
                 />
-              )}
+              </div>
             </div>
           </div>
 
-          {/* Top-Right: Open Positions */}
-          <div className="open-v4" data-testid="open-positions-workspace" style={{ overflow: 'hidden', minHeight: 120 }}>
-            <OpenPositionsPanel positions={props.model.openPositions} restoring={props.model.restoringOpenPositions} />
-          </div>
-
           {/* Bottom-Left: Candidate Pool + Execution Insights stacked */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, overflow: 'hidden', minHeight: 160 }}>
+          <div style={{ flex: '0 0 auto', display: 'flex', flexDirection: 'column', gap: 4, overflow: 'hidden', minHeight: 160 }}>
             <div className="pool-v3 panel-shell panel-shell-candidate" data-testid="candidate-pool-panel" style={{ flexShrink: 0 }}>
               <CandidatePoolSummaryPanel
                 candidates={props.model.candidates} executionPoolSize={props.model.executionPoolSize}
@@ -238,6 +251,7 @@ export function TradeV4Page(props: {
                 executionPlan={props.model.executionPlan ?? null}
               />
             </div>
+            <RecentExecutionsCard />
             <div style={{ flex: 1, minHeight: 60, overflow: 'hidden' }}>
               <ExecutionInsightsCard
                 noBuyDisplay={props.model.noBuyDisplay}
@@ -246,12 +260,21 @@ export function TradeV4Page(props: {
               />
             </div>
           </div>
+          </div>{/* End Left Column */}
 
-          {/* Bottom-Right: Closed Positions */}
-          <div className="closed-v4" data-testid="closed-positions-workspace" style={{ overflow: 'hidden', minHeight: 160 }}>
-            <ClosedPositionsPanel positions={props.model.closedPositions} restoring={props.closedTradesRestoring} />
-          </div>
-        </div>
+          {/* Right Column: Open + Closed Positions stacked vertically, filling all space */}
+          <div style={{ flex: '1 1 45%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8, overflow: 'hidden', minHeight: 0 }}>
+            {/* Top-Right: Open Positions */}
+            <div className="open-v4" data-testid="open-positions-workspace" style={{ flex: '1 1 0', minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <OpenPositionsPanel positions={props.model.openPositions} restoring={props.model.restoringOpenPositions} />
+            </div>
+
+            {/* Bottom-Right: Closed Positions */}
+            <div className="closed-v4" data-testid="closed-positions-workspace" style={{ flex: '1 1 0', minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <ClosedPositionsPanel positions={props.model.closedPositions} restoring={props.closedTradesRestoring} />
+            </div>
+          </div>{/* End Right Column */}
+        </div>{/* End Center */}
 
         {/* ── RIGHT COLUMN ── */}
         <div className="trade-v4-right">

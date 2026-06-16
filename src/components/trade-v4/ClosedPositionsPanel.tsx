@@ -1,7 +1,8 @@
 import { memo, useMemo, useState } from "react";
 import type { TradeV4ClosedPositionView } from "./types";
+import { formatLocalTime } from "../../utils/timeFormatter";
 
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 15;
 const closeReasonTone = (v?: string) => {
   const s = String(v ?? '').toUpperCase();
   if (s.includes('TP')) return 'pill-green';
@@ -147,8 +148,8 @@ export const ClosedPositionsPanel = memo(function ClosedPositionsPanel(props: { 
                     <td className={p.pnlPct >= 0 ? "status-good" : "status-bad"}>{p.pnlPct.toFixed(2)}%</td>
                     <td className={p.pnlUsd >= 0 ? "status-good" : "status-bad"}>{p.pnlUsd.toFixed(2)}</td>
                     <td className={p.pnlUsd >= 0 ? "status-good" : "status-bad"}>{p.pnlUsd.toFixed(2)}</td>
-                    <td>{p.openedAtLabel ? (p.openedAtLabel.replace('T', ' ').slice(0, 19)) : 'n/a'}</td>
-                    <td>{p.closedAtLabel ? (p.closedAtLabel.replace('T', ' ').slice(0, 19)) : 'n/a'}</td>
+                    <td>{formatLocalTime(p.openedAtLabel, { format: 'datetime' })}</td>
+                    <td>{formatLocalTime(p.closedAtLabel, { format: 'datetime' })}</td>
                     <td>{p.durationLabel}</td>
                     <td><span className={`v3-pill ${closeReasonTone(p.closeReason)}`}>{p.exitReasonDisplay ?? p.closeReason}</span></td>
                     <td>{p.refPriceAtEntry != null ? p.refPriceAtEntry.toFixed(6) : (p.pnlBreakdown?.entryPrice != null ? Number(p.pnlBreakdown.entryPrice).toFixed(6) : (p.entryRule ?? 'n/a'))}</td>

@@ -209,6 +209,44 @@ export class PaperExchangeAdapter implements ExchangeAdapter {
     return this.positions.get(coin);
   }
 
+  reconcileHolding(coin: string, qty: number, avgEntry: number): void {
+    const existing = this.positions.get(coin);
+    const paperQtyBefore = existing?.quantity ?? 0;
+    const paperAvgBefore = existing?.avgEntry ?? 0;
+    if (qty <= 0) {
+      if (existing && paperQtyBefore > 0) {
+        logger.info(`PAPER_HOLDINGS_RECONCILIATION_AUDIT: symbol=${coin} positionManagerQty=${qty} paperHoldingQtyBefore=${paperQtyBefore} paperHoldingQtyAfter=0 source=reconcileHolding_call mismatchFixed=true action=removed_zero_qty`);
+        this.positions.delete(coin);
+      }
+      return;
+    }
+    if (!existing || paperQtyBefore <= 0) {
+      this.positions.set(coin, { coin, quantity: qty, avgEntry });
+      logger.info(`PAPER_HOLDINGS_RECONCILIATION_AUDIT: symbol=${coin} positionManagerQty=${qty} paperHoldingQtyBefore=${paperQtyBefore} paperHoldingQtyAfter=${qty} source=reconcileHolding_call mismatchFixed=true action=created_paper_holding`);
+    } else if (Math.abs(paperQtyBefore - qty) > 0.00001) {
+      const prevQty = paperQtyBefore;
+      this.positions.set(coin, { coin, quantity: qty, avgEntry: avgEntry > 0 ? avgEntry : paperAvgBefore });
+      logger.info(`PAPER_HOLDINGS_RECONCILIATION_AUDIT: symbol=${coin} positionManagerQty=${qty} paperHoldingQtyBefore=${prevQty} paperHoldingQtyAfter=${qty} source=reconcileHolding_call mismatchFixed=true action=updated_paper_holding`);
+    } else {
+      logger.info(`PAPER_HOLDINGS_RECONCILIATION_AUDIT: symbol=${coin} positionManagerQty=${qty} paperHoldingQtyBefore=${paperQtyBefore} paperHoldingQtyAfter=${paperQtyBefore} source=reconcileHolding_call mismatchFixed=false action=already_synced`);
+    }
+  }
+
+  reconcileAllHoldings(positions: Array<{ coin: string; quantity: number; avgEntryPrice: number }>): void {
+    const syncedSymbols = new Set<string>();
+    for (const pos of positions) {
+      if (!pos.coin) continue;
+      syncedSymbols.add(pos.coin);
+      this.reconcileHolding(pos.coin, pos.quantity, pos.avgEntryPrice);
+    }
+    for (const [coin, paperPos] of this.positions) {
+      if (!syncedSymbols.has(coin) && paperPos.quantity > 0) {
+        this.positions.delete(coin);
+        logger.info(`PAPER_HOLDINGS_RECONCILIATION_AUDIT: symbol=${coin} positionManagerQty=0 paperHoldingQtyBefore=${paperPos.quantity} paperHoldingQtyAfter=0 source=reconcileAllHoldings mismatchFixed=true action=removed_stale_paper_holding`);
+      }
+    }
+  }
+
   getTotalEquity(): number {
     const usdt = this.balances.get('USDT') || 0;
     let coinValue = 0;

@@ -274,6 +274,8 @@ export function TradePage({
         maxSlippagePct: s.maxSlippagePct ?? prev.maxSlippagePct,
         maxTotalEntryCostPct: s.maxTotalEntryCostPct ?? prev.maxTotalEntryCostPct,
         maxPriceAgeMs: s.maxPriceAgeMs ?? prev.maxPriceAgeMs,
+        refWindow: s.refWindow ?? prev.refWindow,
+        refMode: s.refMode ?? prev.refMode,
         scannerRiskGroups,
         scannerReferencePeriod,
         scannerUniverseMode,
@@ -294,6 +296,12 @@ export function TradePage({
         autoTradingCapital: (s as any).autoTradingCapital ?? prev.autoTradingCapital,
         capitalPerCoin: (s as any).capitalPerCoin ?? s.capitalPerTrade ?? prev.capitalPerCoin,
         maxOpenPositions: s.maxPositions ?? prev.maxOpenPositions,
+        antiFomoMode: (s as any).antiFomoMode ?? prev.antiFomoMode,
+        maxOverextensionPct: (s as any).maxOverextensionPct ?? prev.maxOverextensionPct,
+        maxEntryGateAttemptsPerScan: (s as any).maxEntryGateAttemptsPerScan ?? prev.maxEntryGateAttemptsPerScan,
+        maxEntriesPerCoinPerDay: (s as any).maxEntriesPerCoinPerDay ?? prev.maxEntriesPerCoinPerDay,
+        cooldownAfterBuyMs: (s as any).cooldownAfterBuyMs ?? prev.cooldownAfterBuyMs,
+        cooldownAfterLossMs: (s as any).cooldownAfterLossMs ?? prev.cooldownAfterLossMs,
         manualDipperSetup: {
           ...defaultManualDipperSetup,
           ...((s as any).manualDipperSetup ?? {}),
@@ -322,6 +330,8 @@ export function TradePage({
         logger.info(`AUTOBOTS_HYDRATION_CONFLICT: persistedValue=${persistedAutoBots} storeValue=${paperAutoEnabled} lastUserToggleAt=${userToggleTime} hydrationAt=${hydrationTime} chosenValue=${paperAutoEnabled} reason=user_toggle_wins_over_stale_persisted`);
       }
       logger.info(`USER_SETTINGS_HYDRATED: tradingCapital=${(s as any).autoTradingCapital ?? 1000} capitalPerCoin=${(s as any).capitalPerCoin ?? s.capitalPerTrade ?? 100} maxOpenPositions=${s.maxPositions ?? 10} bannedCoinsCount=${scannerBanlist.length}`);
+      logger.info(`TRADING_PARAMETERS_RESTORE_AUDIT: reason=component_mount loadedRefPeriod=${scannerReferencePeriod} loadedRefMode=${s.refMode ?? 'not_persisted'} loadedRefWindow=${s.refWindow ?? 'not_persisted'} loadedStrategy=${s.riskStyle ?? 'balanced'} sourceUsed=${s.refMode ? 'persisted_store' : 'defaults'} usedDefaults=${String(!s.refMode)} hydrationComplete=true`);
+      logger.info(`TRADING_SETTINGS_UI_BINDING_AUDIT: displayedRefPeriod=${airParams.scannerReferencePeriod} canonicalRefPeriod=${s.scannerReferencePeriod} displayedRefMode=${airParams.refMode} canonicalRefMode=${s.refMode} displayedRefWindow=${airParams.refWindow} canonicalRefWindow=${s.refWindow} mismatchDetected=${String(airParams.scannerReferencePeriod !== s.scannerReferencePeriod || airParams.refMode !== s.refMode)} sourceUsed=${s.refMode ? 'persisted_store' : 'defaults'}`);
       setUserTradingSettingsHydrated(true);
     })();
   }, [onScannerConfigChange, engine]);
@@ -366,6 +376,17 @@ export function TradePage({
       capitalPerTrade: airParams.capitalPerCoin,
       autoTradingCapital: airParams.autoTradingCapital as any,
       capitalPerCoin: airParams.capitalPerCoin as any,
+      refWindow: airParams.refWindow as any,
+      refMode: airParams.refMode as any,
+      scannerCandidatePoolSize: airParams.scannerCandidatePoolSize as any,
+      min24hQuoteVolumeUsdt: airParams.min24hQuoteVolumeUsdt as any,
+      maxSymbolsScanned: airParams.maxSymbolsScanned as any,
+      momentumWeight: airParams.momentumWeight as any,
+      volumeSurgeWeight: airParams.volumeSurgeWeight as any,
+      breakoutWeight: airParams.breakoutWeight as any,
+      newMoverBonus: airParams.newMoverBonus as any,
+      enableNewMoverBonus: airParams.enableNewMoverBonus as any,
+      maxOverextensionPct: airParams.maxOverextensionPct as any,
       manualDipperSetup: airParams.manualDipperSetup as any,
       updatedAt: new Date().toISOString(),
     } as any);
@@ -387,6 +408,7 @@ export function TradePage({
       scannerBanlist: canonicalBanlist,
     });
     logger.info(`USER_SETTINGS_SAVE_SUCCESS: tradingCapital=${airParams.autoTradingCapital} capitalPerCoin=${airParams.capitalPerCoin} maxOpenPositions=${airParams.maxOpenPositions} bannedCoinsCount=${canonicalBanlist.length} source=UI`);
+    logger.info(`TRADING_PARAMETERS_APPLY_AUDIT: submittedRefPeriod=${airParams.scannerReferencePeriod} submittedRefMode=${airParams.refMode} submittedRefWindow=${airParams.refWindow} submittedStrategy=${airParams.strategy} submittedStopLoss=${airParams.stopLossPct} submittedTp2=${airParams.tp2Pct} persistenceWriteSuccess=true storageTarget=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri_sqlite' : 'localStorage'} changedFields=${JSON.stringify({ scannerReferencePeriod: airParams.scannerReferencePeriod, refMode: airParams.refMode, refWindow: airParams.refWindow })}`);
   }, [airParams, onScannerConfigChange]);
 
   const positionManagerOpenPositions = engine.getPositionManager().getOpenPositions();

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { StatusBadge } from '../../components/ui/StatusBadge';
 import { EquityCurveChart } from '../../components/charts/EquityCurveChart';
+import { formatLocalTime } from '../../utils/timeFormatter';
 import type { Journal } from '../../core/persistence/Journal';
 import type { MLBrainModel, ImportedMLRow } from '../../core/types';
 import { importMLJson } from '../../core/ml/ml-importer';
@@ -197,7 +198,7 @@ export function MLLabPage({
           </div>
           {brain && brain.trainedAt && (
             <div style={{ fontSize: 11, color: '#8b949e', marginTop: 6 }}>
-              Last trained: {new Date(brain.trainedAt).toLocaleString()}
+              Last trained: {formatLocalTime(brain.trainedAt, { format: 'full' })}
             </div>
           )}
           {brain?.lastImportSummary && (

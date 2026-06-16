@@ -136,7 +136,8 @@ export function resolveAutoTargetOwnership(input: {
     || includesAny(source, ['manual'])
     || includesAny(executionPath, ['manual']);
 
-  const scannerPath = includesAny(executionPath, ['executeplannedscannerbuy', 'executescannerbuy', 'planned_scanner_buy', 'scanner']);
+  const scannerPath = executionPath === 'scanner_auto'
+    || includesAny(executionPath, ['executeplannedscannerbuy', 'executescannerbuy', 'planned_scanner_buy', 'scanner_auto']);
   const scannerOwned = includesAny(ownerType, ['scanner'])
     || includesAny(ownerName, ['the dipper', 'dipper', 'autobots'])
     || includesAny(source, ['autobots', 'the dipper', 'dipper', 'scanner'])
@@ -151,10 +152,10 @@ export function resolveAutoTargetOwnership(input: {
   const isManualOverride = isManualTrade;
   const weakStrategySourceWouldMiss = isAutoTargetOwned && !includesAny(strategySource, ['autobots']);
 
-  const resolverPath = ownershipAuto
-    ? 'tradingTargetOwnership'
-    : isScannerAutoTrade
-      ? (scannerPath ? 'execution_path_scanner_auto' : 'candidate_scanner_auto')
+  const resolverPath = isScannerAutoTrade
+    ? 'scanner_auto'
+    : ownershipAuto
+      ? 'tradingTargetOwnership'
       : isManualTrade
         ? 'manual_override'
         : 'unknown_non_auto';

@@ -3,6 +3,7 @@ import type { MicroScalperSettings } from "../../core/scalper/MicroScalperTypes"
 import { createDefaultMicroScalperSettings } from "../../core/scalper/MicroScalperTypes";
 import { updateScalperSettings, enableScalper, disableScalper } from "../../core/scalper/MicroScalperEngine";
 import { logger } from "../../utils/logger";
+import { formatLocalTime } from "../../utils/timeFormatter";
 
 interface MicroScalperPanelProps {
   enabled: boolean;
@@ -78,7 +79,7 @@ export function MicroScalperPanel(props: MicroScalperPanelProps) {
 
       {props.lastScanAt && (
         <div style={{ fontSize: 7, color: '#484f58', marginBottom: 4 }}>
-          Last scan: {new Date(props.lastScanAt).toLocaleTimeString()}
+          Last scan: {formatLocalTime(props.lastScanAt, { format: 'time' })}
         </div>
       )}
 

@@ -44,19 +44,20 @@ export class AutoRuntime {
 
   async start(universeMode?: UniverseMode): Promise<void> {
     if (this.running) return;
-    logger.info('AUTO_RUNTIME: Starting');
+    logger.info(`AUTO_RUNTIME: Starting scannerInstanceId=${this.scanner.getScannerInstanceId()} paperAutoExecutionEnabled=${String(this.scanner.isPaperAutoEnabled())} paperAutoBuyFnPresent=${String(this.scanner.hasPaperAutoBuyFn())} logSinkName=logger.getLogs/logger.export`);
     this.running = true;
 
     await this.scanner.start();
+    this.scanner.startCandidateRevalidationLoop();
 
     logger.info('AUTO_RUNTIME: Started');
     this.scanLoopTask = this.runLoop(universeMode);
-
   }
 
   async stop(): Promise<void> {
     this.running = false;
     this.scanLoopTask = null;
+    this.scanner.stopCandidateRevalidationLoop();
     await this.scanner.stop();
     logger.info('AUTO_RUNTIME: Stopped');
   }

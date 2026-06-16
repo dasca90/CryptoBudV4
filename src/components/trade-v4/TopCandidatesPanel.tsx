@@ -176,6 +176,13 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
     const skippedMap = new Map((props.executionPlan?.skippedCandidates ?? []).map((s) => [s.symbol, s.reason]));
     const displaySig = top.map((c) => `${c.symbol}:${c.status}:${String(c.finalExecutable)}:${resolveWhyNoBuy(c).label}`).join('|');
     logger.info(`TOP_CANDIDATE_DISPLAY_AUDIT: mode=${viewMode} count=${top.length} compact=${String(viewMode === 'compact')} detailed=${String(viewMode === 'detailed')} signature=${displaySig || 'none'}`);
+    const buyReadyCount = top.filter((c) => c.status === 'BUY' && c.finalExecutable).length;
+    const selectedCount = props.executionPlan?.selectedCandidates?.length ?? 0;
+    const attemptedCount = 0; // not available in UI — we use handoffEmitted as proxy
+    const handoffEmitted = selectedCount > 0 || props.executionPlan?.canExecute === false;
+    if (buyReadyCount > 0 && !handoffEmitted && !props.noBuyDisplay?.finalNoBuyReason) {
+      logger.warn(`TOP_CANDIDATE_BUY_READY_NO_HANDOFF: buyReadyCount=${buyReadyCount} selectedCount=${selectedCount} reason=buy_ready_candidates_visible_but_no_execution_handoff_in_same_snapshot`);
+    }
     for (const c of top) {
       const baseWhy = resolveWhyNoBuy(c);
       const selectedForExecution = executionSelected.has(c.symbol);
@@ -185,10 +192,29 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
         : baseWhy.label;
       logger.info(`TOP_CANDIDATE_STATUS_REASON_AUDIT: symbol=${c.symbol} status=${c.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} why=${resolvedWhy} primaryBlocker=${c.primaryBlocker ?? 'none'} setupResult=${c.strategyAudit?.dynamicSetupContext?.setupResult ?? 'none'}`);
       if (c.finalExecutable && !selectedForExecution) {
-        const perCandidateFinalReason = skipReason || props.noBuyDisplay?.finalNoBuyReason || 'selection_limit_reached';
+        const perCandidateFinalReason = skipReason || props.noBuyDisplay?.finalNoBuyReason || 'execution_not_triggered';
         logger.warn(`TOP_CANDIDATE_BUY_READY_NOT_EXECUTED_AUDIT: symbol=${c.symbol} status=${c.status} why=${resolvedWhy} skipReason=${skipReason || 'none'} finalNoBuyReason=${perCandidateFinalReason}`);
+        const gate = c.gateAudit;
+        const dup = (gate?.blocker ?? '').toLowerCase().includes('duplicate') || c.blockReasons?.some(r => String(r).toLowerCase().includes('duplicate'));
+        const pending = (gate?.blocker ?? '').toLowerCase().includes('pending') || c.blockReasons?.some(r => String(r).toLowerCase().includes('pending'));
+        const banned = (gate?.blocker ?? '').toLowerCase().includes('ban');
+        const spreadOk = (c.spreadPct ?? 0) <= 0.35;
+        const tpRoomOk = (c as any).tpRoomOk !== false;
+        const priceFresh = (c as any).priceAgeMs != null && (c as any).priceAgeMs < 10000;
+        const exactReason = dup ? 'DUPLICATE_OPEN_POSITION' : pending ? 'PENDING_ORDER_LOCK' : banned ? 'BANNED_SYMBOL' : !spreadOk ? 'SPREAD_TOO_HIGH' : !tpRoomOk ? 'TP_ROOM_INVALID' : !priceFresh ? 'PRICE_STALE' : (skipReason || perCandidateFinalReason);
+        logger.warn(`BUY_READY_NOT_SELECTED_REASON_AUDIT: symbol=${c.symbol} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} setupResult=SETUP_OK selectedForExecution=false executionSubmitted=false adapterCalled=false duplicateOpenPosition=${String(dup)} pendingOrder=${String(pending)} banned=${String(banned)} spreadOk=${String(spreadOk)} tpRoomOk=${String(tpRoomOk)} priceFresh=${String(priceFresh)} capitalOk=true maxOpenPositionsOk=true maxGroupPositionsOk=n/a maxGroupExposureOk=n/a groupName=n/a groupOpenCount=n/a groupMaxOpen=n/a groupExposure=n/a groupMaxExposure=n/a exactNotSelectedReason=${exactReason}`);
+      }
+      const integrityViolation = c.status === 'BUY' && !c.finalExecutable && c.buyAllowed === true;
+      if (integrityViolation) {
+        logger.error(`BUY_STATUS_INTEGRITY_AUDIT: symbol=${c.symbol} status=${c.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} integrityViolation=true reason=finalExecutable_false_but_buyAllowed_true`);
       }
     }
+    const buystatus = top.filter(c => c.status === 'BUY');
+    const execBuyReady = buystatus.filter(c => c.finalExecutable && c.buyAllowed).length;
+    const waitMarkedBuy = buystatus.filter(c => !c.finalExecutable || !c.buyAllowed).length;
+    const entryGateAllowButNotExec = buystatus.filter(c => !c.finalExecutable && c.gateAudit?.blocker === undefined).length;
+    const invariantOk = waitMarkedBuy === 0 || entryGateAllowButNotExec === 0;
+    logger.info(`BUY_STATUS_INTEGRITY_AUDIT: totalCandidateBuyStatus=${buystatus.length} executableBuyReadyCount=${execBuyReady} waitButMarkedBuyCount=${waitMarkedBuy} finalExecutableFalseButBuyAllowedCount=${buystatus.filter(c => !c.finalExecutable && c.buyAllowed).length} entryGateAllowButFinalExecutableFalseCount=${entryGateAllowButNotExec} invariantOk=${String(invariantOk)}`);
   }, [top, props.executionPlan, props.noBuyDisplay, viewMode]);
 
   useEffect(() => {

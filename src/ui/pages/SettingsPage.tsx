@@ -3,6 +3,7 @@ import type { LiveSafetyState, AppSettings, TelegramSettings } from '../../core/
 import { createDefaultAppSettings, createDefaultTelegramSettings } from '../../core/types';
 import { PersistenceBadge } from '../../components/ui/PersistenceBadge';
 import { ConfirmDangerAction } from '../../components/ui/ConfirmDangerAction';
+import { formatLocalTime } from '../../utils/timeFormatter';
 import { SettingsPersistence } from '../../core/persistence/SettingsPersistence';
 import { TelegramNotifier } from '../../core/notifications/TelegramNotifier';
 import type { Journal } from '../../core/persistence/Journal';
@@ -307,8 +308,8 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
         </div>
         {dbInfo && (
           <div style={{ fontSize: 10, color: '#484f58', marginBottom: 12 }}>
-            {dbInfo.lastSaveTime && <div>Last Save: {new Date(dbInfo.lastSaveTime).toLocaleTimeString()}</div>}
-            {dbInfo.lastLoadTime && <div>Last Load: {new Date(dbInfo.lastLoadTime).toLocaleTimeString()}</div>}
+            {dbInfo.lastSaveTime && <div>Last Save: {formatLocalTime(dbInfo.lastSaveTime, { format: 'time' })}</div>}
+            {dbInfo.lastLoadTime && <div>Last Load: {formatLocalTime(dbInfo.lastLoadTime, { format: 'time' })}</div>}
             {dbInfo.saveError && <div style={{ color: '#f85149' }}>Error: {dbInfo.saveError}</div>}
           </div>
         )}
@@ -433,7 +434,7 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
           exchangeInfo loaded: {pd.exchangeInfoLoaded ? 'yes' : 'no'}
         </div>
         <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 8 }}>
-          last market data update: {pd.lastUpdate ? new Date(pd.lastUpdate).toLocaleTimeString() : 'n/a'}
+          last market data update: {pd.lastUpdate ? formatLocalTime(pd.lastUpdate, { format: 'time' }) : 'n/a'}
         </div>
         <button className="btn btn-sm btn-yellow" onClick={handleRefreshPublicData}>Refresh Public Data</button>
 

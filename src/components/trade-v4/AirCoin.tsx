@@ -5,6 +5,16 @@ import { getTrendColor } from "../../lib/ui/trendColorHelper";
 
 const STATUS_COLORS: Record<string, string> = {
   BUY: '#3fb950',
+  OPEN: '#3fb950',
+  READY: '#58a6ff',
+  SELECTED: '#bc8cff',
+  SUBMITTED: '#f0883e',
+  DUPLICATE: '#8b949e',
+  'RISK BLOCK': '#f85149',
+  EXHAUSTED: '#d29922',
+  OVEREXTEND: '#d29922',
+  SPREAD: '#f0883e',
+  'NO TP': '#8b949e',
   WAIT: '#d29922',
   BLOCK: '#f85149',
   AVOID: '#f85149',

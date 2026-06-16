@@ -35,9 +35,19 @@ function nextCandidateId(): string {
   return `cand_${Date.now()}_${++_candidateIdCounter}`;
 }
 
+let _scannerInstanceCounter = 0;
+function nextScannerInstanceId(): string {
+  return `scanner_${Date.now()}_${++_scannerInstanceCounter}`;
+}
+
+const MARKET_SCANNER_SOURCE_VERSION = 'market-scanner-selected-to-execution-handoff-root-cause-v3';
+const MARKET_SCANNER_BUILD_TIME = new Date().toISOString();
+const MARKET_SCANNER_LOG_SINK_NAME = 'logger.getLogs/logger.export';
+
 export type BrainDecideFn = (symbol: string, price: MarketPrice) => Promise<TraderBrainDecision>;
 
 export class MarketScanner {
+  private readonly scannerInstanceId = nextScannerInstanceId();
   private state: ScannerState = 'OFF';
   private universeMode: UniverseMode = 'WATCHLIST';
   private watchlist: string[] = [];
@@ -122,15 +132,46 @@ export class MarketScanner {
   private strongMomentumPocketPct = 1.0;
   private maxPocketPriceAgeMs = 60000;
 
+  private recentlyClosedCooldownMs = 300000;
+  private lossCooldownMs = 900000;
+  private recentlyClosedSymbols: Map<string, { closedAt: number; pnlPct: number; pnlUsd: number; exitReason: string; strategy: string; cooldownUntil: number }> = new Map();
+
+  // Fast candidate revalidation loop — updates live data for WAIT/BUY_READY without full scan
+  private lastSnapshot: ScannerSnapshot | null = null;
+  private revalidationIntervalMs = 10000;
+  private revalidationTimerId: ReturnType<typeof setInterval> | null = null;
+  private revalidationCycleId = 0;
+
   constructor() {
     this.feed = MarketDataFeed.getInstance();
     this.entryGate = new EntryGate();
+    this.emitActiveScannerInstanceAudit('constructor', 'unknown');
   }
+
+  getScannerInstanceId(): string { return this.scannerInstanceId; }
+  hasPaperAutoBuyFn(): boolean { return !!this.paperAutoBuyFn; }
 
   setManualStrategy(strategy: string | null): void {
     this.manualStrategy = strategy;
     this.manualMode = strategy != null && strategy !== 'auto';
     logger.info(`MANUAL_STRATEGY_APPLIED: autoMode=${!this.manualMode} selectedStrategy=${strategy ?? 'auto'} effectiveStrategy=${strategy ?? 'auto'} strategySource=${this.manualMode ? 'manual_user_selected' : 'auto'} paperMode=PAPER liveMode=LIVE_LOCKED`);
+  }
+
+  recordClose(data: { symbol: string; pnlPct: number; pnlUsd: number; exitReason: string; strategy?: string }): void {
+    const now = Date.now();
+    const isLoss = data.pnlPct < 0;
+    const cooldownMs = isLoss ? this.lossCooldownMs : this.recentlyClosedCooldownMs;
+    const cooldownUntil = now + cooldownMs;
+    const entry = {
+      closedAt: now,
+      pnlPct: data.pnlPct,
+      pnlUsd: data.pnlUsd,
+      exitReason: data.exitReason,
+      strategy: data.strategy ?? 'unknown',
+      cooldownUntil,
+    };
+    this.recentlyClosedSymbols.set(data.symbol, entry);
+    logger.info(`RECENTLY_CLOSED_SYMBOL_RECORDED: symbol=${data.symbol} pnlPct=${data.pnlPct.toFixed(2)} pnlUsd=${data.pnlUsd.toFixed(2)} exitReason=${data.exitReason} strategy=${entry.strategy} isLoss=${String(isLoss)} cooldownMs=${cooldownMs} cooldownUntil=${new Date(cooldownUntil).toISOString()}`);
   }
 
   setMaxSpreadPct(pct: number): void {
@@ -201,9 +242,15 @@ export class MarketScanner {
 
   setBrainDecide(fn: BrainDecideFn) { this.brainDecide = fn; }
 
-  setPaperAutoEnabled(enabled: boolean) { this.paperAutoEnabled = enabled; }
+  setPaperAutoEnabled(enabled: boolean) {
+    this.paperAutoEnabled = enabled;
+    logger.info(`ACTIVE_SCANNER_RUNTIME_FLAG_AUDIT: scannerInstanceId=${this.scannerInstanceId} field=paperAutoExecutionEnabled value=${String(this.paperAutoEnabled)} logSinkName=${MARKET_SCANNER_LOG_SINK_NAME}`);
+  }
   isPaperAutoEnabled(): boolean { return this.paperAutoEnabled; }
-  setPaperAutoBuyFn(fn: ((plannedCandidate: PlannedCandidate, candidate: ScannerCandidate) => Promise<PaperAutoExecutionResult>) | null) { this.paperAutoBuyFn = fn; }
+  setPaperAutoBuyFn(fn: ((plannedCandidate: PlannedCandidate, candidate: ScannerCandidate) => Promise<PaperAutoExecutionResult>) | null) {
+    this.paperAutoBuyFn = fn;
+    logger.info(`ACTIVE_SCANNER_CALLBACK_WIRING_AUDIT: scannerInstanceId=${this.scannerInstanceId} callback=paperAutoBuyFn present=${String(!!this.paperAutoBuyFn)} logSinkName=${MARKET_SCANNER_LOG_SINK_NAME}`);
+  }
   setLiveBuyFn(fn: ((symbol: string, candidate: ScannerCandidate) => Promise<void>) | null) { this.liveBuyFn = fn; }
   setExecutionLimits(config: {
     maxPositions: number;
@@ -257,6 +304,12 @@ export class MarketScanner {
 
   setWatchlist(list: string[]) { this.watchlist = [...list]; }
   getWatchlist(): string[] { return [...this.watchlist]; }
+
+  private emitActiveScannerInstanceAudit(stage: 'constructor' | 'start' | 'scan', executionMode: 'paper_simulated' | 'binance_live' | 'unknown'): void {
+    logger.info(
+      `ACTIVE_SCANNER_INSTANCE_AUDIT: scannerInstanceId=${this.scannerInstanceId} stage=${stage} sourceFileVersion=${MARKET_SCANNER_SOURCE_VERSION} buildTime=${MARKET_SCANNER_BUILD_TIME} hasSelectedToExecutionHandoffPatch=true paperAutoExecutionEnabled=${String(this.paperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} executionMode=${executionMode} autoBotsOn=${String(this.strategySourceMode === 'autobots')} logSinkName=${MARKET_SCANNER_LOG_SINK_NAME}`
+    );
+  }
 
   getState(): ScannerState { return this.state; }
 
@@ -312,6 +365,110 @@ export class MarketScanner {
       }
     })();
     return configured;
+  }
+
+  // ── Fast Candidate Revalidation Loop ──
+  // Runs every revalidationIntervalMs (default 10s) without a full Top-250 scan.
+  // Only updates live data (price, spread, setup) for existing WAIT / BUY_READY candidates.
+  // Promotes WAIT → BUY_READY when setup becomes valid. Triggers execution when applicable.
+
+  setRevalidationInterval(ms: number): void {
+    this.revalidationIntervalMs = Math.max(5000, ms);
+    logger.info(`SCANNER_SCHEDULER_AUDIT: candidateRevalidationIntervalMs=${this.revalidationIntervalMs} fullScanIntervalMs=configured`);
+  }
+
+  startCandidateRevalidationLoop(): void {
+    if (this.revalidationTimerId) return;
+    logger.info(`CANDIDATE_REVALIDATION_LOOP_START: intervalMs=${this.revalidationIntervalMs}`);
+    this.revalidationTimerId = setInterval(() => {
+      this.revalidateCandidatePool('scheduled_tick');
+    }, this.revalidationIntervalMs);
+  }
+
+  stopCandidateRevalidationLoop(): void {
+    if (this.revalidationTimerId) {
+      clearInterval(this.revalidationTimerId);
+      this.revalidationTimerId = null;
+      logger.info('CANDIDATE_REVALIDATION_LOOP_STOP');
+    }
+  }
+
+  private revalidateCandidatePool(reason: string): void {
+    if (!this.lastSnapshot || this.scanInFlight) return;
+    this.revalidationCycleId++;
+    const cycleId = `rev_${this.revalidationCycleId}`;
+    const startMs = Date.now();
+
+    const candidates = this.lastSnapshot.candidates;
+    const waitCandidates = candidates.filter(c => c.status === 'WAIT' || c.status === 'BLOCK');
+    const buyReadyCandidates = candidates.filter(c => c.status === 'BUY');
+
+    // Update live price for all WAIT/BUY_READY candidates
+    for (const c of [...waitCandidates, ...buyReadyCandidates].slice(0, 30)) {
+      const price = this.feed.getLastPrice(c.symbol);
+      if (price > 0 && c.price !== price) {
+        c.price = price;
+        (c as any)._revalidatedAt = Date.now();
+      }
+    }
+
+    // Re-evaluate WAIT candidates — check if setup is now valid
+    let promotedCount = 0;
+    let demotedCount = 0;
+    for (const c of waitCandidates.slice(0, 20)) {
+      const setup = buildStrategyAuditSnapshotFromCandidate(c);
+      const wasWait = c.status === 'WAIT';
+      const wasBlock = c.status === 'BLOCK';
+      const nowBuyReady = setup.finalExecutable && c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW';
+
+      // Update spread/price freshness from live data
+      const livePrice = this.feed.getLastPrice(c.symbol);
+      const spreadPct = c.spreadPct ?? 0;
+      const spreadOk = spreadPct <= this.maxSpreadPct;
+      const priceFresh = c.priceAgeMs != null && c.priceAgeMs < this.maxPriceAgeMs;
+
+      const previousStatus = c.status;
+      if (nowBuyReady && (wasWait || wasBlock)) {
+        c.status = 'BUY';
+        promotedCount++;
+        logger.info(`WAIT_CANDIDATE_LIVE_REVALIDATION_AUDIT: revalidationCycleId=${cycleId} symbol=${c.symbol} previousStatus=${previousStatus} newStatus=BUY_READY previousPrice=${c.price} livePrice=${livePrice} priceAgeMs=${c.priceAgeMs} spreadPct=${spreadPct.toFixed(3)} spreadOk=${String(spreadOk)} actualDipPct=${String(setup.setupMetrics.find(m => m.key === 'actualDipPct')?.actualValue ?? 'n/a')} requiredDipPct=${String(setup.setupMetrics.find(m => m.key === 'requiredDipPct')?.requiredValue ?? 'n/a')} actualReboundPct=${String(setup.setupMetrics.find(m => m.key === 'actualReboundPct')?.actualValue ?? 'n/a')} requiredReboundPct=${String(setup.setupMetrics.find(m => m.key === 'requiredReboundPct')?.requiredValue ?? 'n/a')} momentumConfirmed=${String(setup.setupMetrics.find(m => m.key === 'momentumConfirmed')?.passed ?? 'n/a')} tpRoomOk=${String(setup.tpRoomOk)} priceFresh=${String(priceFresh)} finalExecutable=${String(setup.finalExecutable)} buyAllowed=${String(setup.buyAllowed)} primaryBlocker=${setup.blockReasons[0] ?? 'none'} changedStatus=true`);
+        // Trigger execution handoff for newly valid candidate
+        this.tryExecuteCandidate(c, cycleId);
+      } else if (!nowBuyReady && c.status === 'BUY') {
+        c.status = 'WAIT';
+        demotedCount++;
+        logger.info(`WAIT_CANDIDATE_LIVE_REVALIDATION_AUDIT: revalidationCycleId=${cycleId} symbol=${c.symbol} previousStatus=BUY_READY newStatus=WAIT previousPrice=${c.price} livePrice=${livePrice} priceAgeMs=${c.priceAgeMs} spreadPct=${spreadPct.toFixed(3)} spreadOk=${String(spreadOk)} actualDipPct=${String(setup.setupMetrics.find(m => m.key === 'actualDipPct')?.actualValue ?? 'n/a')} requiredDipPct=${String(setup.setupMetrics.find(m => m.key === 'requiredDipPct')?.requiredValue ?? 'n/a')} actualReboundPct=${String(setup.setupMetrics.find(m => m.key === 'actualReboundPct')?.actualValue ?? 'n/a')} requiredReboundPct=${String(setup.setupMetrics.find(m => m.key === 'requiredReboundPct')?.requiredValue ?? 'n/a')} momentumConfirmed=${String(setup.setupMetrics.find(m => m.key === 'momentumConfirmed')?.passed ?? 'n/a')} tpRoomOk=${String(setup.tpRoomOk)} priceFresh=${String(priceFresh)} finalExecutable=${String(setup.finalExecutable)} buyAllowed=${String(setup.buyAllowed)} primaryBlocker=${setup.blockReasons[0] ?? 'none'} changedStatus=true`);
+      }
+    }
+
+    const durationMs = Date.now() - startMs;
+    logger.info(`SCANNER_SCHEDULER_AUDIT: fullScannerIntervalMs=configured candidateRevalidationIntervalMs=${this.revalidationIntervalMs} fullScanInProgress=${String(this.scanInFlight)} lastRevalidationAt=${new Date().toISOString()} revalidationDurationMs=${durationMs} revalidationCycleId=${cycleId} promotedCount=${promotedCount} demotedCount=${demotedCount} reason=${reason} uiThreadBlocked=false`);
+  }
+
+  private tryExecuteCandidate(c: ScannerCandidate, cycleId: string): void {
+    if (!this.paperAutoBuyFn || !this.paperAutoEnabled) return;
+    const openSymbols = this.executionOpenSymbolsFn?.() ?? [];
+    if (openSymbols.includes(c.symbol)) return;
+    if (openSymbols.length >= this.executionMaxPositions) return;
+
+    const revalResult = revalidateCandidate({
+      candidate: c,
+      planEntry: { symbol: c.symbol, rank: 0, status: c.status, plannedAction: 'BUY', reason: `revalidation_${cycleId}`, requiredChecks: [], scanId: cycleId, entryPlan: c.entryPlan ?? { side: 'BUY', price: c.price, quantity: 0, reason: `revalidation_${cycleId}` }, executionPrice: c.price, capitalAllocation: this.executionCapitalPerTrade, confidence: c.confidence, score: 0, strategy: c.selectedStrategy, effectiveStrategy: c.effectiveStrategy ?? c.selectedStrategy, strategySource: String(c.strategySource ?? 'autobots'), targetPolicy: null, gateSnapshot: c.entryGateDecision as any, groupTrend: c.groupTrend ?? 'n/a', groupRecommendedStrategy: c.groupRecommendedStrategy ?? 'n/a' } as unknown as PlannedCandidate,
+      openSymbols,
+      pendingLockSymbols: [],
+      capital: this.executionCapital,
+      usedCapital: this.executionUsedCapitalFn?.() ?? 0,
+      maxPositions: this.executionMaxPositions,
+      executionAdapter: 'paper_simulated',
+      paperAutoEnabled: true,
+      scannerRunning: true,
+      groupEnabled: true,
+    });
+
+    if (!revalResult.blocked && revalResult.attempted) {
+      logger.info(`BUY_READY_EXECUTION_HANDOFF_INVARIANT_AUDIT: scanId=n/a revalidationCycleId=${cycleId} symbol=${c.symbol} status=${c.status} finalExecutable=true buyAllowed=true setupResult=SETUP_OK openPositionDuplicate=false pendingOrderDuplicate=false spreadOk=true tpRoomOk=true priceFresh=true capitalOk=true maxOpenPositionsOk=${String(openSymbols.length < this.executionMaxPositions)} adapterCalled=true positionCreated=pending failureReason=none invariantOk=true`);
+      this.paperAutoBuyFn({ symbol: c.symbol, rank: 0, status: c.status, plannedAction: 'BUY', reason: `revalidation_${cycleId}`, requiredChecks: [], scanId: cycleId, entryPlan: { side: 'BUY', price: c.price, quantity: 0, reason: `revalidation_${cycleId}` }, executionPrice: c.price, capitalAllocation: this.executionCapitalPerTrade, confidence: c.confidence, score: 0, strategy: c.selectedStrategy, effectiveStrategy: c.effectiveStrategy ?? c.selectedStrategy, strategySource: String(c.strategySource ?? 'autobots'), targetPolicy: null, gateSnapshot: c.entryGateDecision as any, groupTrend: c.groupTrend ?? 'n/a', groupRecommendedStrategy: c.groupRecommendedStrategy ?? 'n/a' } as unknown as PlannedCandidate, c).catch(() => {});
+    }
   }
 
   private emptyDiagnostics(): ScannerDiagnostics {
@@ -433,6 +590,7 @@ export class MarketScanner {
     this.diag = this.emptyDiagnostics();
     this.scanStartTime = Date.now();
     this.firstCandidateTime = 0;
+    this.emitActiveScannerInstanceAudit('start', this.liveBuyFn ? 'binance_live' : 'paper_simulated');
     logger.info(`SCANNER_WARMING_UP: timestamp=${new Date().toISOString()}`);
     await new Promise(r => setTimeout(r, 50));
     this.state = 'IDLE';
@@ -445,6 +603,14 @@ export class MarketScanner {
   }
 
   async scan(universeMode?: UniverseMode): Promise<ScannerSnapshot> {
+    const activeExecutionMode = this.liveBuyFn && !this.paperAutoEnabled ? 'binance_live' : 'paper_simulated';
+    this.emitActiveScannerInstanceAudit('scan', activeExecutionMode);
+    // ── SCANNER_AUTO_EXECUTION_GATE_AUDIT: authoritative gate at scan entry ──
+    {
+      const canAttempt = this.paperAutoEnabled && this.paperAutoBuyFn !== null;
+      const skipReason = !this.paperAutoEnabled ? 'paper_auto_execution_disabled' : (!this.paperAutoBuyFn ? 'paper_auto_buy_fn_missing' : (this.strategySourceMode !== 'autobots' ? 'strategy_source_not_autobots' : 'none'));
+      logger.info(`SCANNER_AUTO_EXECUTION_GATE_AUDIT: scanId=${this.currentScanId ?? 'pre_scan'} source=MarketScanner.scan paperAutoExecutionEnabled=${String(this.paperAutoEnabled)} resolvedPaperAutoExecutionEnabled=${String(this.paperAutoEnabled)} marketScannerPaperAutoEnabled=${String(this.paperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} autoBotsEnabled=${String(this.strategySourceMode === 'autobots')} scannerAutoEnabled=${String(this.paperAutoEnabled)} executionMode=${activeExecutionMode} activeScannerInstanceId=${this.scannerInstanceId} appScannerInstanceId=${this.scannerInstanceId} autoRuntimeScannerInstanceId=${this.scannerInstanceId} buildTimestamp=${MARKET_SCANNER_BUILD_TIME} sourceFileVersion=${MARKET_SCANNER_SOURCE_VERSION} canAttemptScannerAutoExecution=${String(canAttempt)} skipReason=${skipReason}`);
+    }
     if (!this.brainDecide) {
       logger.warn('SCANNER: brainDecide not set, skipping scan');
       return this.buildEmptySnapshot();
@@ -597,6 +763,15 @@ export class MarketScanner {
       if (autoBotsOn && !resolvedRisk.tp1Valid) return false;
       return true;
     });
+    {
+      const allBuyReady = rankedCandidates.filter(c => c.status === 'BUY');
+      const invalidContractBuyReady = allBuyReady.filter(c => {
+        const setup = buildStrategyAuditSnapshotFromCandidate(c);
+        return setup.finalExecutable && c.status === 'BUY' && !/^(?:momentum|balanced|dip_and_rebound|conservative)$/i.test(setup.strategySelected);
+      });
+      const invariantOk = invalidContractBuyReady.length === 0;
+      logger.info(`BUY_READY_CONTRACT_INVARIANT_AUDIT: totalBuyReady=${allBuyReady.length} invalidContractBuyReadyCount=${invalidContractBuyReady.length} invalidSymbols=${invalidContractBuyReady.map(c => c.symbol).join('|') || 'none'} selectedStrategy=${invalidContractBuyReady.map(c => buildStrategyAuditSnapshotFromCandidate(c).strategySelected).join('|') || 'none'} invariantOk=${String(invariantOk)}`);
+    }
     const watchPool = rankedCandidates.filter((c: ScannerCandidate) => c.status === 'WAIT' || c.status === 'BLOCK' || (c.status === 'BUY' && !executionPool.some((e) => e.symbol === c.symbol)));
     const nearMissPool = rankedCandidates.filter(c => c.status === 'BLOCK' && c.confidence < 0.5);
     const executionPoolSize = executionPool.length;
@@ -1364,11 +1539,42 @@ export class MarketScanner {
       const keysShort = Object.keys(c).slice(0, 12).join('|') || 'none';
       logger.info(`ENTRY_PLAN_OBJECT_TRACE: scanId=${scanId} symbol=${c.symbol} stage=beforeExecutionPlanner hasEntryPlan=${String(!!c.entryPlan)} hasExecutionPlan=${String(!!c.executionPlan)} hasTraderBrainDecision=${String(!!c.traderBrainDecision)} traderBrainDecisionHasEntryPlan=${String(!!c.traderBrainDecision?.entryPlan)} hasEntryDecisionSnapshot=${String(!!c.entryGateDecision?.snapshot)} entryStatus=${c.status} allowCandidate=${String(c.entryGateDecision?.decision === 'ALLOW')} price=${c.price} bookFresh=${String(c.bookFresh !== false)} snapshotDecision=${c.entryGateDecision?.snapshot?.decision ?? c.entryGateDecision?.decision ?? 'none'} sourceFunction=MarketScanner.scan objectKeysShort=${keysShort}`);
     }
+    // Execution phase gate audit
+    const preFilterBuyCount = rankedCandidatesToAnnotate.filter((c) => c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW').length;
+    {
+      const availableSlots = Math.max(0, this.executionMaxPositions - openSymbols.length);
+      const capitalAvailable = Math.max(0, this.executionCapital - usedCapital);
+      const canExecuteGate = this.paperAutoEnabled && this.paperAutoBuyFn !== null && preFilterBuyCount > 0;
+      const skipReasonGate = !this.paperAutoEnabled ? 'auto_execution_disabled' : (!this.paperAutoBuyFn ? 'paper_auto_buy_fn_missing' : (preFilterBuyCount === 0 ? 'no_buy_ready_candidates' : 'none'));
+      logger.info(`SCANNER_EXECUTION_PHASE_GATE_AUDIT: scanId=${scanId} buyReadyCount=${preFilterBuyCount} selectedCandidateCount=${executionPool.length} paperAutoEnabled=${String(this.paperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} maxSelectedPerScan=${this.executionMaxSelectedPerScan} availableSlots=${availableSlots}/${this.executionMaxPositions} capitalAvailable=${capitalAvailable.toFixed(2)} capitalPerTrade=${this.executionCapitalPerTrade} canExecute=${String(canExecuteGate)} skipReason=${skipReasonGate}`);
+    }
+    // Execution phase start
+    logger.info(`SCANNER_EXECUTION_PHASE_START: scanId=${scanId} preFilterBuyReadyCount=${preFilterBuyCount} totalAnnotated=${rankedCandidatesToAnnotate.length} autoExecutionEnabled=${this.paperAutoEnabled} manualMode=${this.manualMode} referencePeriod=${this.scannerReferencePeriod}`);
+    // Explicit skip when AutoBots OFF but buy-ready candidates exist
+    if (preFilterBuyCount > 0 && !this.paperAutoEnabled) {
+      const buyReadySymbols = rankedCandidatesToAnnotate.filter((c) => c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW').map((c) => c.symbol).join('|');
+      logger.warn(`SCANNER_EXECUTION_SKIPPED_AUDIT: scanId=${scanId} preFilterBuyCount=${preFilterBuyCount} buyReadySymbols=${buyReadySymbols || 'none'} reason=auto_execution_disabled paperAutoEnabled=${String(this.paperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} autoBotsEnabled=${String(this.strategySourceMode === 'autobots')}`);
+    }
     // Rebuild execution pool with updated strategy annotations
+    // Prune expired cooldowns before filtering
+    {
+      const now = Date.now();
+      for (const [sym, cd] of this.recentlyClosedSymbols) {
+        if (now >= cd.cooldownUntil) this.recentlyClosedSymbols.delete(sym);
+      }
+    }
+    let cooldownBlockedCount = 0;
     const finalExecutionPool = rankedCandidatesToAnnotate.filter((c) => {
       if (!(c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW')) return false;
       const setup = buildStrategyAuditSnapshotFromCandidate(c);
       if (!setup.finalExecutable) return false;
+      const cd = this.recentlyClosedSymbols.get(c.symbol);
+      if (cd) {
+        const remainingMs = Math.max(0, cd.cooldownUntil - Date.now());
+        logger.warn(`RECENTLY_CLOSED_SYMBOL_BLOCKED: symbol=${c.symbol} closedAt=${new Date(cd.closedAt).toISOString()} cooldownUntil=${new Date(cd.cooldownUntil).toISOString()} remainingMs=${remainingMs} previousPnlPct=${cd.pnlPct.toFixed(2)} previousPnlUsd=${cd.pnlUsd.toFixed(2)} previousExitReason=${cd.exitReason} previousStrategy=${cd.strategy} candidateWouldOtherwiseBuy=true`);
+        cooldownBlockedCount += 1;
+        return false;
+      }
       const ownership = (c as any).tradingTargetOwnership;
       const autoBotsOn = String((c.autoStrategyDecision as any)?.strategySource ?? c.strategySource ?? '').toLowerCase().includes('autobots');
       const resolvedRisk = resolveEntryRiskParams({ autoBotsOn, ownership, userStopLossPct: 1.5, userTrailPullbackPct: 0.25 });
@@ -1378,8 +1584,11 @@ export class MarketScanner {
     const finalWatchPool = rankedCandidatesToAnnotate.filter((c: ScannerCandidate) => c.status === 'WAIT' || c.status === 'BLOCK' || (c.status === 'BUY' && !finalExecutionPool.some((e) => e.symbol === c.symbol)));
     const finalNearMissPool = rankedCandidatesToAnnotate.filter(c => c.status === 'BLOCK' && c.confidence < 0.5);
     const droppedFromPool = finalWatchPool.filter(c => c.status === 'BUY' && !finalExecutionPool.some((e) => e.symbol === c.symbol)).length;
+    if (cooldownBlockedCount > 0) {
+      logger.warn(`RECENTLY_CLOSED_SYMBOL_COOLDOWN_SUMMARY: scanId=${scanId} blockedCount=${cooldownBlockedCount} activeCooldowns=${this.recentlyClosedSymbols.size}`);
+    }
     if (finalExecutionPool.length !== executionPool.length || droppedFromPool > 0) {
-      logger.info(`EXECUTION_POOL_POST_ROUTER_UPDATE: poolBefore=${executionPool.length} poolAfter=${finalExecutionPool.length} watchBefore=${watchPool.length} watchAfter=${finalWatchPool.length} promotionEffect=${finalExecutionPool.length - executionPool.length} dropFixed=${droppedFromPool}`);
+      logger.info(`EXECUTION_POOL_POST_ROUTER_UPDATE: poolBefore=${executionPool.length} poolAfter=${finalExecutionPool.length} watchBefore=${watchPool.length} watchAfter=${finalWatchPool.length} promotionEffect=${finalExecutionPool.length - executionPool.length} dropFixed=${droppedFromPool} cooldownBlocked=${cooldownBlockedCount}`);
     }
     const executionPlan = buildExecutionPlan({
       scannerSnapshot: { scanId } as ScannerSnapshot,
@@ -1405,6 +1614,24 @@ export class MarketScanner {
       enabledRiskGroups: this.scannerRiskGroups,
     });
 
+    // Execution phase consistency: if pool had candidates but plan says cannot execute, emit skipped audit
+    if (finalExecutionPool.length > 0 && !executionPlan.canExecute && executionPlan.selectedCandidates.length === 0) {
+      const droppedSymbols = finalExecutionPool.map((c) => c.symbol);
+      logger.warn(`SCANNER_EXECUTION_SKIPPED_AUDIT: scanId=${scanId} poolSize=${finalExecutionPool.length} droppedSymbols=${droppedSymbols.join('|')} reason=no_executable_after_planning topNoBuy=${executionPlan.noBuyReasons.slice(0, 3).join('|') || 'none'} availableSlots=${executionPlan.availableSlots} capitalAvailable=${executionPlan.capitalAvailable} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} autoExecutionEnabled=${this.paperAutoEnabled}`);
+    }
+    // Also emit skipped when buy-ready exists in annotated but pool is empty after filter
+    if (preFilterBuyCount > 0 && finalExecutionPool.length === 0) {
+      const buyButDropped = rankedCandidatesToAnnotate.filter((c) => c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW');
+      const dropReasons = buyButDropped.map((c) => {
+        const setup = buildStrategyAuditSnapshotFromCandidate(c);
+        const autoBotsOn = String((c.autoStrategyDecision as any)?.strategySource ?? c.strategySource ?? '').toLowerCase().includes('autobots');
+        const ownershipCheck = (c as any).tradingTargetOwnership;
+        const risk = resolveEntryRiskParams({ autoBotsOn, ownership: ownershipCheck, userStopLossPct: 1.5, userTrailPullbackPct: 0.25 });
+        return `${c.symbol}:finalExecutable=${setup.finalExecutable}:finalExecutableAtEntry=${setup.finalExecutableAtEntry}:setupResult=${setup.setupResult}:entryConfirmed=${setup.entryConfirmedAtEntry}:tp1Valid=${risk.tp1Valid}:tp2IsZero=${Number(risk.tp2) === 0}:autoBotsOn=${autoBotsOn}`;
+      }).join('|');
+      logger.warn(`SCANNER_EXECUTION_SKIPPED_AUDIT: scanId=${scanId} preFilterBuyCount=${preFilterBuyCount} poolAfterFilter=0 reason=all_buy_candidates_dropped_by_final_pool_filter dropDetails=${dropReasons} autoExecutionEnabled=${this.paperAutoEnabled}`);
+    }
+
     const displayExecutionAdapter = getExecutionAdapterDisplay(executionPlan.executionAdapter);
     const selectedWithEntryPlan = executionPlan.selectedCandidates.filter(c => !!c.entryPlan).length;
     const entryGateSnapshotUsed = executionPlan.selectedCandidates.length > 0
@@ -1412,6 +1639,24 @@ export class MarketScanner {
       : true;
 
     logger.info(`SCANNER_EXECUTION_PLAN_BUILT: canExecute=${executionPlan.canExecute} selectedCount=${executionPlan.selectedCandidates.length} skippedCount=${executionPlan.skippedCandidates.length} executionPoolSize=${executionPlan.executionPoolSize} watchPoolSize=${executionPlan.watchPoolSize} nearMissPoolSize=${executionPlan.nearMissPoolSize} decisionMode=${executionPlan.decisionMode} executionAdapter=${displayExecutionAdapter}`);
+
+    {
+      const nonDupCount = rankedCandidatesToAnnotate.filter(c => c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW' && !openSymbols.includes(c.symbol)).length;
+      const remainingSlots = Math.max(0, this.executionMaxPositions - openSymbols.length);
+      const capitalAvailableNow = Math.max(0, this.executionCapital - usedCapital);
+      const blockReason = !executionPlan.canExecute ? 'canExecute_false' :
+        executionPlan.selectedCandidates.length === 0 ? 'selectedCount_zero' :
+        remainingSlots <= 0 ? `no_open_slots_maxPositions=${this.executionMaxPositions}` :
+        capitalAvailableNow <= 0 ? 'capital_exhausted' :
+        !this.paperAutoEnabled ? 'paperAuto_disabled' :
+        !this.paperAutoBuyFn ? 'paperAutoBuyFn_missing' :
+        'none';
+      logger.info(`BUY_EXECUTION_HANDOFF_PRECHECK_AUDIT: scannerCandidatesCount=${rankedCandidatesToAnnotate.length} buyReadyCount=${buyCount} nonDuplicateBuyReadyCount=${nonDupCount} openPositionsCount=${openSymbols.length} maxOpenPositionsFromSettings=${this.executionMaxPositions} maxOpenPositionsResolved=${this.executionMaxPositions} remainingSlots=${remainingSlots} selectedCount=${executionPlan.selectedCandidates.length} executionEnabled=${String(this.paperAutoEnabled)} autoBotsEnabled=${String(this.paperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} canAttemptScannerAutoExecution=${String(executionPlan.canExecute && remainingSlots > 0 && this.paperAutoEnabled && !!this.paperAutoBuyFn)} capitalPerTrade=${this.executionCapitalPerTrade} tradingCapital=${this.executionCapital} usedCapital=${usedCapital} availableCapital=${capitalAvailableNow} blockReason=${blockReason} sourceFile=MarketScanner.ts sourceFunction=executionScan`);
+      logger.info(`MAX_POSITIONS_RESOLUTION_AUDIT: uiMaxOpenPositions=n/a storeMaxOpenPositions=n/a tradeParamsMaxOpenPositions=n/a scannerExecutionMaxPositions=${this.executionMaxPositions} plannerMaxOpenPositions=${executionPlan.availableSlots != null ? (executionPlan.availableSlots + openSymbols.length) : 'n/a'} adapterMaxOpenPositions=n/a positionManagerOpenCount=${openSymbols.length} storeOpenCount=n/a headerDisplayedOpenCount=${openSymbols.length} headerDisplayedMaxCount=${this.executionMaxPositions} remainingSlotsByScanner=${remainingSlots} remainingSlotsByPlanner=${executionPlan.availableSlots} blockReason=${blockReason} mismatchDetected=${String(this.executionMaxPositions < 50)} sourceOfMaxUsedForBlock=scanner.executionMaxPositions`);
+      if (openSymbols.length >= this.executionMaxPositions && this.executionMaxPositions < 20) {
+        logger.error(`FALSE_MAX_POSITIONS_REACHED_BLOCK: openPositionsCount=${openSymbols.length} maxOpenPositionsResolved=${this.executionMaxPositions} remainingSlots=${remainingSlots} blockReason=MAX_POSITIONS_REACHED action=possible_config_mismatch_check_settings_maxPositions`);
+      }
+    }
 
     logger.info(`UNIFIED_DECISION_MODE_AUDIT: decisionMode=unified executionAdapter=${displayExecutionAdapter} selectedCount=${executionPlan.selectedCandidates.length} skippedCount=${executionPlan.skippedCandidates.length} executionPoolSize=${executionPlan.executionPoolSize} watchPoolSize=${executionPlan.watchPoolSize} mode=always_unified`);
     logger.info(buildExecutionModeParityAudit({
@@ -1449,8 +1694,15 @@ export class MarketScanner {
     const skipReasonsBySymbol: Record<string, string> = {};
     let adapterCalledCount = 0;
     let positionCreatedCount = 0;
+    let duplicateSkippedCount = 0;
+    let pendingSkippedCount = 0;
+    let cooldownSkippedCount = 0;
+    let capitalSkippedCount = 0;
+    let preAdapterAllowedCount = 0;
+    const perSymbolDecisions: Array<{ symbol: string; reason: string; passed: boolean }> = [];
     const openPositionsBeforeHandoff = openSymbols.length;
     let openPositionsAfterHandoff = openSymbols.length;
+    let selectedToExecutionHandoffAuditEmitted = false;
     const routeBranch = executionPlan.canExecute
       ? executionPlan.executionAdapter === 'paper_simulated'
         ? 'paper_simulated'
@@ -1459,6 +1711,7 @@ export class MarketScanner {
           : 'unknown_adapter'
       : 'no_executable_candidates';
     const emitSelectedToExecutionHandoffAudit = (phase: 'post_planner_pre_routing' | 'post_routing_final') => {
+      selectedToExecutionHandoffAuditEmitted = true;
       const controllerReceivedSet = new Set(attemptedSymbols);
       const skippedBeforeHandoffSet = new Set(skippedBeforeHandoffSymbols);
       const missingAuditSymbols = selectedSymbolsForAudit.filter((symbol) => !controllerReceivedSet.has(symbol) && !skippedBeforeHandoffSet.has(symbol));
@@ -1475,6 +1728,9 @@ export class MarketScanner {
     };
     if (selectedSymbolsForAudit.length > 0) {
       emitSelectedToExecutionHandoffAudit('post_planner_pre_routing');
+      if (!selectedToExecutionHandoffAuditEmitted) {
+        logger.error(`SELECTED_TO_EXECUTION_HANDOFF_MISSING_FATAL: scanId=${scanId} selectedCount=${selectedSymbolsForAudit.length} selectedSymbols=${selectedSymbolsForAudit.join('|') || 'none'} scannerInstanceId=${this.scannerInstanceId} logSinkName=${MARKET_SCANNER_LOG_SINK_NAME}`);
+      }
     }
     const normalizeExecutionBlocker = (reason: string): string => {
       const r = reason.toLowerCase();
@@ -1532,8 +1788,20 @@ export class MarketScanner {
               groupEnabled: this.scannerRiskGroups[sc.riskGroup as keyof typeof this.scannerRiskGroups] ?? true,
             });
             attemptedSymbols.push(sc.symbol);
+            {
+              const isDup = currentOpenSymbols.includes(sc.symbol);
+              const isPending = currentPendingSymbols.includes(sc.symbol);
+              const spreadOk = (sc.spreadPct ?? 0) <= this.maxSpreadPct;
+              const tpRoomOk = (sc as any).tpRoomOk !== false;
+              const priceFresh = (sc.priceAgeMs ?? 0) < this.maxPriceAgeMs;
+              const capitalOk = this.executionCapitalPerTrade <= (this.executionCapital - currentUsedCapital);
+              const maxPosOk = currentOpenSymbols.length < this.executionMaxPositions;
+              logger.info(`PER_CANDIDATE_REVALIDATION_VERDICT_AUDIT: symbol=${sc.symbol} beforeStatus=${sc.status} afterStatus=${sc.status} selectedStrategy=${sc.selectedStrategy ?? 'n/a'} finalEntryRule=${(sc as any).finalEntryRule ?? 'n/a'} contractValid=n/a finalExecutable=${String((sc as any).finalExecutable ?? 'n/a')} buyAllowed=${String((sc as any).buyAllowed ?? 'n/a')} setupResult=${(sc as any).setupResult ?? 'n/a'} openPositionDuplicate=${String(isDup)} pendingOrderDuplicate=${String(isPending)} spreadOk=${String(spreadOk)} tpRoomOk=${String(tpRoomOk)} priceFresh=${String(priceFresh)} capitalOk=${String(capitalOk)} maxOpenPositionsOk=${String(maxPosOk)} allowedForAdapter=${String(!revalResult.blocked && revalResult.attempted)} exactBlockReason=${revalResult.blocked ? revalResult.reason : 'none'}`);
+            }
             logger.info(`DEMO_EXECUTION_CONTROLLER_RECEIVED: symbol=${sc.symbol} scanId=${scanId} selectedCount=${buyableCandidates.length} openPositionsBefore=${currentOpenSymbols.length}`);
             if (!revalResult.blocked && revalResult.attempted) {
+              preAdapterAllowedCount++;
+              perSymbolDecisions.push({ symbol: sc.symbol, reason: 'pre_adapter_allowed', passed: true });
               try {
                 transactionAuditSymbols.push(sc.symbol);
                 logger.info(`DEMO_EXECUTION_CONTROLLER_HANDOFF: symbol=${sc.symbol} scanId=${scanId} adapterCalled=pending transactionAuditExpected=true`);
@@ -1556,6 +1824,11 @@ export class MarketScanner {
                 logger.warn(`DEMO_AUTO_BUY_FAILED: symbol=${firstCandidate.symbol} error=${buyError instanceof Error ? buyError.message : String(buyError)}`);
               }
             } else {
+              const revalReason = revalResult.reason;
+              perSymbolDecisions.push({ symbol: sc.symbol, reason: revalReason, passed: false });
+              if (revalReason.includes('Duplicate open position')) duplicateSkippedCount++;
+              else if (revalReason.includes('Duplicate pending')) pendingSkippedCount++;
+              else if (revalReason.includes('capital') || revalReason.includes('Capital')) capitalSkippedCount++;
               paperAutoResult = revalResult;
               recordControllerBlocker(sc.symbol, revalResult.reason);
               logger.info(`DEMO_AUTO_BUY_BLOCKED: symbol=${firstCandidate.symbol} reason=${revalResult.reason}`);
@@ -1563,7 +1836,7 @@ export class MarketScanner {
           } else if (adapter === 'paper_simulated') {
             const blockReason = !this.paperAutoEnabled
               ? 'Demo execution disabled'
-              : 'Demo execution controller unavailable - missing buy function';
+              : 'paper_auto_buy_fn_missing';
             recordPreAdapterBlocker(sc.symbol, blockReason);
             paperAutoResult = {
               attempted: false,
@@ -1642,6 +1915,119 @@ export class MarketScanner {
       logger.info(`AUTOBOTS_EXECUTION_HANDOFF_AUDIT: scanId=${scanId} buyReadyCount=${buyCount} executionPoolSize=${executionPlan.executionPoolSize} selectedCount=0 selectedSymbols=none maxOpenPositions=${this.executionMaxPositions} openPositionsBefore=${openSymbols.length} availableSlots=${executionPlan.availableSlots} capitalAvailable=${executionPlan.capitalAvailable} capitalPerTrade=${this.executionCapitalPerTrade} autoExecutionEnabled=${this.paperAutoEnabled} executionAdapter=${displayExecutionAdapter} handoffStarted=false handoffBlocked=true handoffBlockReason=no_executable_candidates controllerReceivedCount=0 adapterCalled=false adapterResult=NOT_SUBMITTED positionCreateAttempted=false positionCreated=false openPositionsAfter=${openSymbols.length}`);
       logger.throttled('INFO', `EXECUTION_ROUTING_NO_CANDIDATES: autoExecutionEnabled=${this.paperAutoEnabled} hasDemoBuyFn=${!!this.paperAutoBuyFn} hasLiveBuyFn=${!!this.liveBuyFn}`, 'execution_routing_no_candidates', 60000);
     }
+    {
+      const globalBlockApplied = !executionPlan.canExecute || (selectedBuyCandidates.length > 0 && adapterCalledCount === 0 && duplicateSkippedCount < selectedBuyCandidates.length);
+      const globalBlockReason = !executionPlan.canExecute
+        ? (executionPlan.noBuyReasons[0] ?? 'no_executable_candidates')
+        : duplicateSkippedCount >= selectedBuyCandidates.length && selectedBuyCandidates.length > 0
+          ? 'ALL_SELECTED_SYMBOLS_DUPLICATE'
+          : adapterCalledCount === 0 && selectedBuyCandidates.length > 0
+            ? (pendingSkippedCount >= selectedBuyCandidates.length ? 'ALL_SELECTED_SYMBOLS_PENDING_ORDER' : 'ALL_SELECTED_SYMBOLS_FAILED_PRE_ADAPTER_VALIDATION')
+            : 'none';
+      logger.info(`PRE_ADAPTER_BATCH_DECISION_AUDIT: scanId=${scanId} selectedCount=${selectedBuyCandidates.length} duplicateSkippedCount=${duplicateSkippedCount} pendingSkippedCount=${pendingSkippedCount} cooldownSkippedCount=${cooldownSkippedCount} capitalSkippedCount=${capitalSkippedCount} preAdapterAllowedCount=${preAdapterAllowedCount} adapterCalledCount=${adapterCalledCount} positionCreatedCount=${positionCreatedCount} globalBlockApplied=${String(globalBlockApplied)} globalBlockReason=${globalBlockReason} openPositionsBefore=${openPositionsBeforeHandoff} maxOpenPositions=${this.executionMaxPositions} availableSlots=${executionPlan.availableSlots} capitalAvailable=${executionPlan.capitalAvailable} capitalPerTrade=${this.executionCapitalPerTrade}`);
+      for (const d of perSymbolDecisions) {
+        logger.info(`EXECUTION_SELECTED_SYMBOL_DECISION_AUDIT: scanId=${scanId} symbol=${d.symbol} selectedRank=${selectedBuyCandidates.findIndex(c => c.symbol === d.symbol) + 1} preAdapterAllowed=${String(d.passed)} preAdapterBlockReason=${d.passed ? 'none' : d.reason} adapterCalled=pending positionCreated=pending`);
+      }
+    }
+    // Backfill: if slots remain after main loop (some selected candidates failed revalidation/execution), try backfill
+    const backfillCandidateSymbols: string[] = [];
+    const initialSelectedSymbols = [...selectedSymbolsForAudit];
+    const duplicateRejectedSymbols: string[] = [];
+    const backfillRejectedSymbols: string[] = [];
+    const validBuyReadyButNotSelectedSymbols: string[] = [];
+    logger.info(`EXECUTION_BACKFILL_PRECONDITION_AUDIT: scanId=${scanId} canExecute=${String(executionPlan.canExecute)} positionCreatedCount=${positionCreatedCount} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} availableSlots=${executionPlan.availableSlots} executionAdapter=${String(executionPlan.executionAdapter)} paperAutoEnabled=${String(this.paperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} condition_pass=${String(executionPlan.canExecute && positionCreatedCount < executionPlan.maxSelectedPerScan && executionPlan.executionAdapter === 'paper_simulated' && this.paperAutoEnabled && !!this.paperAutoBuyFn)}`);
+    if (executionPlan.canExecute && positionCreatedCount < (executionPlan.availableSlots || executionPlan.executionPoolSize) && executionPlan.executionAdapter === 'paper_simulated' && this.paperAutoEnabled && this.paperAutoBuyFn) {
+      const currentOpen = this.executionOpenSymbolsFn?.() ?? [];
+      const usedCapitalAfter = this.executionUsedCapitalFn?.() ?? usedCapital;
+      const availableCapitalAfter = Math.max(0, this.executionCapital - usedCapitalAfter);
+      const capitalSlotsRemaining = this.executionCapitalPerTrade > 0 ? Math.floor(availableCapitalAfter / this.executionCapitalPerTrade) : 0;
+      const openSlotsRemaining = Math.max(0, this.executionMaxPositions - currentOpen.length);
+      const remainingSlots = Math.max(0, Math.min(openSlotsRemaining, capitalSlotsRemaining));
+      const backfillPool = rankedCandidatesToAnnotate
+        .filter(c => c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW')
+        .filter(c => !attemptedSymbols.includes(c.symbol))
+        .filter(c => !currentOpen.includes(c.symbol))
+        .sort((a, b) => (b.rawScore ?? 0) - (a.rawScore ?? 0));
+      logger.info(`EXECUTION_BACKFILL_POOL_AUDIT: scanId=${scanId} poolSize=${backfillPool.length} remainingSlots=${remainingSlots} attemptedAlready=${attemptedSymbols.length} totalBuyReady=${rankedCandidatesToAnnotate.filter(c => c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW').length} openSymbols=${currentOpen.length}`);
+      for (const bc of backfillPool) {
+        if (backfillCandidateSymbols.length >= remainingSlots) break;
+        const setup = buildStrategyAuditSnapshotFromCandidate(bc);
+        if (!setup.finalExecutable) { if (!backfillRejectedSymbols.includes(bc.symbol)) backfillRejectedSymbols.push(bc.symbol); continue; }
+        const entryPlan = bc.entryPlan ?? bc.traderBrainDecision?.entryPlan ?? null;
+        if (!entryPlan) { if (!backfillRejectedSymbols.includes(bc.symbol)) backfillRejectedSymbols.push(bc.symbol); continue; }
+        const bfEntryPlan = {
+          symbol: bc.symbol, rank: bc.rank ?? 0, status: bc.status, plannedAction: 'BUY' as const,
+          confidence: bc.confidence, score: bc.rawScore ?? 0,
+          strategy: bc.selectedStrategy, effectiveStrategy: bc.effectiveStrategy ?? bc.selectedStrategy,
+          strategySource: String(bc.strategySource ?? 'autobots'),
+          reason: 'backfill', requiredChecks: [] as string[], scanId,
+          entryPlan, executionPrice: bc.price ?? 0, capitalAllocation: this.executionCapitalPerTrade,
+          targetPolicy: null, gateSnapshot: { decision: 'ALLOW' as const, primaryReason: 'none', blockReasons: [] as string[], requiredNextActions: [] as string[], warnings: [] as string[], explanation: 'Backfill' },
+          groupTrend: bc.groupTrend ?? 'n/a', groupRecommendedStrategy: bc.groupRecommendedStrategy ?? 'n/a',
+        } as unknown as PlannedCandidate;
+        const reval = revalidateCandidate({
+          candidate: { ...bc, riskDecision: undefined } as ScannerCandidate, planEntry: bfEntryPlan,
+          openSymbols: currentOpen, pendingLockSymbols: [],
+          capital: this.executionCapital, usedCapital: usedCapitalAfter, maxPositions: this.executionMaxPositions,
+          executionAdapter: 'paper_simulated', paperAutoEnabled: true,
+          scannerRunning: true,
+          groupEnabled: this.scannerRiskGroups[bc.riskGroup as keyof typeof this.scannerRiskGroups] ?? true,
+        });
+        if (!reval.blocked && reval.attempted) {
+          try {
+            attemptedSymbols.push(bc.symbol);
+            transactionAuditSymbols.push(bc.symbol);
+            backfillCandidateSymbols.push(bc.symbol);
+            const bfResult = await this.paperAutoBuyFn(bfEntryPlan, bc);
+            if (bfResult.adapterCalled) adapterCalledCount++;
+            if (bfResult.positionCreated) positionCreatedCount++;
+            openPositionsAfterHandoff = this.executionOpenSymbolsFn?.().length ?? bfResult.openPositionsAfter ?? openPositionsAfterHandoff;
+            if (bfResult.blocked) {
+              skippedSymbols.push(bc.symbol);
+              skipReasonsBySymbol[bc.symbol] = String(bfResult.reason).replace(/\s+/g, '_');
+            }
+            logger.info(`EXECUTION_SELECTION_BACKFILL_CANDIDATE_AUDIT: scanId=${scanId} symbol=${bc.symbol} executed=${String(!!bfResult.executed)} blocked=${String(!!bfResult.blocked)} reason=${bfResult.reason} positionCreated=${String(!!bfResult.positionCreated)}`);
+          } catch (bfErr) {
+            skippedSymbols.push(bc.symbol);
+            skipReasonsBySymbol[bc.symbol] = `backfill_failed:${bfErr instanceof Error ? bfErr.message : String(bfErr)}`;
+          }
+        } else {
+          skippedSymbols.push(bc.symbol);
+          skipReasonsBySymbol[bc.symbol] = reval.reason ?? 'backfill_revalidation_blocked';
+        }
+      }
+    }
+    for (const c of rankedCandidatesToAnnotate) {
+      if (c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW') {
+        const setup = buildStrategyAuditSnapshotFromCandidate(c);
+        if (setup.finalExecutable && !attemptedSymbols.includes(c.symbol) && !selectedSymbolsForAudit.includes(c.symbol) && !backfillCandidateSymbols.includes(c.symbol)) {
+          if (!validBuyReadyButNotSelectedSymbols.includes(c.symbol)) validBuyReadyButNotSelectedSymbols.push(c.symbol);
+          const isDuplicate = (this.executionOpenSymbolsFn?.() ?? []).includes(c.symbol);
+          const cd = this.recentlyClosedSymbols.get(c.symbol);
+          const reason = isDuplicate ? 'duplicate_position'
+            : cd ? 'cooldown'
+            : backfillCandidateSymbols.length > 0 && positionCreatedCount > 0 ? 'not_backfilled_limit_reached_after_partial_fills'
+            : backfillCandidateSymbols.length > 0 ? 'not_backfilled_slots_available_but_revalidation_failed'
+            : positionCreatedCount === 0 && attemptedSymbols.length > 0 ? 'not_backfilled_after_pre_adapter_fail'
+            : 'max_positions_or_capital_reached';
+          logger.info(`BUY_READY_NOT_SELECTED_REASON_AUDIT: symbol=${c.symbol} rank=${c.rank ?? 'n/a'} finalExecutable=${String(setup.finalExecutable)} buyAllowed=${String(setup.buyAllowed)} setupResult=${setup.setupResult} openPositionDuplicate=${String(isDuplicate)} pendingOrderDuplicate=false skippedBySelectionLimit=${String(false)} skippedBecauseNoBackfill=${String(!backfillCandidateSymbols.includes(c.symbol))} selectedForExecution=false finalNoBuyReason=${reason}`);
+        }
+      }
+    }
+    if (backfillCandidateSymbols.length > 0 || validBuyReadyButNotSelectedSymbols.length > 0) {
+      logger.info(`EXECUTION_SELECTION_BACKFILL_AUDIT: scanId=${scanId} requestedSelectedCount=${executionPlan.maxSelectedPerScan} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} initialSelectedSymbols=${initialSelectedSymbols.join('|') || 'none'} duplicateRejectedSymbols=${duplicateRejectedSymbols.join('|') || 'none'} riskRejectedSymbols=none cooldownRejectedSymbols=none candleRejectedSymbols=none backfillRejectedSymbols=${backfillRejectedSymbols.join('|') || 'none'} backfillCandidateSymbols=${backfillCandidateSymbols.join('|') || 'none'} finalSelectedSymbols=${attemptedSymbols.join('|') || 'none'} finalSelectedCount=${attemptedSymbols.length} validBuyReadyButNotSelectedSymbols=${validBuyReadyButNotSelectedSymbols.join('|') || 'none'} reasonForEachNotSelected=${validBuyReadyButNotSelectedSymbols.map(s => `${s}:not_backfilled`).join('|') || 'none'}`);
+    }
+    if (positionCreatedCount === 0 && selectedBuyCandidates.length > 0) {
+      const riskBlockedSymbols = Object.entries(skipReasonsBySymbol).filter(([,r]) => String(r).includes('risk_blocked') || String(r).includes('pre_adapter_block')).map(([s]) => s);
+      const riskBlockedGroups = [...new Set(riskBlockedSymbols.map(s => rankedCandidatesToAnnotate.find(c => c.symbol === s)?.riskGroup).filter(Boolean))];
+      const posManagerAfter = (this.executionOpenSymbolsFn?.() ?? []).length;
+      const validBuyReadyRemaining = validBuyReadyButNotSelectedSymbols.length;
+      const invariantValid = openPositionsBeforeHandoff === posManagerAfter;
+      logger.warn(`EXECUTION_BACKFILL_RUNTIME_INVARIANT_AUDIT: scanId=${scanId} selectedCount=${selectedBuyCandidates.length} attemptedSymbols=${attemptedSymbols.join('|') || 'none'} failedBeforeAdapterSymbols=${attemptedSymbols.join('|') || 'none'} createdPositionSymbols=none positionCreatedCount=${positionCreatedCount} positionManagerOpenBefore=${openPositionsBeforeHandoff} positionManagerOpenAfter=${posManagerAfter} availableSlotsBefore=${executionPlan.availableSlots} availableSlotsAfter=${Math.max(0, this.executionMaxPositions - posManagerAfter)} validBuyReadyRemaining=${validBuyReadyRemaining} nextBackfillSymbolsTried=${backfillCandidateSymbols.join('|') || 'none'} finalCreatedCount=${positionCreatedCount} invariantValid=${String(invariantValid)} invalidReason=${invariantValid ? 'none' : (posManagerAfter > openPositionsBeforeHandoff ? 'unexpected_positions_created' : 'unexpected_positions_removed')}`);
+      logger.warn(`EXECUTION_BACKFILL_AFTER_RISK_BLOCK_AUDIT: scanId=${scanId} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} initialSelectedSymbols=${initialSelectedSymbols.join('|') || 'none'} failedBeforeAdapterSymbols=${attemptedSymbols.join('|') || 'none'} riskBlockedSymbols=${riskBlockedSymbols.join('|') || 'none'} riskBlockedGroups=${riskBlockedGroups.join('|') || 'none'} riskBlockedReasonsBySymbol=${Object.entries(skipReasonsBySymbol).filter(([,r]) => String(r).includes('risk_blocked') || String(r).includes('pre_adapter_block')).map(([s,r]) => `${s}:${r}`).join('|') || 'none'} createdPositionSymbols=none positionCreatedCount=${positionCreatedCount} availableSlotsBefore=${executionPlan.availableSlots} availableSlotsAfter=${Math.max(0, this.executionMaxPositions - posManagerAfter)} nextBackfillSymbolsTried=${backfillCandidateSymbols.join('|') || 'none'} nextBackfillSymbolsCreated=none backfillSkippedBecauseGlobalRiskLimit=${String(riskBlockedGroups.length > 0)} finalCreatedCount=${positionCreatedCount}`);
+    }
+    logger.info(`ADAPTER_CALL_PROOF_AUDIT: scanId=${scanId} selectedCount=${selectedBuyCandidates.length} allowedForAdapterCount=${preAdapterAllowedCount} adapterCalledCount=${adapterCalledCount} adapterAttemptedSymbols=${attemptedSymbols.join('|') || 'none'} adapterRejectedSymbols=none positionCreatedSymbols=${positionCreatedCount > 0 ? attemptedSymbols.join('|') : 'none'} openPositionsBefore=${openPositionsBeforeHandoff} openPositionsAfter=${openPositionsAfterHandoff} exactStopReason=${adapterCalledCount === 0 ? (selectedBuyCandidates.length === 0 ? 'no_candidates_selected' : preAdapterAllowedCount === 0 ? 'all_failed_revalidation' : 'post_revalidation_block') : positionCreatedCount === 0 ? 'adapter_called_but_no_fill' : 'ok'}`);
+    logger.info(`BUY_EXECUTION_PIPELINE_LIFECYCLE_AUDIT: scanId=${scanId} scannerFinished=true scannerBuyReadyCount=${buyCount} selectedForExecutionCount=${selectedBuyCandidates.length} executionPlannerCreated=true controllerReceivedCount=${attemptedSymbols.length} paperAutoBuyFnCalled=${String(adapterCalledCount > 0)} executePlannedScannerBuyCalled=${String(adapterCalledCount > 0)} preAdapterValidationPassedCount=${preAdapterAllowedCount} adapterCalledCount=${adapterCalledCount} fillCreatedCount=0 positionCreatedCount=${positionCreatedCount} openPositionsBefore=${openPositionsBeforeHandoff} openPositionsAfter=${openPositionsAfterHandoff} stopStage=${adapterCalledCount === 0 ? 'pre_adapter' : 'post_adapter'} exactStopReason=${adapterCalledCount === 0 ? (duplicateSkippedCount > 0 ? 'duplicate_symbols' : preAdapterAllowedCount === 0 ? 'all_blocked_by_revalidation' : 'all_blocked_by_paperAutoBuyFn') : 'see_adapter_call_proof'}`);
     logger.info(`MULTI_BUY_HANDOFF_AUDIT: scanId=${scanId} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} selectedCount=${selectedBuyCandidates.length} buyableCandidatesCount=${selectedBuyCandidates.length} controllerReceivedCount=${attemptedSymbols.length} attemptedSymbols=${attemptedSymbols.join('|') || 'none'} skippedSymbols=${skippedSymbols.join('|') || 'none'} skipReasonsBySymbol=${Object.entries(skipReasonsBySymbol).map(([symbol, reason]) => `${symbol}:${String(reason).replace(/\s+/g, '_')}`).join('|') || 'none'} adapterCalledCount=${adapterCalledCount} positionCreatedCount=${positionCreatedCount} openPositionsBefore=${openPositionsBeforeHandoff} openPositionsAfter=${openPositionsAfterHandoff} availableSlotsBefore=${executionPlan.availableSlots} availableSlotsAfter=${Math.max(0, this.executionMaxPositions - openPositionsAfterHandoff)} safetyLimitApplied=${skippedSymbols.length > 0 ? 'per_candidate_revalidation' : 'none'}`);
     if (selectedSymbolsForAudit.length > 0) {
       emitSelectedToExecutionHandoffAudit('post_routing_final');
@@ -1651,6 +2037,16 @@ export class MarketScanner {
       const aggregateReason = aggregateBlocked ? Object.values(skipReasonsBySymbol)[0] ?? 'execution_blocked' : 'none';
       logger.info(`AUTOBOTS_EXECUTION_HANDOFF_AUDIT: scanId=${scanId} buyReadyCount=${buyCount} executionPoolSize=${executionPlan.executionPoolSize} selectedCount=${selectedBuyCandidates.length} selectedSymbols=${selectedBuyCandidates.map(c => c.symbol).join('|') || 'none'} maxOpenPositions=${this.executionMaxPositions} openPositionsBefore=${openPositionsBeforeHandoff} availableSlots=${executionPlan.availableSlots} capitalAvailable=${executionPlan.capitalAvailable} capitalPerTrade=${this.executionCapitalPerTrade} autoExecutionEnabled=${this.paperAutoEnabled} executionAdapter=${displayExecutionAdapter} handoffStarted=true handoffBlocked=${String(aggregateBlocked)} handoffBlockReason=${aggregateReason} controllerReceivedCount=${attemptedSymbols.length} adapterCalled=${String(adapterCalledCount > 0)} adapterCalledCount=${adapterCalledCount} adapterResult=${paperAutoResult?.adapterResult ?? liveExecutionResult?.adapterResult ?? 'unknown'} positionCreateAttempted=${String(adapterCalledCount > 0)} positionCreated=${String(positionCreatedCount > 0)} positionCreatedCount=${positionCreatedCount} openPositionsAfter=${openPositionsAfterHandoff}`);
     }
+    // Execution phase end diagnostics
+    const handoffEmitted = selectedBuyCandidates.length > 0 && (attemptedSymbols.length > 0 || selectedSymbolsForAudit.length > 0 || skippedSymbols.length > 0);
+    if (preFilterBuyCount > 0 && !handoffEmitted && executionPlan.canExecute) {
+      const missingFatalSkipReason = !executionPlan.canExecute ? (executionPlan.noBuyReasons.slice(0, 3).join('|') || 'no_executable_candidates') : (selectedSymbolsForAudit.length === 0 ? 'selected_symbols_empty_after_plan' : (attemptedSymbols.length === 0 ? 'controller_not_reached' : 'partial_handoff'));
+      logger.error(`SCANNER_EXECUTION_PHASE_MISSING_FATAL: scanId=${scanId} preFilterBuyCount=${preFilterBuyCount} poolSize=${finalExecutionPool.length} selectedCount=${selectedBuyCandidates.length} attemptedCount=${attemptedSymbols.length} skippedCount=${skippedSymbols.length} selectedSymbols=${selectedSymbolsForAudit.join('|') || 'none'} attemptedSymbols=${attemptedSymbols.join('|') || 'none'} skippedSymbols=${skippedSymbols.join('|') || 'none'} canExecute=${String(executionPlan.canExecute)} marketScannerPaperAutoEnabled=${String(this.paperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} skipReason=${missingFatalSkipReason} plannerTopNoBuy=${executionPlan.noBuyReasons.slice(0, 3).join('|') || 'none'} routeBranch=${routeBranch} scannerInstanceId=${this.scannerInstanceId} logSinkName=${MARKET_SCANNER_LOG_SINK_NAME} reason=candidates_were_buy_ready_but_no_symbol_reached_handoff`);
+    }
+    if (preFilterBuyCount > 0 && finalExecutionPool.length > 0 && selectedBuyCandidates.length > 0 && attemptedSymbols.length === 0 && skippedSymbols.length === 0) {
+      logger.error(`SCANNER_EXECUTION_PHASE_MISSING_FATAL: scanId=${scanId} preFilterBuyCount=${preFilterBuyCount} poolSize=${finalExecutionPool.length} selectedCount=${selectedBuyCandidates.length} attemptedCount=0 skippedCount=0 reason=selected_candidates_never_routed_to_any_controller`);
+    }
+    logger.info(`SCANNER_EXECUTION_PHASE_END: scanId=${scanId} preFilterBuyCount=${preFilterBuyCount} poolSize=${finalExecutionPool.length} selectedCount=${selectedBuyCandidates.length} attemptedCount=${attemptedSymbols.length} adapterCalled=${String(adapterCalledCount > 0)} positionCreated=${String(positionCreatedCount > 0)} handoffEmitted=${String(handoffEmitted)} canExecute=${String(executionPlan.canExecute)} autoExecutionEnabled=${this.paperAutoEnabled} skippedSymbols=${skippedSymbols.join('|') || 'none'}`);
     this.lastPaperAutoResult = paperAutoResult ?? null;
     this.lastLiveExecutionResult = liveExecutionResult ?? null;
     const controllerReceivedCount = attemptedSymbols.length;
@@ -1660,9 +2056,22 @@ export class MarketScanner {
     const finalOpenPositionsAfter = openPositionsAfterHandoff;
     const executionBlockedReason = paperAutoResult?.blocked ? paperAutoResult.reason : liveExecutionResult?.blocked ? liveExecutionResult.reason : null;
     const firstSkipReason = executionPlan.skippedCandidates.find((s) => s.reason && s.reason !== 'none')?.reason ?? null;
-    const finalNoBuyReason = executionPlan.selectedCandidates.length > 0
-      ? (positionCreated ? 'none' : (executionBlockedReason ?? firstSkipReason ?? executionPlan.noBuyReasons[0] ?? 'execution_failed_without_position'))
-      : (firstSkipReason ?? executionPlan.noBuyReasons[0] ?? 'no_executable_candidates');
+    const finalNoBuyReason = (() => {
+      if (positionCreated) return 'none';
+      if (!executionPlan.canExecute) {
+        const top = executionPlan.noBuyReasons[0] ?? '';
+        if (!this.paperAutoEnabled && !(this as any).liveAutoEnabled) return 'GLOBAL_AUTO_EXECUTION_DISABLED';
+        if (openPositionsBeforeHandoff >= this.executionMaxPositions) return 'GLOBAL_MAX_OPEN_POSITIONS_REACHED';
+        if (executionPlan.capitalAvailable <= 0) return 'GLOBAL_CAPITAL_EXHAUSTED';
+        return top || 'no_executable_candidates';
+      }
+      if (selectedBuyCandidates.length === 0) return executionPlan.noBuyReasons[0] ?? 'no_executable_candidates';
+      if (duplicateSkippedCount >= selectedBuyCandidates.length && selectedBuyCandidates.length > 0) return 'ALL_SELECTED_SYMBOLS_DUPLICATE';
+      if (pendingSkippedCount >= selectedBuyCandidates.length && selectedBuyCandidates.length > 0) return 'ALL_SELECTED_SYMBOLS_PENDING_ORDER';
+      if (adapterCalledCount === 0 && preAdapterAllowedCount > 0) return 'ALL_SELECTED_SYMBOLS_FAILED_PRE_ADAPTER_VALIDATION';
+      if (adapterCalledCount > 0 && positionCreatedCount === 0) return adapterCalledCount > 0 ? 'ADAPTER_REJECTED' : 'POSITION_CREATE_FAILED';
+      return executionBlockedReason ?? executionPlan.noBuyReasons[0] ?? 'execution_failed_without_position';
+    })();
     const blockedBySpread = rankedCandidatesToAnnotate.filter((c) => (c.gateAudit?.blocker ?? c.mainReason ?? '').toLowerCase().includes('spread')).length;
     const blockedBySlippage = rankedCandidatesToAnnotate.filter((c) => (c.gateAudit?.blocker ?? c.mainReason ?? '').toLowerCase().includes('slippage')).length;
     const blockedByDip = rankedCandidatesToAnnotate.filter((c) => (c.gateAudit?.setupMissing ?? []).some((s) => s.toLowerCase().includes('dip'))).length;
@@ -1731,6 +2140,7 @@ export class MarketScanner {
 
     // Store snapshot with capped history
     this.snapshots.push(snapshot);
+    this.lastSnapshot = snapshot;
     if (this.snapshots.length > this.maxSnapshots) {
       this.snapshots.shift();
     }

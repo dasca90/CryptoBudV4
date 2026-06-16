@@ -857,14 +857,9 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  min-height: 260px;
+  flex: 1;
+  min-height: 0;
   min-width: 0;
-}
-.closed-v4 > :first-child {
-  min-height: 300px;
-}
-.open-v4 > :first-child {
-  min-height: 300px;
 }
 .open-v4 .data-table thead th,
 .closed-v4 .data-table thead th {
@@ -1056,6 +1051,28 @@
   text-align: left;
 }
 .pnl-tooltip-wrap:hover .pnl-tooltip-card { display: block; }
+
+.row-tooltip-portal {
+  position: fixed;
+  min-width: 280px;
+  max-width: 360px;
+  background: rgba(7, 14, 28, 0.97);
+  border: 1px solid rgba(88, 166, 255, 0.42);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #c9d1d9;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+  line-height: 1.6;
+  pointer-events: none;
+}
+.row-tooltip-section {
+  border-bottom: 1px solid rgba(88, 166, 255, 0.12);
+  padding: 3px 0;
+}
+.row-tooltip-section:last-child {
+  border-bottom: none;
+}
 
 /* V3 position workspace: compact trading-table look from CryptoBud V3. */
 .v3-positions-window {

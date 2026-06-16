@@ -3,6 +3,23 @@ import { logger } from "../../utils/logger";
 import { getPullProgress, type ScannerCoinLifecycleEntry } from "./scannerCoinLifecycle";
 import { lifecycleToVisualState, shouldRenderScannerCoin } from "./scannerExecutionVisualState";
 
+function resolveAirCoinStatusLabel(candidate: TradeV4CandidateView, isOpen: boolean): string {
+  if (isOpen) return 'OPEN';
+  const why = (candidate as any).skipReason ?? (candidate as any).finalNoBuyReason ?? candidate.mainReason ?? '';
+  const r = String(why).toLowerCase();
+  if (r.includes('duplicate') || r.includes('block_duplicate')) return 'DUPLICATE';
+  if (r.includes('max_capital') || r.includes('risk_block') || r.includes('group_position')) return 'RISK BLOCK';
+  if (r.includes('candle') || r.includes('exhaust')) return 'EXHAUSTED';
+  if (r.includes('overextend')) return 'OVEREXTEND';
+  if (r.includes('spread')) return 'SPREAD';
+  if (r.includes('tp_room') || r.includes('tp1')) return 'NO TP';
+  if (candidate.status === 'BUY') {
+    const exec = (candidate as any).executionSelected === true || (candidate as any).adapterCalled === true;
+    return exec ? 'SELECTED' : 'READY';
+  }
+  return candidate.status;
+}
+
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
 function seededNumber(symbol: string, salt = 0): number {
@@ -102,13 +119,18 @@ export function mapCandidatesToAirCoins(params: {
       return { ...b, x: b.baseX, y: b.baseY, z: b.baseZ, captureProgress: 0 };
     })();
     const fallbackState = openPosition ? "open" : (selectedSymbol === candidate.symbol && candidate.status === "WAIT" ? "locked" : candidate.engineState);
+    const visualLabel = resolveAirCoinStatusLabel(candidate, !!openPosition);
+    const rawStatus = candidate.status;
+    if (visualLabel !== rawStatus) {
+      logger.info(`AIR_SCANNER_VISUAL_LABEL_AUDIT: symbol=${candidate.symbol} candidateStatus=${rawStatus} finalExecutable=${String(candidate.finalExecutable ?? 'n/a')} buyAllowed=${String(candidate.buyAllowed ?? 'n/a')} executionSelected=false executionSubmitted=false adapterCalled=false positionOpen=${String(!!openPosition)} finalNoBuyReason=${candidate.mainReason ?? 'n/a'} visualLabelBefore=${rawStatus} visualLabelAfter=${visualLabel} visualState=${fallbackState} reason=status_label_mapped`);
+    }
 
     coins.push({
       symbol: candidate.symbol,
       engineState: lifecycleToVisualState(lifecycle?.state, fallbackState),
       confidence: candidate.confidence,
       score: candidate.score,
-      status: candidate.status,
+      status: visualLabel,
       spreadPct: candidate.spreadPct ?? 0,
       volumeRel: candidate.volumeRel ?? 0,
       x: s.x, y: s.y, z: s.z,

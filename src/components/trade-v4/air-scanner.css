@@ -47,13 +47,13 @@
   box-shadow: 0 0 6px rgba(0,234,255,0.5);
 }
 
-.dot-floating { background: rgba(0,234,255,0.4); box-shadow: 0 0 4px rgba(0,234,255,0.2); }
+.dot-floating             { background: #4dc9f6; box-shadow: 0 0 6px rgba(77,201,246,0.4); }
 .dot-detected { background: var(--neon-cyan); box-shadow: 0 0 8px rgba(0,234,255,0.5); }
 .dot-locked { background: var(--neon-yellow); box-shadow: 0 0 8px rgba(210,153,34,0.5); }
 .dot-locked_for_buy { background: var(--neon-yellow); box-shadow: 0 0 10px rgba(210,153,34,0.7); }
 .dot-execution_submitted { background: var(--neon-violet); box-shadow: 0 0 10px rgba(157,107,255,0.65); }
 .dot-position_opened_hold { background: var(--neon-green); box-shadow: 0 0 12px rgba(63,185,80,0.7); }
-.dot-pull_to_center { background: var(--neon-cyan); box-shadow: 0 0 12px rgba(0,234,255,0.7); }
+.dot-pull_to_center       { background: #bc8cff;    box-shadow: 0 0 12px rgba(188,140,255,0.7); }
 .dot-approved { background: var(--neon-green); box-shadow: 0 0 8px rgba(63,185,80,0.5); }
 .dot-capturing { background: var(--neon-violet); box-shadow: 0 0 8px rgba(157,107,255,0.5); }
 .dot-open { background: var(--neon-green); box-shadow: 0 0 10px rgba(63,185,80,0.6); }
@@ -211,8 +211,8 @@
 
 /* Coin States */
 .air-coin-floating .air-coin-orb {
-  border-color: rgba(0,234,255,0.15);
-  box-shadow: 0 0 10px rgba(0,234,255,0.1);
+  border-color: rgba(77,201,246,0.25);
+  box-shadow: 0 0 14px rgba(77,201,246,0.15);
   opacity: 0.65;
 }
 
@@ -257,6 +257,10 @@
 
 .air-coin-pull_to_center {
   pointer-events: none;
+}
+.air-coin-pull_to_center .air-coin-orb {
+  border-color: #bc8cff;
+  box-shadow: 0 0 40px rgba(188,140,255,0.58), inset 0 0 18px rgba(188,140,255,0.14);
 }
 
 .air-coin-pull_to_center .air-coin-orb {
@@ -383,4 +387,87 @@
   .scanner-mode-normal .air-coin-symbol {
     font-size: 14px;
   }
+}
+
+/* ── Enhanced Visual Effects ── */
+
+/* Realistic coin material — metallic gradient */
+.air-coin-orb {
+  background: radial-gradient(circle at 35% 30%, rgba(77,201,246,0.45), rgba(5,15,35,0.85) 55%, rgba(3,8,20,0.95) 100%) !important;
+  backdrop-filter: blur(1px);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, background 0.5s ease;
+}
+
+/* Coin pulse animation */
+@keyframes coin-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+}
+.air-coin-floating .air-coin-orb,
+.air-coin-detected .air-coin-orb {
+  animation: coin-pulse 4s ease-in-out infinite;
+}
+
+/* Scanner core glow — static, subtle, no zoom */
+.scanner-core {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(0,234,255,0.15), rgba(0,234,255,0.04) 60%, transparent 100%);
+  box-shadow: 0 0 40px rgba(0,234,255,0.15);
+  animation: core-breathe 6s ease-in-out infinite;
+}
+@keyframes core-breathe {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.8; }
+}
+
+/* Scanner grid floor — subtle static lines */
+.scanner-grid {
+  background-image:
+    radial-gradient(circle at center, rgba(0,234,255,0.03) 0%, transparent 70%),
+    linear-gradient(rgba(0,234,255,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,234,255,0.02) 1px, transparent 1px);
+  background-size: 100% 100%, 60px 60px, 60px 60px;
+  background-position: center center;
+}
+
+/* Particle field — static, no animation */
+.scanner-space::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, rgba(0,234,255,0.02) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+/* BUY Lightning strike keyframe */
+@keyframes buy-lightning-strike {
+  0% { opacity: 0; transform: scale(0.5) rotate(-15deg); }
+  15% { opacity: 1; transform: scale(1.1) rotate(0deg); }
+  30% { opacity: 0.8; transform: scale(0.95) rotate(5deg); }
+  45% { opacity: 1; transform: scale(1.05) rotate(-3deg); }
+  60% { opacity: 0.6; transform: scale(0.9) rotate(0deg); }
+  100% { opacity: 0; transform: scale(0.3) rotate(10deg); }
+}
+.air-coin-locked_for_buy .air-coin-orb {
+  animation: scanner-lock-strike 0.8s ease-out 1, buy-lightning-strike 0.4s ease-out 1;
+}
+
+/* BUY glow pulse on selected coin */
+@keyframes buy-glow-pulse {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.5); }
+}
+.air-coin-execution_submitted .air-coin-orb {
+  animation: buy-glow-pulse 0.6s ease-in-out 2;
+}
+
+/* Particle field effect */
+.scanner-space::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, rgba(0,234,255,0.03) 0%, transparent 70%);
+  pointer-events: none;
 }

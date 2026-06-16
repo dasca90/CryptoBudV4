@@ -3,6 +3,7 @@ import type {
   PaperRejectReason, PaperExecutionQuality, PaperFilterValidation,
 } from '../types';
 import { DEFAULT_PAPER_SLIPPAGE_CONFIG, DEFAULT_PAPER_FEE_RATE, PRICE_STALE_THRESHOLD_MS } from './paper-simulation-config';
+import { logger } from '../../utils/logger';
 
 function roundToStep(value: number, stepSize: number): number {
   if (stepSize <= 0) return value;
@@ -193,18 +194,26 @@ export function simulatePaperOrder(input: PaperOrderInput): PaperExecutionResult
 
   audit.fee = fee;
   audit.feeRate = input.feeRate;
+  audit.basePrice = basePrice;
+  audit.slippageFactor = slippageFactor;
+  audit.rawExecutedPrice = executedPrice;
+  audit.rawExecutedNotional = executedNotional;
+
+  if (executedPrice > 0 && executedPrice < 0.01) {
+    logger.info(`LOW_PRICE_SYMBOL_PRECISION_AUDIT: symbol=${input.symbol} executedPrice=${executedPrice} basePrice=${basePrice} slippagePct=${(slippagePct * 100).toFixed(4)}% qty=${executedQuantity} notional=${executedNotional} side=${input.side} precision=full_float_no_rounding`);
+  }
 
   return {
     success: true,
     status,
     rejectReason: null,
     requestedPrice: input.requestedPrice,
-    executedPrice: Math.round(executedPrice * 100) / 100,
+    executedPrice,
     requestedQuantity: input.requestedQuantity,
     executedQuantity,
     roundedQuantity: filterVal.roundedQuantity,
     requestedNotional: input.requestedPrice * input.requestedQuantity,
-    executedNotional: Math.round(executedNotional * 100) / 100,
+    executedNotional,
     fee: Math.round(fee * 100) / 100,
     feeAsset: 'USDT',
     feeRate: input.feeRate,

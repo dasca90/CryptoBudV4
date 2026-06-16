@@ -100,6 +100,7 @@ export class SettingsPersistence {
     logger.info(`USER_SETTINGS_SAVE_REQUESTED: tradingCapital=${(updated as any).autoTradingCapital ?? 1000} capitalPerCoin=${(updated as any).capitalPerCoin ?? updated.capitalPerTrade ?? 100} maxOpenPositions=${updated.maxPositions ?? 10} bannedCoinsCount=${(updated.scannerBanlist ?? []).length} source=persistence storageKey=${SETTINGS_KEY} hydrationComplete=true`);
     await this.setItem(SETTINGS_KEY, JSON.stringify(updated));
     logger.info(`USER_SETTINGS_SAVE_SUCCESS: tradingCapital=${(updated as any).autoTradingCapital ?? 1000} capitalPerCoin=${(updated as any).capitalPerCoin ?? updated.capitalPerTrade ?? 100} maxOpenPositions=${updated.maxPositions ?? 10} bannedCoinsCount=${(updated.scannerBanlist ?? []).length} source=persistence storageKey=${SETTINGS_KEY}`);
+    logger.info(`TRADING_SETTINGS_PERSISTENCE_AUDIT: reason=settings_save savedRefPeriod=${updated.scannerReferencePeriod ?? 'n/a'} savedRefMode=${(updated as any).refMode ?? 'n/a'} savedRefWindow=${(updated as any).refWindow ?? 'n/a'} writeSuccess=true sourceUsed=${typeof (typeof window !== 'undefined' ? (window as any).__TAURI_INTERNALS__ : undefined) !== 'undefined' ? 'tauri_sqlite' : 'localStorage'}`);
     if (!this.isDupLog('SETTINGS_SAVED')) logger.info('SETTINGS_SAVED');
   }
 

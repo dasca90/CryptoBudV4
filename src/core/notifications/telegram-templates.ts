@@ -180,6 +180,13 @@ export function formatSellNotification(trade: TradeRecord): string {
   const pnlUsd = Number(trade.pnl ?? 0);
   const fees = Number(close?.fees ?? 0);
   const netPnl = pnlUsd - fees;
+  const pnlPct = Number(trade.pnlPercent ?? 0);
+  const effectiveNetPnl = Number.isFinite(netPnl) ? netPnl : pnlUsd;
+  const effectivePnlPct = Number.isFinite(netPnl) ? (netPnl / (Math.abs(trade.entryPrice * trade.quantity) || 1)) * 100 : pnlPct;
+  const sellOutcome = effectiveNetPnl > 0.0001 ? 'profit' : effectiveNetPnl < -0.0001 ? 'loss' : 'breakeven';
+  const sellIcon = sellOutcome === 'profit' ? '🟩' : sellOutcome === 'loss' ? '🔴' : '🟨';
+  const sellLabel = `SELL CLOSED ${sellOutcome === 'profit' ? 'PROFIT' : sellOutcome === 'loss' ? 'LOSS' : 'BREAKEVEN'}`;
+  logger.info(`TELEGRAM_SELL_STATUS_RESOLVED: symbol=${trade.coin} reason=${close?.exitReason ?? 'n/a'} netPnlUsdt=${netPnl} pnlUsdt=${pnlUsd} pnlPct=${pnlPct} resolvedOutcome=${sellOutcome} resolvedIcon=${sellIcon} resolvedLabel=${sellLabel}`);
   const risk = getEntryRiskSnapshot(trade, 'SELL_CLOSED', source.label);
   const tp1 = risk.tp1Pct ?? finiteNumber(close?.tp1Percent);
   const tp2 = risk.tp2Pct ?? finiteNumber(close?.tp2Percent);
@@ -189,7 +196,7 @@ export function formatSellNotification(trade: TradeRecord): string {
   const durationSec = typeof close?.durationMs === 'number' ? Math.max(0, Math.floor(close.durationMs / 1000)) : null;
 
   return [
-    '🔴 SELL CLOSED',
+    `${sellIcon} ${sellLabel}`,
     `📌 Symbol: ${sanitizeTelegramText(trade.coin)}`,
     `🧪 Mode: ${sanitizeTelegramText(trade.adapter === 'Paper' ? 'Demo' : trade.adapter)}`,
     `🤖 Source: ${source.label}`,

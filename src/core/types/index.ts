@@ -1246,6 +1246,46 @@ export interface PlannedCandidate {
   capitalAllocation?: number;
   targetPolicy?: ScannerCandidate['tradingTargetOwnership'] | null;
   gateSnapshot?: EntryGateDecisionSnapshot;
+  scannerAutoEntryConfigSnapshot?: ScannerAutoEntryConfigSnapshot | null;
+}
+
+export interface ScannerAutoEntryConfigSnapshot {
+  schemaVersion: 'cryptobud-v4-scanner-auto-entry-config-v1';
+  symbol: string;
+  scanId: string | null;
+  sourceCandidateId: string | null;
+  selectedStrategy: string;
+  finalEntryRule: string;
+  setupResult: string;
+  finalExecutable: boolean;
+  finalExecutableAtEntry: boolean;
+  buyAllowed: boolean;
+  entryConfirmedAtEntry: boolean;
+  entryStatus: string;
+  entryGateDecision: string;
+  confidence: number;
+  executionPath: 'scanner_auto';
+  ownerType: 'scanner';
+  ownerName: 'The Dipper';
+  source: 'AutoBots';
+  strategySource: string;
+  strategySourceDetail?: string | null;
+  strategyReason?: string | null;
+  entryPrice: number;
+  quantity: number;
+  capitalAllocated: number;
+  tp1Pct: number;
+  tp1Source: string;
+  tp2Pct: number;
+  tp2Source: string;
+  slPct: number;
+  slSource: string;
+  dynamicTrailingEnabled: boolean;
+  trailStart: 'TP1' | number;
+  trailPullbackPct: number;
+  riskParams: Record<string, unknown>;
+  strategyAuditSnapshot: Record<string, unknown>;
+  createdAt: string;
 }
 
 export interface SkippedCandidate {
@@ -1638,6 +1678,8 @@ export interface AppSettings {
     very_high_risk: boolean;
   };
   scannerReferencePeriod: '1h' | '4h' | '1d' | '1w';
+  refWindow: 'AUTO' | 'LAST_HOUR' | 'LAST_DAY' | 'LAST_3_DAYS' | 'LAST_WEEK' | 'LAST_3_WEEKS';
+  refMode: 'AUTO' | 'SMA' | 'EMA' | 'VWAP' | 'BOLLINGER';
   scannerUniverseMode: 'BINANCE_TOP_250' | 'TOP_100' | 'TOP_50' | 'TOP_20' | 'WATCHLIST';
   scannerUniverseSize: number;
   scannerFinalPoolSize: number;
@@ -1712,6 +1754,8 @@ export function createDefaultAppSettings(): AppSettings {
       very_high_risk: true,
     },
     scannerReferencePeriod: '1h',
+    refWindow: 'LAST_DAY',
+    refMode: 'SMA',
     scannerUniverseMode: 'BINANCE_TOP_250',
     scannerUniverseSize: 250,
     scannerFinalPoolSize: 20,

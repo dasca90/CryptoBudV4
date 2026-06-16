@@ -2,6 +2,7 @@ import { useEffect, useMemo } from "react";
 import { getTitleSymbol } from "../../lib/ui/uiSymbolMapper";
 import { getTrendClassName, getTrendGlow } from "../../lib/ui/trendColorHelper";
 import { getExecutionAdapterDisplay, getExecutionStageDisplay, sanitizeExecutionDisplayText } from "../../lib/execution/executionDisplay";
+import { formatLocalTime } from "../../utils/timeFormatter";
 import { logger } from "../../utils/logger";
 
 export function ControlTowerPanel(props: {
@@ -126,7 +127,7 @@ export function ControlTowerPanel(props: {
       <Card title="THE DIPPER" status={props.scannerRunning ? "SCANNING" : "STOPPED"}>
         <Row
           label="Last Scan"
-          value={canonical.lastScanAt ? `${new Date(canonical.lastScanAt).toLocaleTimeString()} · ${ageLabel}` : (props.scannerRunning ? "Active" : "Stopped")}
+          value={canonical.lastScanAt ? `${formatLocalTime(canonical.lastScanAt, { format: 'time' })} · ${ageLabel}` : (props.scannerRunning ? "Active" : "Stopped")}
           tone={canonical.scannerStatus === "RUNNING" ? "good" : canonical.scannerStatus === "WAITING" ? "warn" : "bad"}
         />
         <Row label="Scanner Status" value={canonical.scannerStatus} tone={canonical.scannerStatus === "RUNNING" ? "good" : canonical.scannerStatus === "WAITING" ? "warn" : "bad"} />

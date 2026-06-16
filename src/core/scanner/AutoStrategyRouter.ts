@@ -1,5 +1,6 @@
 import type { AutoStrategyName, StrategyConfidenceTier, StrategySourceOwner, StrategySourceDetail } from '../types';
 import type { AutoStrategyDecision } from '../types';
+import { logger } from '../../utils/logger';
 export type { AutoStrategyName, StrategyConfidenceTier, AutoStrategyDecision };
 
 export type GroupTrendInput = 'bullish' | 'bearish' | 'bearish_or_unsafe' | 'sideways' | 'waiting_for_rebound' | 'caution';
@@ -52,7 +53,7 @@ function hasHardBlock(blockReasons: string[]): boolean {
 export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrategyDecision {
   const {
     symbol, referencePeriod, groupTrend, groupRecommendedStrategy, groupEnabled,
-    candidateStatus, confidence, dipPct, momentumPct, volumeRelative, spreadPct,
+    candidateStatus, confidence, dipPct, reboundPct, momentumPct, volumeRelative, spreadPct,
     tpRoomOk, priceFresh, fallingKnife, overextended, reboundConfirmed, momentumConfirmed,
     mlBadEntryRisk, mlWinProbability, blockReasons,
   } = input;
@@ -65,6 +66,13 @@ export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrateg
   function ret(strategy: AutoStrategyName, owner: StrategySourceOwner, detail: StrategySourceDetail, strategyReason: string, extraWarnings: string[], overrides?: Partial<AutoStrategyDecision>): AutoStrategyDecision {
     const fallbackUsed = owner === 'AutoBots_SafeFallback' || detail === 'fallback_conservative' || detail === 'data_stale_safe_fallback' || detail === 'group_fallback';
     const fallbackReason = fallbackUsed ? strategyReason : null;
+    const isDipRebound = String(strategy) === 'dip_and_rebound';
+    const recommendedIsDipRebound = String((overrides as any)?.groupRecommendedStrategy ?? '') === 'dip_and_rebound';
+    if (isDipRebound || (recommendedIsDipRebound && !isDipRebound)) {
+      const rejected = !isDipRebound;
+      const rejectionReason = rejected ? (dipPct == null || dipPct >= 0 ? 'dip_missing_or_zero' : !reboundConfirmed ? 'rebound_not_confirmed' : 'none') : 'none';
+      logger.info(`AUTOSTRATEGY_ROUTER_DIP_REBOUND_DECISION_AUDIT: symbol=${symbol} marketRecommendedStrategy=${groupRecommendedStrategy} candidateStrategyBefore=${candidateStatus} actualDipPct=${dipPct?.toFixed(2) ?? 'n/a'} requiredDipPct=n/a dipConfirmed=${String(dipPct != null && dipPct < 0)} actualReboundPct=${reboundPct?.toFixed(2) ?? 'n/a'} requiredReboundPct=n/a reboundConfirmed=${String(reboundConfirmed)} momentumConfirmed=${String(momentumConfirmed)} selectedStrategy=${String(strategy)} finalEntryRule=n/a decisionSource=${detail} rejectedDipAndRebound=${String(rejected)} rejectionReason=${rejectionReason}`);
+    }
     return {
       symbol,
       effectiveStrategy: strategy,
@@ -155,7 +163,7 @@ export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrateg
     if (confidence >= 75 && momentumConfirmed && reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh && !overextended) {
       return ret('balanced', 'AutoBots', 'per_coin_selector', 'Bearish group but strong per-symbol balance — balanced selected', ['GROUP_BEARISH_PROMOTED']);
     }
-    if (reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh) {
+    if (reboundConfirmed && dipPct < 0 && tpRoomOk && spreadPct < 0.5 && priceFresh) {
       return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Dip and rebound setup selected for bearish group', ['GROUP_BEARISH']);
     }
     return ret('wait', 'AutoBots_SafeFallback', 'group_fallback', 'Group trend bearish - waiting for safer conditions', ['GROUP_BEARISH'], { blockedByGroupRegime: true, confidenceAdjustment: 0 });
@@ -166,7 +174,7 @@ export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrateg
       return ret('wait', 'AutoBots_SafeFallback', 'confidence_below_tier', 'Caution group and confidence below tier — waiting', ['CONFIDENCE_BELOW_TIER', 'GROUP_VOLATILITY_CAUTION'], { blockedByConfidence: true, confidenceAdjustment: 0 });
     }
     warnings.push('GROUP_VOLATILITY_CAUTION');
-    if (confidence >= 70 && reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh) {
+    if (confidence >= 70 && reboundConfirmed && dipPct < 0 && tpRoomOk && spreadPct < 0.5 && priceFresh) {
       return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Caution group - dip and rebound selected with confirmation', ['GROUP_VOLATILITY_CAUTION']);
     }
     return ret('conservative', 'AutoBots_SafeFallback', 'group_fallback', 'Group trend caution - conservative approach', ['GROUP_VOLATILITY_CAUTION'], { blockedByGroupRegime: true });
@@ -176,14 +184,14 @@ export function computeAutoStrategy(input: AutoStrategyRouterInput): AutoStrateg
     if (tier === 'C_BELOW_70') {
       return ret('wait', 'AutoBots_SafeFallback', 'confidence_below_tier', 'Waiting for rebound and confidence below tier', ['CONFIDENCE_BELOW_TIER'], { blockedByConfidence: true, confidenceAdjustment: 0 });
     }
-    if (reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh) {
+    if (reboundConfirmed && dipPct < 0 && tpRoomOk && spreadPct < 0.5 && priceFresh) {
       return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Dip and rebound setup detected', []);
     }
     return ret('wait', 'AutoBots_SafeFallback', 'group_fallback', 'Waiting for rebound confirmation', ['REBOUND_NOT_CONFIRMED'], { confidenceAdjustment: 0, groupRecommendedStrategy: 'dip_and_rebound' as AutoStrategyName });
   }
 
   if (groupTrend === 'sideways') {
-    if (reboundConfirmed && tpRoomOk && spreadPct < 0.5 && priceFresh && !overextended) return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Sideways group - dip and rebound selected', []);
+    if (reboundConfirmed && dipPct < 0 && tpRoomOk && spreadPct < 0.5 && priceFresh && !overextended) return ret('dip_and_rebound', 'AutoBots', 'per_coin_selector', 'Sideways group - dip and rebound selected', []);
     if (confidence >= 70 && momentumConfirmed && spreadPct < 0.3 && priceFresh && tpRoomOk) return ret('balanced', 'AutoBots', 'per_coin_selector', 'Sideways group - balanced selected', []);
     if (momentumPct > 1 && volumeRelative >= 0.5 && spreadPct < 0.3 && !fallingKnife) return ret('momentum', 'AutoBots', 'per_coin_selector', 'Sideways group - momentum selected', []);
     if (momentumPct > 0.5 && volumeRelative >= 0.8 && spreadPct < 0.4) return ret('momentum', 'AutoBots', 'per_coin_selector', 'Sideways group - momentum with volume', []);

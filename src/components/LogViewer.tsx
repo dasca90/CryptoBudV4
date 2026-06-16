@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { logger } from '../utils/logger';
 import { sanitizeExecutionDisplayText } from '../lib/execution/executionDisplay';
+import { formatSystemLocalTime } from '../utils/timeFormatter';
 
 export function LogViewer() {
   const [logs, setLogs] = useState(logger.getRecentLogs(100));
@@ -21,7 +22,7 @@ export function LogViewer() {
     <div className="log-area">
       {logs.map((l, i) => (
         <div key={i} className="log-entry">
-          <span className="log-time">{l.timestamp.slice(11, 23)}</span>
+          <span className="log-time">{formatSystemLocalTime(l.timestamp)}</span>
           <span className={`log-level ${l.level}`}>{l.level}</span>
           <span className="log-msg">{sanitizeExecutionDisplayText(l.message)}</span>
         </div>

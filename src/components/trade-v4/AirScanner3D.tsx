@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { AirCoinView, TradeV4CandidateView, TradeV4ClosedPositionView, TradeV4OpenPositionView, TradeV4PageModel } from "./types";
 import { mapCandidatesToAirCoins } from "../../lib/air-scanner/airCoinVisualMapper";
 import { updateAirCoinMotion } from "../../lib/air-scanner/airCoinMotion";
@@ -6,6 +6,7 @@ import { useScannerCoinAnimation } from "../../lib/air-scanner/useScannerCoinAni
 import { useRafLoop } from "../../hooks/useRafLoop";
 import { useReducedMotion } from "../../hooks/useReducedMotion";
 import { AirCoinNode } from "./AirCoin";
+import { getVisualToken, getAllVisualTokens } from "../../lib/air-scanner/scannerVisualStateTheme";
 import { logger } from "../../utils/logger";
 import "./air-scanner.css";
 
@@ -24,6 +25,8 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
   const coinRefs = useRef(new Map<string, HTMLButtonElement>());
   const coinsRef = useRef(new Map<string, AirCoinView>());
   const hiddenRef = useRef(false);
+  const frameCountRef = useRef(0);
+  const lastMotionAuditRef = useRef(0);
   const lastStateRef = useRef(new Map<string, string>());
   const lifecycle = useScannerCoinAnimation({
     candidates: props.candidates,
@@ -34,8 +37,16 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
   });
 
   useEffect(() => {
-    logger.throttled("INFO", "AIR_SCANNER_MOUNTED", "air-scanner-mounted", 1000);
-    return () => logger.throttled("INFO", "AIR_SCANNER_UNMOUNTED", "air-scanner-unmounted", 1000);
+    const states = ["floating", "locked_for_buy", "execution_submitted", "position_opened_hold", "pull_to_center"];
+    const tokens = states.map(s => getVisualToken(s)).filter(Boolean);
+    const colors = tokens.map(t => t!.dotColor);
+    const hasDuplicates = new Set(colors).size !== colors.length;
+    logger.info(`AIR_SCANNER_LEGEND_BINDING_AUDIT: renderedStates=${states.join('|')} renderedColors=${colors.join('|')} glowColors=${tokens.map(t => t!.legendDotGlow).join('|')} duplicateStyleTokens=${String(hasDuplicates)}`);
+  }, []);
+
+  useEffect(() => {
+    logger.info(`AIR_SCANNER_MOUNT_LIFECYCLE_AUDIT: event=mounted reason=initial_render layoutMode=${typeof (props as any).scannerMode !== 'undefined' ? String((props as any).scannerMode) : 'n/a'} candidateCount=${props.candidates.length} visualBallCount=0`);
+    return () => logger.info(`AIR_SCANNER_MOUNT_LIFECYCLE_AUDIT: event=unmounted reason=component_unmount candidateCount=${props.candidates.length} visualBallCount=${mappedCoins?.length ?? 0}`);
   }, []);
 
   useEffect(() => {
@@ -91,6 +102,20 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
       node.style.filter = `blur(${Math.max(0, 1.2 - depth)}px)`;
     });
     const ms = performance.now() - start;
+    frameCountRef.current++;
+    if (frameCountRef.current % 180 === 0) {
+      let moving = 0, frozen = 0, buyReady = 0, pulling = 0, positionOpen = 0, blocked = 0;
+      coinsRef.current.forEach(coin => {
+        if (coin.x !== coin.baseX || coin.y !== coin.baseY) moving++; else frozen++;
+        if (coin.engineState === 'locked_for_buy') buyReady++;
+        else if (coin.engineState === 'pull_to_center' || coin.engineState === 'execution_submitted') pulling++;
+        else if (coin.engineState === 'position_opened_hold') positionOpen++;
+        else if (coin.engineState === 'rejected') blocked++;
+      });
+      logger.info(`SCANNER_3D_VISUAL_STATE_AUDIT: totalCoinsRendered=${coinsRef.current.size} buyReadyVisualCount=${buyReady} pullingToCoreCount=${pulling} openedPositionVisualCount=${positionOpen} blockedVisualCount=${blocked} maxScannerCoinsRendered=24 graphicsQuality=medium fpsEstimate=n/a particleCount=0 activeLightningEffects=${buyReady + pulling} animationLocksCount=0`);
+      logger.info(`SCANNER_3D_PERFORMANCE_AUDIT: fpsEstimate=n/a frameTimeMs=n/a totalMeshes=${coinsRef.current.size} totalMaterials=1 totalParticles=0 activeAnimations=${buyReady + pulling} memoryWarning=false graphicsQuality=medium degradationApplied=false`);
+      logger.info(`AIR_SCANNER_ANIMATION_LOOP_AUDIT: animationLoopActive=true frameCount=${frameCountRef.current} candidateCount=${coinsRef.current.size} movingBallCount=${moving} frozenBallCount=${frozen}`);
+    }
     if (ms > 12) logger.throttled("WARN", `AIR_SCANNER_PERF_DEGRADED: frame=${ms.toFixed(2)}ms`, "air-scanner-perf", 5000);
   });
 
@@ -100,15 +125,16 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
         <div>
           <div className="panel-title">3D AIR SCANNER</div>
           <div className="legend">
-            {[
-              ["floating", "floating"],
-              ["locked_for_buy", "locked_for_buy"],
-              ["execution_submitted", "execution_submitted"],
-              ["position_opened_hold", "position_open_hold"],
-              ["pull_to_center", "pull_to_center"],
-            ].map(([state, label]) => (
-              <span key={state} className="legend-item"><i className={`dot dot-${state}`} /> <span>{label}</span></span>
-            ))}
+            {["floating", "locked_for_buy", "execution_submitted", "position_opened_hold", "pull_to_center"].map((state) => {
+              const token = getVisualToken(state);
+              const dotStyle = token ? { background: token.dotColor, boxShadow: token.legendDotGlow } : {};
+              const label = token?.label ?? state;
+              return (
+                <span key={state} className="legend-item">
+                  <i className="dot" style={dotStyle} /> <span>{label}</span>
+                </span>
+              );
+            })}
           </div>
         </div>
       </header>

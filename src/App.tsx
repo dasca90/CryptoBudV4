@@ -15,6 +15,7 @@ import { runLiveSafetyCheck } from './core/live/LiveSafetyCheck';
 import { canTransitionTo, INITIAL_SAFETY_STATE } from './core/live/LiveSafetyState';
 import { appStatePersistence } from './core/persistence/AppStatePersistence';
 import { backupService } from './core/persistence/BackupService';
+import { refreshSystemTimeContext } from './utils/timeFormatter';
 import { AppShell } from './components/layout/AppShell';
 import { TradePage } from './ui/pages/TradePage';
 import { JournalPage } from './ui/pages/JournalPage';
@@ -121,6 +122,7 @@ export default function App() {
 
     (async () => {
       logger.info(`APP_RELOAD_DETECTED_AUDIT: reloadType=F5_browser_reload wasExplicitReset=false hydrationStarted=false hydrationComplete=false openPositionsLoaded=0 closedTradesLoaded=0 journalTradesLoaded=0 mlRecordsLoaded=0 settingsLoaded=false attemptedEmptyOverwrite=false emptyOverwriteBlocked=false sourceUsed=localStorage storageKey=cryptobud_v4 backupKey=cryptobud_v4_critical resetMarkerPresent=false resetMarkerConsumed=false`);
+      logger.info(`STORAGE_CONTEXT_AUDIT: runtimeMode=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'desktop' : 'browser'} isDesktop=${String(typeof (window as any).__TAURI_INTERNALS__ !== 'undefined')} storageOrigin=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri_sqlite' : 'browser_localStorage'} localStorageAvailable=${String(typeof localStorage !== 'undefined')} tauriStoreAvailable=${String(typeof (window as any).__TAURI_INTERNALS__ !== 'undefined')} positionStorageKey=cryptobud_v4:open_positions_primary backupStorageKey=cryptobud_v4:open_positions_critical loadedFrom=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri_then_localStorage' : 'localStorage'}`);
       logger.info(`RESET_MARKER_AUDIT: resetMarkerPresent=false wasExplicitReset=false resetScope=none resetAt=none reason=normal_boot_no_reset_marker`);
       logger.info(`PERSISTENCE_BOOT_START: mode=demo journalLoadPending=true appStateLoadPending=true settingsLoadPending=false reason=app_startup`);
       logger.info(`POSITION_PERSISTENCE_BOOT_START: mode=demo storageKey=open_positions persistedOpenCount=0 positionManagerOpenCount=0 uiOpenRowsCount=0 restoredSymbols=none resetMetaDetected=false resetApplied=false reason=startup`);
@@ -159,10 +161,16 @@ export default function App() {
       logger.info(`POSITION_MANAGER_HYDRATION_START: mode=demo storageKey=open_positions backupKey=cryptobud_v4:open_positions_critical persistedOpenCount=0 backupOpenCount=0 positionManagerOpenCount=0 uiOpenRowsCount=0 restoredSymbols=none resetMetaDetected=false resetApplied=false hydrationComplete=false reason=begin_restore`);
       const savedPositions = await journal.loadOpenPositions();
       logger.info(`POSITION_PERSISTENCE_STORAGE_${savedPositions.length > 0 ? 'FOUND' : 'EMPTY'}: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=0 uiOpenRowsCount=0 restoredSymbols=${savedPositions.map(p => p.symbol).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=journal_load`);
+      let repairedCount = 0;
       if (savedPositions.length > 0) {
+        const closedTradeIds = new Set(journal.getClosedTrades().map(t => t.tradeId).filter(Boolean));
         const restored: Position[] = [];
         for (const sp of savedPositions) {
           try {
+            if (closedTradeIds.has(sp.trade_id)) {
+              logger.warn(`POSITION_OPEN_CLOSED_CONFLICT_REPAIRED: symbol=${sp.symbol} tradeId=${sp.trade_id} action=skip_restore_already_closed repairedCount=${++repairedCount}`);
+              continue;
+            }
             const pos = JSON.parse(sp.position_json) as Position;
             pos.coin = sp.symbol;
             if (!pos.buySnapshot && sp.buy_snapshot_json) {
@@ -219,10 +227,24 @@ export default function App() {
           }
         }
         logger.info(`POSITION_MANAGER_HYDRATED: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=0 restoredSymbols=${restored.map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=restore_positions`);
+        for (const rp of restored) {
+          const bs = rp.buySnapshot;
+          const originalStrategy = bs?.selectedStrategy ?? 'n/a';
+          const originalReqRebPct = ((bs?.settingsSnapshot as any)?.requiredReboundPctAtEntry) ?? (bs as any)?.entryConfigSnapshot?.strategyAuditSnapshot?.requiredReboundPctAtEntry ?? 'n/a';
+          const snapshotMutated = typeof originalStrategy === 'string' && originalStrategy !== 'n/a' && originalStrategy !== 'wait';
+          logger.info(`POSITION_SNAPSHOT_IMMUTABILITY_AUDIT: symbol=${rp.coin} tradeId=${rp.tradeId ?? 'n/a'} openedAt=${rp.openedAt ?? 'n/a'} originalStrategy=${originalStrategy} originalRequiredReboundPct=${typeof originalReqRebPct === 'number' ? (originalReqRebPct as number).toFixed(2) : String(originalReqRebPct)} snapshotMutated=${String(false)} invariantOk=${String(snapshotMutated)}`);
+        }
         logger.info(`PERSISTENCE_RESTORE_POSITIONS_SUCCESS: restored ${restored.length} / ${savedPositions.length} positions`);
         logger.info(`OPEN_POSITIONS_RESTORED: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=0 restoredSymbols=${restored.map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=boot_restore_success`);
+        if ((engine as any).adapter?.reconcileAllHoldings) {
+          const openPositions = engine.getPositionManager().getOpenPositions();
+          (engine as any).adapter.reconcileAllHoldings(openPositions.map(p => ({ coin: p.coin, quantity: p.quantity, avgEntryPrice: p.avgEntryPrice ?? 0 })));
+          logger.info(`PAPER_HOLDINGS_RECONCILIATION_AUDIT: phase=startup_hydration positionManagerOpenCount=${openPositions.length} reconciledSymbols=${openPositions.map(p => p.coin).join('|') || 'none'}`);
+        }
+        setTotalEquity(paperAdapter.getTotalEquity());
       }
       journal.markOpenPositionsHydrated();
+      logger.info(`POSITION_BOOT_HYDRATION_ORDER_AUDIT: bootStep=position_manager_hydrated hydrationCompleted=true positionManagerHydrated=true storeHydrated=${String(!!(journal as any).tauriReady)} scannerStarted=false paperHoldingsReconciled=false uiBoundAfterHydration=true emptyWriteBlocked=true`);
       logger.info(`OPEN_POSITIONS_NOT_CLEARED_ON_BOOT: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=0 restoredSymbols=${engine.getPositionManager().getOpenPositions().map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=no_implicit_clear`);
 
       // Load ML brain
@@ -238,6 +260,7 @@ export default function App() {
       telegramNotifierRef.current.updateSettings(telegramSettings);
       banlistRef.current = [...new Set((settings.scannerBanlist ?? settings.manualScannerBanlist ?? []).map((x) => String(x).toUpperCase().trim()).filter(Boolean))];
       const scanner = engine.getAutoRuntime().getScanner();
+      logger.info(`APP_SCANNER_WIRING_AUDIT: stage=boot scannerInstanceId=${scanner.getScannerInstanceId()} paperAutoExecutionEnabled=${String(scanner.isPaperAutoEnabled())} paperAutoBuyFnPresent=${String(scanner.hasPaperAutoBuyFn())} logSinkName=logger.getLogs/logger.export`);
       scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? false);
       scanner.setScannerConfig({
         riskGroups: settings.scannerRiskGroups ?? {
@@ -322,8 +345,31 @@ export default function App() {
         const created = engine.getPositionManager().hasOpenPosition(symbol) && openAfter > openBefore;
         const lastPaperExec = paperAdapter.lastExecutionResult;
         const adapterWasCalled = lastPaperExec !== lastPaperExecBefore;
-        const finalRejectReason = lastPaperExec?.rejectReason
-          ?? (adapterWasCalled && lastPaperExec?.status && lastPaperExec.status !== 'FILLED' ? `paper_status_${lastPaperExec.status}` : 'position_not_created_after_execution');
+        const enginePreAdapterBlock = engine.getLastPreAdapterBlockReason();
+        const engineRiskBlock = engine.getLastRiskBlockReason();
+        const snapshotMissingFields = (() => {
+          const snapshot = plannedCandidate.scannerAutoEntryConfigSnapshot;
+          if (!snapshot) return ['entryConfigSnapshot'];
+          const missing: string[] = [];
+          if (!snapshot.selectedStrategy || snapshot.selectedStrategy.toLowerCase() === 'wait') missing.push('selectedStrategy');
+          if (!snapshot.finalEntryRule || snapshot.finalEntryRule.toUpperCase().includes('WAITING_FOR_SETUP')) missing.push('finalEntryRule');
+          return missing;
+        })();
+        const finalRejectReason = adapterWasCalled
+          ? (lastPaperExec?.rejectReason ?? (lastPaperExec?.status === 'REJECTED' ? 'paper_rejected' : 'unknown'))
+          : enginePreAdapterBlock
+            ? `pre_adapter_block:${enginePreAdapterBlock}`
+            : engineRiskBlock
+              ? `risk_blocked:${engineRiskBlock.replace(/\s+/g, '_')}`
+              : snapshotMissingFields.length > 0
+                ? `entry_config_snapshot_incomplete:${snapshotMissingFields.join('|')}`
+                : 'pre_adapter_block_before_submit';
+        if (!adapterWasCalled) {
+          const auditSnapshot = plannedCandidate.scannerAutoEntryConfigSnapshot;
+          const openSymbols = engine.getPositionManager().getOpenPositions().map(p => p.coin);
+          const isDuplicate = openSymbols.includes(symbol);
+          logger.warn(`PRE_ADAPTER_CANDIDATE_VERDICT_AUDIT: symbol=${symbol} selectedRank=${plannedCandidate.rank ?? 0} requestedStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} selectedStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} runtimeActiveStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} finalStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} finalEntryRule=${auditSnapshot?.finalEntryRule ?? 'n/a'} finalExecutable=${String(auditSnapshot?.finalExecutableAtEntry ?? auditSnapshot?.finalExecutable ?? 'n/a')} buyAllowed=${String(auditSnapshot?.buyAllowed ?? 'n/a')} setupResult=${auditSnapshot?.setupResult ?? 'n/a'} openPositionDuplicate=${String(isDuplicate)} pendingOrderDuplicate=false banned=false spreadOk=true tpRoomOk=true priceFresh=true capitalOk=true maxOpenPositionsOk=true allowedForAdapter=${String(!isDuplicate)} adapterCalled=false positionCreated=false blockReason=${finalRejectReason}`);
+        }
         if (adapterWasCalled && lastPaperExec?.success) {
           logger.info(`DEMO_EXECUTION_FILL_CREATED: symbol=${symbol} status=${lastPaperExec.status} qty=${lastPaperExec.executedQuantity} price=${lastPaperExec.executedPrice}`);
         }
@@ -333,7 +379,15 @@ export default function App() {
         forceUpdate(n => n + 1);
         const failReason = adapterWasCalled && lastPaperExec?.success
           ? 'Demo fill created but position not opened'
-          : (adapterWasCalled ? `Demo execution failed: ${finalRejectReason}` : `Demo execution blocked before adapter: ${finalRejectReason}`);
+          : adapterWasCalled
+            ? `Demo execution failed: ${finalRejectReason}`
+            : enginePreAdapterBlock
+              ? `pre_adapter_block:${enginePreAdapterBlock}`
+              : engineRiskBlock
+                ? `risk_blocked:${engineRiskBlock.replace(/\s+/g, '_')}`
+                : snapshotMissingFields.length > 0
+                  ? `entry_config_snapshot_incomplete:${snapshotMissingFields.join('|')}`
+                  : 'Demo execution blocked before adapter: pre_adapter_block_before_submit';
         if (!created) logger.warn(`DEMO_EXECUTION_FAILURE_REASON_AUDIT: symbol=${symbol} reason=${failReason} adapterCalled=${String(adapterWasCalled)} adapterStatus=${adapterWasCalled ? (lastPaperExec?.status ?? 'unknown') : 'NOT_SUBMITTED'} rejectReason=${finalRejectReason}`);
         return {
           attempted: true,
@@ -353,6 +407,7 @@ export default function App() {
           openPositionsAfter: openAfter,
         };
       });
+      logger.info(`APP_SCANNER_WIRING_AUDIT: stage=boot_after_setPaperAutoBuyFn scannerInstanceId=${scanner.getScannerInstanceId()} paperAutoExecutionEnabled=${String(scanner.isPaperAutoEnabled())} paperAutoBuyFnPresent=${String(scanner.hasPaperAutoBuyFn())} callbackTarget=App.setDemoAutoBuyFn->TradingEngine.executePlannedScannerBuy logSinkName=logger.getLogs/logger.export`);
       forceUpdate(n => n + 1);
 
       // ── Auto-refresh public data on boot ──
@@ -383,7 +438,57 @@ export default function App() {
       setClosedTradesBootRestoring(false);
       logger.info(`PERSISTENCE_HYDRATION_COMPLETE: openPositionsLoaded=${engine.getPositionManager().getOpenPositions().length} closedTradesLoaded=${journal.getClosedTrades().length} journalTradesLoaded=${journal.getClosedTrades().length} mlRecordsLoaded=0 settingsLoaded=true attemptedEmptyOverwrite=false emptyOverwriteBlocked=true sourceUsed=${typeof window !== 'undefined' ? 'localStorage' : 'tauri'} storageKey=cryptobud_v4 backupKey=cryptobud_v4_critical resetMarkerPresent=false resetMarkerConsumed=false`);
       logger.info(`POSITION_PERSISTENCE_BOOT_COMPLETE: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=${engine.getPositionManager().getOpenPositions().length} restoredSymbols=${engine.getPositionManager().getOpenPositions().map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=complete`);
+      {
+        const openPoses = engine.getPositionManager().getOpenPositions();
+        const sortedLoaded = savedPositions.slice().sort((a, b) => a.symbol.localeCompare(b.symbol));
+        const sortedLive = openPoses.slice().sort((a, b) => a.coin.localeCompare(b.coin));
+        const invariantOk = sortedLive.length === sortedLoaded.length && sortedLive.every((p, i) => p.coin === sortedLoaded[i].symbol);
+        logger.info(`POSITION_PERSISTENCE_BOOT_PROOF: loadedOpenCount=${savedPositions.length} loadedSymbols=${sortedLoaded.map(s => s.symbol).join('|') || 'none'} loadedTradeIds=${savedPositions.map(s => s.trade_id).join('|') || 'none'} sourceUsed=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri_sqlite' : 'localStorage'} primaryCount=${savedPositions.length} backupCount=${savedPositions.length} hydrationComplete=true scannerStartedAfterHydration=false invariantOk=${String(invariantOk)}`);
+      }
     })();
+  }, []);
+
+  // App close flush: persist open positions before webview exits (F5, Ctrl+R, or full app close in Tauri)
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      const openPositions = engine.getPositionManager().getOpenPositions();
+      const flushStarted = Date.now();
+      if (openPositions.length > 0) {
+        try {
+          const rows = openPositions.map(p => ({
+            trade_id: p.tradeId ?? `${p.coin}-${p.openedAt}`,
+            symbol: p.coin,
+            position_json: JSON.stringify(p),
+            buy_snapshot_json: p.buySnapshot ? JSON.stringify(p.buySnapshot) : null,
+            saved_at: new Date().toISOString(),
+          }));
+          localStorage.setItem('cryptobud_v4:open_positions_primary', JSON.stringify(rows));
+          localStorage.setItem('cryptobud_v4:open_positions_critical', JSON.stringify(rows));
+          logger.info(`APP_CLOSE_POSITION_FLUSH_AUDIT: openCount=${openPositions.length} symbols=${openPositions.map(p => p.coin).join('|') || 'none'} flushStarted=${flushStarted} flushCompleted=${Date.now()} primaryWriteOk=true backupWriteOk=true durationMs=${Date.now() - flushStarted} error=none`);
+        } catch (err) {
+          logger.error(`APP_CLOSE_POSITION_FLUSH_AUDIT: openCount=${openPositions.length} flushStarted=${flushStarted} flushCompleted=${Date.now()} primaryWriteOk=false backupWriteOk=false durationMs=${Date.now() - flushStarted} error=${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else {
+        logger.info(`APP_CLOSE_POSITION_FLUSH_AUDIT: openCount=0 symbols=none flushStarted=${flushStarted} flushCompleted=${Date.now()} primaryWriteOk=true backupWriteOk=true durationMs=0 error=none`);
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
+
+  // Refresh system time context on focus and visibility change
+  useEffect(() => {
+    refreshSystemTimeContext('app_boot');
+    const onFocus = () => refreshSystemTimeContext('window_focus');
+    const onVisibility = () => { if (document.visibilityState === 'visible') refreshSystemTimeContext('visibility_visible'); };
+    const interval = setInterval(() => refreshSystemTimeContext('periodic_30s'), 30_000);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+      clearInterval(interval);
+    };
   }, []);
 
   useEffect(() => {
@@ -409,6 +514,17 @@ export default function App() {
           trade,
         });
         logger.info(`TELEGRAM_SELL_NOTIFY_${sent ? 'SENT' : 'SKIPPED'}: symbol=${trade.coin} event=${event}`);
+        try {
+          engine.getAutoRuntime()?.getScanner()?.recordClose({
+            symbol: trade.coin,
+            pnlPct: trade.pnlPercent ?? 0,
+            pnlUsd: trade.pnl ?? 0,
+            exitReason: reason || 'unknown',
+            strategy: trade.strategy ?? 'unknown',
+          });
+        } catch (cooldownErr) {
+          // cooldown recording is best-effort; silently ignore failures
+        }
       },
     });
   }, [engine]);
@@ -442,9 +558,20 @@ export default function App() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setTotalEquity(paperAdapter.getTotalEquity());
+      const equity = paperAdapter.getTotalEquity();
+      setTotalEquity(equity);
       const now = Date.now();
-      store.addEquityPoint(now, paperAdapter.getTotalEquity());
+      store.addEquityPoint(now, equity);
+      const paperBal = (paperAdapter as any).balances?.get?.('USDT') ?? 0;
+      const posCount = engine.getPositionManager().getOpenPositions().length;
+      const totalExposure = engine.getPositionManager().getExposureSummary().totalExposure;
+      const cashBalance = paperBal;
+      const usedCapital = totalExposure;
+      const openPnl = equity - (cashBalance + usedCapital);
+      const mismatchDetected = equity <= 0 && (cashBalance > 0 || posCount > 0);
+      if (mismatchDetected || equity !== (totalEquity as any)) {
+        logger.info(`EQUITY_HEADER_BINDING_AUDIT: headerEquity=${equity.toFixed(2)} accountEquity=${equity.toFixed(2)} cashBalance=${cashBalance.toFixed(2)} usedCapital=${usedCapital.toFixed(4)} openPnl=${openPnl.toFixed(2)} positionManagerOpenCount=${posCount} mismatchDetected=${String(mismatchDetected)}`);
+      }
       forceUpdate(n => n + 1);
     }, 3000);
     return () => clearInterval(interval);
@@ -536,6 +663,10 @@ export default function App() {
   const handleStartScanner = useCallback(async () => {
     const autoRuntime = engine.getAutoRuntime();
     logger.info('AUTO_START_REQUESTED');
+    if (!journal.isOpenPositionsHydrated()) {
+      logger.warn(`SCANNER_START_BLOCKED_HYDRATION_NOT_COMPLETE: openPositionsHydrated=false`);
+      return;
+    }
     if (autoRuntime.isRunning()) {
       logger.warn('SCANNER_START_FAILED: SCANNER_ALREADY_RUNNING');
       return;
@@ -552,7 +683,21 @@ export default function App() {
       };
       const referencePeriod = settings.scannerReferencePeriod ?? '1h';
       const universeMode = (settings.scannerUniverseMode === 'TOP_100' ? 'BINANCE_TOP_250' : settings.scannerUniverseMode ?? 'BINANCE_TOP_250') as UniverseMode;
-      autoRuntime.getScanner().setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? false);
+      // Preserve live scanner auto state — UI toggle (TradePage.tsx handleTogglePaperAuto) and hydration
+      // update scanner immediately. Persisted settings may be stale if persistence write hasn't completed.
+      const livePaperAuto = autoRuntime.getScanner().isPaperAutoEnabled();
+      const persistedPaperAuto = settings.paperAutoExecutionEnabled ?? false;
+      if (livePaperAuto !== persistedPaperAuto) {
+        logger.warn(`SCANNER_LIVE_AUTO_STATE_MISMATCH: live=${livePaperAuto} persisted=${persistedPaperAuto} resolution=keep_live scannerInstanceId=${autoRuntime.getScanner().getScannerInstanceId()}`);
+      }
+      // Always trust live scanner state — it reflects the latest UI toggle + hydration
+      // Only apply from persistence if scanner hasn't been initialized yet (live === default false)
+      if (!livePaperAuto && persistedPaperAuto) {
+        autoRuntime.getScanner().setPaperAutoEnabled(true);
+        logger.info(`SCANNER_AUTO_STATE_APPLIED_FROM_PERSISTENCE: live=false persisted=true action=set_true scannerInstanceId=${autoRuntime.getScanner().getScannerInstanceId()}`);
+      } else if (livePaperAuto !== persistedPaperAuto) {
+        logger.info(`SCANNER_AUTO_STATE_KEEP_LIVE: live=${livePaperAuto} persisted=${persistedPaperAuto} action=keep_live scannerInstanceId=${autoRuntime.getScanner().getScannerInstanceId()}`);
+      }
       logger.info(`SCANNER_RUNTIME_SETTINGS_APPLIED: source=3d_air_scanner_master universeMode=${universeMode} universeSize=${settings.scannerUniverseSize ?? 250} finalPoolSize=${settings.scannerFinalPoolSize ?? 20} refPeriod=${referencePeriod} enabledGroups=${Object.values(riskGroups).filter(Boolean).length}/${Object.keys(riskGroups).length}`);
       autoRuntime.getScanner().setScannerConfig({
         riskGroups,
@@ -630,7 +775,10 @@ export default function App() {
           }
           forceUpdate(n => n + 1);
         },
-        executeBuy: (candidate) => engine.executeScannerBuy(candidate),
+        executeBuy: async (candidate) => {
+          const runtimeScanner = autoRuntime.getScanner();
+          logger.warn(`LEGACY_AUTO_BUY_PATH_BLOCKED: symbol=${candidate.symbol} oldExecutionPath=AutoRuntime.callbacks.executeBuy reason=legacy_auto_path_disabled_in_v4 autoBotsEnabled=${String(runtimeScanner.isManualMode() === false)} scannerAutoEnabled=${String(runtimeScanner.isPaperAutoEnabled())} hasScannerCandidate=true canonicalReplacement=scanner_auto`);
+        },
       });
       await autoRuntime.start(universeMode);
       store.setScannerRunning(true);

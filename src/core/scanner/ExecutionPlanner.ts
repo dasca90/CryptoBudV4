@@ -1,4 +1,4 @@
-import type { ScannerCandidate, ScannerSnapshot, ExecutionPlan, PlannedCandidate, SkippedCandidate, PlannedAction, AutoStrategyDecision } from '../types';
+import type { ScannerCandidate, ScannerSnapshot, ExecutionPlan, PlannedCandidate, SkippedCandidate, PlannedAction, AutoStrategyDecision, ScannerAutoEntryConfigSnapshot } from '../types';
 import { logger } from '../../utils/logger';
 import { buildCanonicalEntryGateSnapshot } from '../entry-gate/EntryGate';
 import { buildStrategyAuditSnapshotFromCandidate } from '../strategy-audit/strategy-audit-builder';
@@ -82,6 +82,18 @@ function emitEntryPlanObjectTrace(candidate: ScannerCandidate, stage: string, so
   );
 }
 
+function buildEntryConfigSnapshotContractHash(snapshot: Pick<ScannerAutoEntryConfigSnapshot, 'symbol' | 'scanId' | 'sourceCandidateId' | 'selectedStrategy' | 'finalEntryRule' | 'entryPrice' | 'quantity'>): string {
+  return [
+    snapshot.symbol,
+    snapshot.scanId ?? 'none',
+    snapshot.sourceCandidateId ?? 'none',
+    snapshot.selectedStrategy,
+    snapshot.finalEntryRule,
+    snapshot.entryPrice,
+    snapshot.quantity,
+  ].join('|');
+}
+
 export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan {
   const {
     scannerSnapshot, executionPool, watchPool, nearMissPool,
@@ -103,12 +115,12 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   const capitalAvailable = Math.max(0, capital - usedCapital);
   const capitalLimitedSlots = capitalPerTrade > 0 ? Math.floor(capitalAvailable / capitalPerTrade) : 0;
   logger.info(`CAPITAL_PER_COIN_ORDER_SIZE_AUDIT: symbol=none mode=${executionAdapter === 'paper_simulated' ? 'demo' : 'live'} userTradingCapital=${capital} userCapitalPerCoin=${capitalPerTrade} persistedCapitalPerCoin=${capitalPerTrade} resolvedCapitalPerCoin=${capitalPerTrade} finalOrderNotionalUsd=0 qty=0 entryPrice=0 availableCapital=${capital} usedCapitalBefore=${usedCapital} usedCapitalAfter=${usedCapital} adjustmentReason=planner_limits source=persisted`);
-  const selectionLimit = Math.max(0, Math.min(availableSlots, capitalLimitedSlots, maxSelectedPerScan));
+  // Selection limit: only real safety gates — max positions and capital. No artificial maxSelectedPerScan cap.
+  const selectionLimit = Math.max(0, Math.min(availableSlots, capitalLimitedSlots));
   const noBuyReasons: string[] = [];
   const selectedCandidates: PlannedCandidate[] = [];
   const skippedCandidates: SkippedCandidate[] = [];
   const skippedReasons: string[] = [];
-  const skippedBySelectionLimitSymbols: string[] = [];
   let generatedEntryPlanCount = 0;
   let plannerInputWithEntryPlan = 0;
   let entryPlanBlockedCount = 0;
@@ -117,6 +129,7 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
 
   const scoredExecutionPool = executionPool.map(c => ({ candidate: c, score: computeExecutionScore(c) }));
   scoredExecutionPool.sort((a, b) => b.score - a.score);
+  logger.info(`SELECTION_LIMIT_REMOVED_AUDIT: totalPoolCandidates=${executionPool.length} evaluatedCandidates=${scoredExecutionPool.length} blockedByRealSafety=0 blockedByDuplicatePosition=0 blockedByPendingOrder=0 blockedByMaxOpenPositions=${availableSlots <= 0 ? executionPool.length : 0} blockedByCapital=${capitalLimitedSlots <= 0 ? executionPool.length : 0} blockedBySpread=0 blockedByTpRoom=0 blockedByPriceStale=0 selectionLimitApplied=false maxSelectedPerScan=unlimited`);
 
   for (const { candidate, score } of scoredExecutionPool) {
     emitEntryPlanObjectTrace(candidate, 'insideExecutionPlanner', 'ExecutionPlanner.buildExecutionPlan');
@@ -230,6 +243,27 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
       logger.warn(`BUY_BLOCKED_FINAL_EXECUTABLE_FALSE: symbol=${symbol} reason=${exactReason} strategy=${strategyAudit.strategySelected}`);
     }
 
+    if (!skipped && (strategyAudit.strategySelected.toLowerCase() === 'wait' || strategyAudit.finalEntryRule.toUpperCase().includes('WAITING_FOR_SETUP'))) {
+      skipped = true;
+      const exactReason = strategyAudit.finalEntryRule.toUpperCase().includes('WAITING_FOR_SETUP')
+        ? 'semantic_invalid_final_rule_waiting_for_setup'
+        : strategyAudit.strategySelected.toLowerCase() === 'wait'
+          ? 'semantic_invalid_strategy_is_wait'
+          : 'snapshot_semantic_invalid';
+      skipReason = `entry_config_snapshot_semantic_invalid:strategy=${strategyAudit.strategySelected}:rule=${strategyAudit.finalEntryRule}:exact=${exactReason}`;
+      skipGate = 'ExecutionPlannerSemanticIntegrity';
+      isRetryable = true;
+      if (!noBuyReasons.includes(exactReason)) noBuyReasons.push(exactReason);
+      const autoDecision = candidateWithPlan.autoStrategyDecision as any;
+      const sourceOfSelectedStrategy = String(autoDecision?.effectiveStrategy ?? (candidateWithPlan as any).selectedStrategy ?? 'n/a');
+      const sourceOfFinalEntryRule = String((candidateWithPlan.traderBrainDecision?.ruleDecisionTrace as any)?.unifiedSignal?.reasonCode ?? sourceOfSelectedStrategy);
+      const sourceOfSetupResult = String(strategyAudit.setupResult ?? 'n/a');
+      const safeFallbackReason = String(autoDecision?.reason ?? autoDecision?.fallbackReason ?? 'n/a');
+      const marketRecommendedStrategy = String(autoDecision?.groupRecommendedStrategy ?? (candidateWithPlan as any).groupRecommendedStrategy ?? 'n/a');
+      logger.error(`BUY_BLOCKED_SNAPSHOT_SEMANTIC_INVALID: symbol=${symbol} selectedStrategy=${strategyAudit.strategySelected} finalEntryRule=${strategyAudit.finalEntryRule} finalExecutable=${String(strategyAudit.finalExecutable)} buyAllowed=${String(strategyAudit.buyAllowed)} autoEffective=${String(autoDecision?.effectiveStrategy ?? 'n/a')} perCoinSelected=${String(autoDecision?.perCoinSelectedStrategy ?? 'n/a')} groupRecommended=${String(autoDecision?.groupRecommendedStrategy ?? 'n/a')} reason=${exactReason}`);
+      logger.error(`SEMANTIC_GATE_REJECTION_AUDIT: symbol=${symbol} candidateStatus=${candidateWithPlan.status} topCandidateFinalExecutable=${String(strategyAudit.finalExecutable)} topCandidateBuyAllowed=${String(strategyAudit.buyAllowed)} strategyAuditFinalExecutable=${String(strategyAudit.finalExecutable)} selectedStrategy=${strategyAudit.strategySelected} resolvedStrategy=${(candidateWithPlan as any).effectiveStrategy ?? strategyAudit.strategySelected} finalEntryRule=${strategyAudit.finalEntryRule} setupResult=${sourceOfSetupResult} semanticValid=false rejectionReason=${exactReason} sourceOfSelectedStrategy=${sourceOfSelectedStrategy} sourceOfFinalEntryRule=${sourceOfFinalEntryRule} sourceOfSetupResult=${sourceOfSetupResult} marketRecommendedStrategy=${marketRecommendedStrategy} safeFallbackReason=${safeFallbackReason} finalEntryRuleSource=${sourceOfFinalEntryRule} hasAutoDecision=${String(!!candidateWithPlan.autoStrategyDecision)} hasTraderBrain=${String(!!candidateWithPlan.traderBrainDecision)} hasEntryPlan=${String(!!candidateWithPlan.entryPlan)}`);
+    }
+
     const ownershipResolution = resolveAutoTargetOwnership({
       candidate: candidateWithPlan,
       executionPath: 'ExecutionPlanner',
@@ -318,32 +352,97 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
     }
 
     if (selectedCandidates.length >= selectionLimit) {
-      let limitReason = `Execution selection limit reached selectedCount=${selectedCandidates.length} maxSelectedPerScan=${maxSelectedPerScan} skippedBySelectionLimitCount=${skippedBySelectionLimitSymbols.length + 1}`;
-      let limitToken = 'SELECTION_LIMIT_REACHED';
-      if (availableSlots <= 0) {
-        limitReason = 'BLOCK_MAX_POSITIONS';
-        limitToken = 'MAX_POSITIONS_REACHED';
-      } else if (capitalLimitedSlots <= 0) {
-        limitReason = 'BLOCK_CAPITAL_LIMIT';
+      let limitToken = 'MAX_POSITIONS_REACHED';
+      let limitReason = 'BLOCK_MAX_POSITIONS';
+      if (capitalLimitedSlots <= 0 && availableSlots > 0) {
         limitToken = 'CAPITAL_BLOCKED';
+        limitReason = 'BLOCK_CAPITAL_LIMIT';
       }
       skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: limitReason, gate: 'ExecutionPlannerLimit', isRetryable: true });
       skippedReasons.push(limitToken);
-      if (limitToken === 'SELECTION_LIMIT_REACHED') skippedBySelectionLimitSymbols.push(symbol);
       if (!noBuyReasons.includes(limitToken)) noBuyReasons.push(limitToken);
       auditIntegrity(false, limitToken);
       continue;
     }
 
     const entryPlan = candidateWithPlan.entryPlan!;
+    const scannerAutoEntryConfigSnapshot: ScannerAutoEntryConfigSnapshot = {
+      schemaVersion: 'cryptobud-v4-scanner-auto-entry-config-v1',
+      symbol,
+      scanId: scannerSnapshot?.scanId ?? null,
+      sourceCandidateId: candidateWithPlan.candidateId ?? null,
+      selectedStrategy: strategyAudit.strategySelected,
+      finalEntryRule: strategyAudit.finalEntryRule,
+      setupResult: String(strategyAudit.setupResult ?? strategyAudit.finalEntryRule),
+      finalExecutable: strategyAudit.finalExecutable,
+      finalExecutableAtEntry: strategyAudit.finalExecutableAtEntry,
+      buyAllowed: strategyAudit.buyAllowed,
+      entryConfirmedAtEntry: Boolean(strategyAudit.entryConfirmedAtEntry),
+      entryStatus: candidateWithPlan.status,
+      entryGateDecision: gateSnapshot.decision,
+      confidence: candidateWithPlan.confidence,
+      executionPath: 'scanner_auto',
+      ownerType: 'scanner',
+      ownerName: 'The Dipper',
+      source: 'AutoBots',
+      strategySource: String(decision?.strategySource ?? candidateWithPlan.strategySource ?? 'unknown'),
+      strategySourceDetail: decision?.strategySourceDetail ?? candidateWithPlan.strategySourceDetail ?? null,
+      strategyReason: decision?.strategyReason ?? candidateWithPlan.strategyReason ?? decision?.reason ?? null,
+      entryPrice: entryPlan.price,
+      quantity: entryPlan.quantity,
+      capitalAllocated: capitalPerTrade,
+      tp1Pct: Number(resolvedRisk.tp1),
+      tp1Source: String(resolvedRisk.sourceTp1),
+      tp2Pct: Number(resolvedRisk.tp2),
+      tp2Source: String(resolvedRisk.sourceTp2),
+      slPct: Number(resolvedRisk.sl),
+      slSource: String(resolvedRisk.sourceSl),
+      dynamicTrailingEnabled: Boolean(resolvedRisk.dynamicTrailingEnabled),
+      trailStart: resolvedRisk.trailStart,
+      trailPullbackPct: Number(resolvedRisk.trailPullback),
+      riskParams: {
+        schemaVersion: 'cryptobud-v4-risk-snapshot-v1',
+        symbol,
+        scanId: scannerSnapshot?.scanId ?? null,
+        sourceCandidateId: candidateWithPlan.candidateId ?? null,
+        entryPrice: entryPlan.price,
+        quantity: entryPlan.quantity,
+        capitalAllocated: capitalPerTrade,
+        tp1Pct: Number(resolvedRisk.tp1),
+        tp1TargetPrice: Number(entryPlan.price * (1 + (Number(resolvedRisk.tp1) / 100))),
+        tp1Source: resolvedRisk.sourceTp1,
+        sourceTp1: resolvedRisk.sourceTp1,
+        tp1Min: Number.isFinite(Number((ownership as any)?.tp1Min)) ? Number((ownership as any).tp1Min) : null,
+        tp1Max: Number.isFinite(Number((ownership as any)?.tp1Max)) ? Number((ownership as any).tp1Max) : null,
+        tp1Reason: String((ownership as any)?.tp1Reason ?? ownership?.reason ?? 'n/a'),
+        tp2Pct: Number(resolvedRisk.tp2),
+        tp2Source: resolvedRisk.sourceTp2,
+        sourceTp2: resolvedRisk.sourceTp2,
+        slPct: Number(resolvedRisk.sl),
+        slSource: resolvedRisk.sourceSl,
+        sourceSl: resolvedRisk.sourceSl,
+        dynamicTrailingEnabled: Boolean(resolvedRisk.dynamicTrailingEnabled),
+        trailStartPct: resolvedRisk.trailStart,
+        trailPullbackPct: Number(resolvedRisk.trailPullback),
+        sourceTrailPullback: resolvedRisk.sourceTrailPullback,
+        tradingTargetOwnership: ownership ?? null,
+        autoBotsOnAtEntry: autoBotsOn,
+        createdAt: new Date().toISOString(),
+      },
+      strategyAuditSnapshot: strategyAudit as unknown as Record<string, unknown>,
+      createdAt: new Date().toISOString(),
+    };
+    const snapshotContractHash = buildEntryConfigSnapshotContractHash(scannerAutoEntryConfigSnapshot);
+    logger.info(`ENTRY_CONFIG_SNAPSHOT_MATERIALIZED_AUDIT: symbol=${symbol} scanId=${scannerSnapshot?.scanId ?? 'unknown'} sourceCandidateId=${candidateWithPlan.candidateId ?? 'none'} selectedStrategy=${scannerAutoEntryConfigSnapshot.selectedStrategy} finalEntryRule=${scannerAutoEntryConfigSnapshot.finalEntryRule} entryStatus=${scannerAutoEntryConfigSnapshot.entryStatus} entryGateDecision=${scannerAutoEntryConfigSnapshot.entryGateDecision} finalExecutable=${String(scannerAutoEntryConfigSnapshot.finalExecutable)} buyAllowed=${String(scannerAutoEntryConfigSnapshot.buyAllowed)} snapshotComplete=${String(scannerAutoEntryConfigSnapshot.finalExecutable && scannerAutoEntryConfigSnapshot.buyAllowed && scannerAutoEntryConfigSnapshot.selectedStrategy.toLowerCase() !== 'wait' && !scannerAutoEntryConfigSnapshot.finalEntryRule.toUpperCase().includes('WAITING_FOR_SETUP'))} builtFrom=ExecutionPlanner passedToDemoController=true passedToTradingEngine=true`);
+    logger.info(`ENTRY_CONFIG_SNAPSHOT_CONTRACT_AUDIT: symbol=${symbol} boundary=after_execution_planner snapshotPresent=true selectedStrategy=${scannerAutoEntryConfigSnapshot.selectedStrategy} finalEntryRule=${scannerAutoEntryConfigSnapshot.finalEntryRule} contractHash=${snapshotContractHash} contractValid=${String(scannerAutoEntryConfigSnapshot.finalExecutable && scannerAutoEntryConfigSnapshot.buyAllowed && scannerAutoEntryConfigSnapshot.selectedStrategy.toLowerCase() !== 'wait' && !scannerAutoEntryConfigSnapshot.finalEntryRule.toUpperCase().includes('WAITING_FOR_SETUP'))} semanticValid=${String(scannerAutoEntryConfigSnapshot.selectedStrategy.toLowerCase() !== 'wait' && !scannerAutoEntryConfigSnapshot.finalEntryRule.toUpperCase().includes('WAITING_FOR_SETUP'))}`);
     const action: PlannedAction = 'BUY';
     logger.info(`ENTRY_PLAN_ATTACHED_TO_SELECTED_CANDIDATE: symbol=${symbol} scanId=${scannerSnapshot?.scanId ?? 'unknown'} price=${entryPlan.price} quantity=${entryPlan.quantity} side=${entryPlan.side}`);
     selectedCandidates.push({
       symbol,
       rank: candidateWithPlan.rank ?? 0,
       status: candidateWithPlan.status,
-      strategy: decision?.effectiveStrategy ?? candidateWithPlan.selectedStrategy,
-      effectiveStrategy: decision?.effectiveStrategy ?? candidateWithPlan.selectedStrategy,
+      strategy: scannerAutoEntryConfigSnapshot.selectedStrategy,
+      effectiveStrategy: scannerAutoEntryConfigSnapshot.selectedStrategy,
       strategySource: decision?.strategySource ?? candidateWithPlan.strategySource,
       strategySourceDetail: decision?.strategySourceDetail ?? candidateWithPlan.strategySourceDetail,
       strategyReason: decision?.strategyReason ?? candidateWithPlan.strategyReason ?? decision?.reason,
@@ -360,6 +459,7 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
       capitalAllocation: capitalPerTrade,
       targetPolicy: candidateWithPlan.tradingTargetOwnership ?? null,
       gateSnapshot,
+      scannerAutoEntryConfigSnapshot,
     });
     logger.info(`CAPITAL_PER_COIN_ORDER_SIZE_AUDIT: symbol=${symbol} mode=${executionAdapter === 'paper_simulated' ? 'demo' : 'live'} userTradingCapital=${capital} userCapitalPerCoin=${capitalPerTrade} persistedCapitalPerCoin=${capitalPerTrade} resolvedCapitalPerCoin=${capitalPerTrade} finalOrderNotionalUsd=${(entryPlan.price * entryPlan.quantity).toFixed(4)} qty=${entryPlan.quantity} entryPrice=${entryPlan.price} availableCapital=${capitalAvailable} usedCapitalBefore=${usedCapital} usedCapitalAfter=${usedCapital + (entryPlan.price * entryPlan.quantity)} adjustmentReason=entry_plan_selected source=persisted`);
     auditIntegrity(true, 'none');
@@ -385,7 +485,7 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   const safetyLimitApplied = selectionLimit < maxSelectedPerScan;
   logger.info(`BUY_READY_FINAL_GATE_AUDIT: plannerInputCount=${executionPool.length} finalExecutableReadyCount=${selectedCandidates.length} blockedByFinalGate=${skippedCandidates.filter((s) => s.gate === 'ExecutionPlannerFinalGate').length} selectedSymbols=${selectedCandidates.map((s) => s.symbol).join('|') || 'none'}`);
   logger.info(`EXECUTION_POOL_FINAL_FILTER_AUDIT: executionPoolIn=${executionPool.length} selectedOut=${selectedCandidates.length} skippedOut=${skippedCandidates.length} topNoBuyReasons=${topNoBuy.join('|') || 'none'}`);
-  logger.info(`EXECUTION_SELECTION_LIMIT_AUDIT: scanId=${scannerSnapshot?.scanId ?? 'unknown'} buyReadyCount=${executionPool.length} maxSelectedPerScan=${maxSelectedPerScan} selectedCount=${selectedCandidates.length} skippedBySelectionLimitCount=${skippedBySelectionLimitSymbols.length} selectedSymbols=${selectedSymbols.join('|') || 'none'} skippedSymbols=${skippedBySelectionLimitSymbols.join('|') || 'none'} maxOpenPositions=${maxPositions} currentOpenPositions=${openSymbols.length} availableSlots=${availableSlots} capitalPerTrade=${capitalPerTrade} projectedCapitalRequired=${projectedCapitalRequired.toFixed(4)} maxCapitalAtRisk=${maxCapitalAtRisk} projectedCapitalAtRisk=${projectedCapitalAtRisk.toFixed(4)} safetyLimitApplied=${String(safetyLimitApplied)} requestedSelectedCount=${scoredExecutionPool.length} capitalAvailable=${capitalAvailable} capitalLimitedSlots=${capitalLimitedSlots} effectiveSelectionLimit=${selectionLimit} skippedCount=${skippedCandidates.length} skippedReasons=${[...new Set(skippedReasons)].join('|') || 'none'} source=${resolvedMaxSelected.source} migrationApplied=${String(resolvedMaxSelected.migrationApplied)} clamped=${String(resolvedMaxSelected.clamped)} reason=${resolvedMaxSelected.reason}`);
+  logger.info(`EXECUTION_SAFETY_LIMIT_AUDIT: scanId=${scannerSnapshot?.scanId ?? 'unknown'} buyReadyCount=${executionPool.length} selectedCount=${selectedCandidates.length} selectionLimitRemoved=true maxOpenPositions=${maxPositions} currentOpenPositions=${openSymbols.length} availableSlots=${availableSlots} capitalPerTrade=${capitalPerTrade} projectedCapitalRequired=${projectedCapitalRequired.toFixed(4)} maxCapitalAtRisk=${maxCapitalAtRisk} projectedCapitalAtRisk=${projectedCapitalAtRisk.toFixed(4)} safetyLimitApplied=${String(safetyLimitApplied)} capitalAvailable=${capitalAvailable} capitalLimitedSlots=${capitalLimitedSlots} effectiveSelectionLimit=${selectionLimit} skippedCount=${skippedCandidates.length} skippedReasons=${[...new Set(skippedReasons)].join('|') || 'none'}`);
 
   return {
     canExecute,

@@ -394,7 +394,9 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
     ? (bs?.whySelectedOverOthers ?? 'BUY_CONFIRMED')
     : entryRuleRaw;
   if (!normalizedEntryRule) fallbackField(position.coin, 'entryRule', 'fallback_default', 'UNKNOWN_RULE', 'missing_entry_rule_in_snapshot');
-  const pnlPct = position.pnlPercent ?? 0;
+  const pnlPct = position.avgEntryPrice > 0 && position.currentPrice > 0 && position.currentPrice !== position.avgEntryPrice
+    ? ((position.currentPrice - position.avgEntryPrice) / position.avgEntryPrice) * 100
+    : (position.unrealizedPnlPercent ?? 0);
   const slPct = position.stopLossPercent;
   const exitStatus: TradeV4OpenPositionView["exitStatus"] =
     pnlPct <= -(slPct * 0.8) ? "sl_risk"
@@ -417,7 +419,57 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
 
   const marketRegimeAtEntry = bs?.marketRegime ?? null;
   const marketTrendAtEntry = bs?.groupTrend ?? bs?.groupRegime ?? null;
-  const strategy = bs?.selectedStrategy ?? (position.ownerType ? 'LEGACY UNKNOWN' : 'UNKNOWN');
+  const rawSelectedStrategy = bs?.selectedStrategy ?? null;
+  const entryConfigSnapshotStrategy = (bs as any)?.entryConfigSnapshot?.selectedStrategy ?? null;
+  const isValidExecutableStrategy = (s: string | null): boolean => !!s && !/^(?:wait|unknown|avoid|)$/i.test(s);
+  const strategy = rawSelectedStrategy && isValidExecutableStrategy(rawSelectedStrategy)
+    ? rawSelectedStrategy
+    : entryConfigSnapshotStrategy && isValidExecutableStrategy(entryConfigSnapshotStrategy)
+      ? entryConfigSnapshotStrategy
+      : rawSelectedStrategy
+        ? (rawSelectedStrategy.toLowerCase() === 'wait' ? 'unknown_legacy' : rawSelectedStrategy)
+        : (position.ownerType ? 'LEGACY UNKNOWN' : 'UNKNOWN');
+  const candidateSelectedStrategySource = ((bs as any)?.traderBrainDecision?.ruleDecisionTrace as any)?.unifiedSignal?.reasonCode ?? null;
+  const displayedStrategy = strategy;
+  const validExecutedStrategy = displayedStrategy !== 'wait' && displayedStrategy !== 'LEGACY UNKNOWN' && displayedStrategy !== 'unknown_legacy' && displayedStrategy !== 'UNKNOWN';
+  const entryRuleAtEntry = String((bs as any)?.settingsSnapshot?.entryRule ?? (bs as any)?.entryConfigSnapshot?.finalEntryRule ?? bs?.selectedPlaybook ?? '').trim();
+  const sourceOfDisplayedStrategy = rawSelectedStrategy
+    ? 'buySnapshot.selectedStrategy'
+    : position.ownerType
+      ? 'position_ownerType_fallback_legacy'
+      : 'fallback_UNKNOWN';
+  const auditpid = position.tradeId ?? `${position.coin}-${position.openedAt}`;
+  logger.info(`POSITION_STRATEGY_BINDING_AUDIT: symbol=${position.coin} positionId=${auditpid} displayedStrategy=${displayedStrategy} positionStrategyAtEntry=${rawSelectedStrategy ?? 'none'} entryConfigSnapshotStrategy=${entryConfigSnapshotStrategy ?? 'none'} candidateSelectedStrategy=${String(bs?.selectedPlaybook ?? 'none')} entryRuleAtEntry=${entryRuleAtEntry || 'none'} finalEntryRule=${String((bs as any)?.entryConfigSnapshot?.finalEntryRule ?? 'none')} sourceOfDisplayedStrategy=${sourceOfDisplayedStrategy} validExecutedStrategy=${String(validExecutedStrategy)} isOpenPosition=true isClosedPosition=false`);
+  {
+    const displayedDipPct = typeof setup.metrics.actualDipPct?.actualValue === 'number' ? (setup.metrics.actualDipPct.actualValue as number) : null;
+    const displayedReboundPct = typeof setup.metrics.actualReboundPct?.actualValue === 'number' ? (setup.metrics.actualReboundPct.actualValue as number) : null;
+    const dipDisplaySource = displayedDipPct !== null ? (setup.sourceUsed.includes('entryConfigSnapshot') ? 'entrySnapshot' : setup.sourceUsed.includes('unifiedSignal') ? 'currentScanner' : setup.sourceUsed.includes('setupRequired') ? 'entrySnapshotSetupMetrics' : setup.sourceUsed) : 'none';
+    const reboundDisplaySource = displayedReboundPct !== null ? (setup.sourceUsed.includes('entryConfigSnapshot') ? 'entrySnapshot' : setup.sourceUsed.includes('unifiedSignal') ? 'currentScanner' : setup.sourceUsed.includes('setupRequired') ? 'entrySnapshotSetupMetrics' : setup.sourceUsed) : 'none';
+    const entrySnapshotDipPct = typeof setup.metrics.actualDipPct?.actualValue === 'number' ? (setup.metrics.actualDipPct.actualValue as number) : null;
+    const entrySnapshotReboundPct = typeof setup.metrics.actualReboundPct?.actualValue === 'number' ? (setup.metrics.actualReboundPct.actualValue as number) : null;
+    const requiredDipPctAtEntry = typeof setup.metrics.requiredDipPct?.requiredValue === 'number' ? (setup.metrics.requiredDipPct.requiredValue as number) : null;
+    const requiredReboundPctAtEntry = typeof setup.metrics.requiredReboundPct?.requiredValue === 'number' ? (setup.metrics.requiredReboundPct.requiredValue as number) : null;
+    const dipSourceValid = displayedDipPct !== null && displayedDipPct === entrySnapshotDipPct;
+    const reboundSourceValid = displayedReboundPct !== null && displayedReboundPct === entrySnapshotReboundPct;
+    const sourceValid = (displayedDipPct == null || dipSourceValid) && (displayedReboundPct == null || reboundSourceValid);
+    const mismatchDetected = !sourceValid;
+    logger.info(`OPEN_POSITION_DIP_REBOUND_SOURCE_AUDIT: symbol=${position.coin} positionId=${auditpid} displayedDipPct=${displayedDipPct?.toFixed(2) ?? 'n/a'} displayedReboundPct=${displayedReboundPct?.toFixed(2) ?? 'n/a'} dipDisplaySource=${dipDisplaySource} reboundDisplaySource=${reboundDisplaySource} entrySnapshotDipPct=${entrySnapshotDipPct?.toFixed(2) ?? 'n/a'} entrySnapshotReboundPct=${entrySnapshotReboundPct?.toFixed(2) ?? 'n/a'} currentScannerDipPct=${String(unifiedSignal?.dipPercent ?? 'n/a')} currentScannerReboundPct=${String(unifiedSignal?.reboundPct ?? 'n/a')} requiredDipPctAtEntry=${requiredDipPctAtEntry?.toFixed(2) ?? 'n/a'} requiredReboundPctAtEntry=${requiredReboundPctAtEntry?.toFixed(2) ?? 'n/a'} sourceValid=${String(sourceValid)} mismatchDetected=${String(mismatchDetected)}`);
+    if (displayedStrategy === 'dip_and_rebound') {
+      const entrySnapshotActualDip = entrySnapshotDipPct;
+      const entrySnapshotActualRebound = entrySnapshotReboundPct;
+      const displayedDip = displayedDipPct;
+      const displayedReb = displayedReboundPct;
+      const finalExec = (setup.rawSnapshot as any)?.finalExecutableAtEntry ?? (setup.rawSnapshot as any)?.finalExecutable ?? entryConfig?.finalExecutableAtEntry ?? null;
+      const entryConfirmed = (setup.rawSnapshot as any)?.entryConfirmedAtEntry ?? null;
+      const violationDetected = (typeof entrySnapshotActualRebound === 'number' && entrySnapshotActualRebound <= 0)
+        || (typeof displayedReb === 'number' && displayedReb <= 0)
+        || (typeof finalExec === 'boolean' && !finalExec);
+      logger.info(`DIP_REBOUND_POSITION_INTEGRITY_AUDIT: symbol=${position.coin} positionId=${auditpid} displayedStrategy=${displayedStrategy} entryStrategy=${displayedStrategy} finalEntryRule=${normalizedEntryRule ?? 'n/a'} entrySnapshotActualDipPct=${entrySnapshotActualDip?.toFixed(2) ?? 'n/a'} entrySnapshotRequiredDipPct=${requiredDipPctAtEntry?.toFixed(2) ?? 'n/a'} entrySnapshotDipConfirmed=${String(setup.metrics.actualDipPct?.passed ?? setup.metrics.dipConfirmed?.passed ?? 'n/a')} entrySnapshotActualReboundPct=${entrySnapshotActualRebound?.toFixed(2) ?? 'n/a'} entrySnapshotRequiredReboundPct=${requiredReboundPctAtEntry?.toFixed(2) ?? 'n/a'} entrySnapshotReboundConfirmed=${String(setup.metrics.actualReboundPct?.passed ?? setup.metrics.reboundConfirmed?.passed ?? 'n/a')} displayedDipPct=${displayedDip?.toFixed(2) ?? 'n/a'} displayedReboundPct=${displayedReb?.toFixed(2) ?? 'n/a'} displayedDipSource=${dipDisplaySource} displayedReboundSource=${reboundDisplaySource} currentScannerDipPct=${String(unifiedSignal?.dipPercent ?? 'n/a')} currentScannerReboundPct=${String(unifiedSignal?.reboundPct ?? 'n/a')} finalExecutableAtEntry=${String(finalExec ?? 'n/a')} contractValidAtEntry=${String(!violationDetected)} violationDetected=${String(violationDetected)}`);
+      if (violationDetected) {
+        logger.warn(`DIP_REBOUND_INVALID_OPEN_POSITION_DETECTED: symbol=${position.coin} positionId=${auditpid} strategy=dip_and_rebound entrySnapshotActualReboundPct=${entrySnapshotActualRebound?.toFixed(4) ?? 'n/a'} displayedReboundPct=${displayedReb?.toFixed(4) ?? 'n/a'} entrySnapshotActualDipPct=${entrySnapshotActualDip?.toFixed(4) ?? 'n/a'} finalExecutableAtEntry=${String(finalExec ?? 'n/a')} reason=rebound_missing_or_zero_or_display_mismatch`);
+      }
+    }
+  }
   const displayTrend = marketTrendAtEntry ?? marketRegimeAtEntry ?? 'unknown';
   const riskTp1Pct = finiteNumber((riskParams as any)?.tp1Pct);
   const riskTp1TargetPrice = finiteNumber((riskParams as any)?.tp1TargetPrice);
@@ -508,7 +560,7 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
     refPrice: Number.isFinite((bs as any)?.realMarketPriceAtBuy) ? Number((bs as any).realMarketPriceAtBuy) : (Number.isFinite(position.lastPrice) ? position.lastPrice : null),
     livePrice: liveState.livePrice,
     pnlPct,
-    pnlUsd: position.pnl,
+    pnlUsd: netPnlUsd,
     tp1Pct: displayedTp1Pct,
     tp1TargetPrice: displayedTp1TargetPrice,
     tp1Source: riskTp1Source ?? riskSnapshotStatus,
@@ -692,7 +744,22 @@ export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4C
   const closedSnapshotStatus: SnapshotStatus = bs
     ? 'VALID_SNAPSHOT'
     : (Date.parse(trade.entryTime || new Date().toISOString()) < SNAPSHOT_SCHEMA_CUTOFF_MS ? 'LEGACY_MISSING_SNAPSHOT' : 'BUG_MISSING_SNAPSHOT_NEW_POSITION');
-  const strategy = (bs?.selectedStrategy ?? trade.strategy ?? (closedSnapshotStatus === 'LEGACY_MISSING_SNAPSHOT' ? 'LEGACY UNKNOWN' : 'UNKNOWN'));
+  const rawSelectedStrategy = bs?.selectedStrategy ?? null;
+  const closedEntryConfigSnapshotStrategy = (bs as any)?.entryConfigSnapshot?.selectedStrategy ?? null;
+  const isValidClosedExecutableStrategy = (s: string | null): boolean => !!s && !/^(?:wait|unknown|avoid|)$/i.test(s);
+  const strategy = rawSelectedStrategy && isValidClosedExecutableStrategy(rawSelectedStrategy)
+    ? rawSelectedStrategy
+    : closedEntryConfigSnapshotStrategy && isValidClosedExecutableStrategy(closedEntryConfigSnapshotStrategy)
+      ? closedEntryConfigSnapshotStrategy
+      : rawSelectedStrategy
+        ? (rawSelectedStrategy.toLowerCase() === 'wait' ? 'unknown_legacy' : rawSelectedStrategy)
+        : (trade.strategy ?? (closedSnapshotStatus === 'LEGACY_MISSING_SNAPSHOT' ? 'LEGACY UNKNOWN' : 'UNKNOWN'));
+  const displayedStrategy = strategy;
+  const validExecutedStrategy = displayedStrategy !== 'wait' && displayedStrategy !== 'LEGACY UNKNOWN' && displayedStrategy !== 'unknown_legacy' && displayedStrategy !== 'UNKNOWN';
+  const sourceOfDisplayedStrategy = rawSelectedStrategy
+    ? 'buySnapshot.selectedStrategy'
+    : (trade.strategy ? 'trade.strategy' : 'fallback');
+  logger.info(`POSITION_STRATEGY_BINDING_AUDIT: symbol=${trade.coin} positionId=${trade.tradeId} displayedStrategy=${displayedStrategy} positionStrategyAtEntry=${rawSelectedStrategy ?? 'none'} entryConfigSnapshotStrategy=${String((bs as any)?.entryConfigSnapshot?.selectedStrategy ?? 'none')} candidateSelectedStrategy=${String(bs?.selectedPlaybook ?? 'none')} entryRuleAtEntry=${String((bs as any)?.settingsSnapshot?.entryRule ?? (bs as any)?.entryConfigSnapshot?.finalEntryRule ?? 'none')} finalEntryRule=${String((bs as any)?.entryConfigSnapshot?.finalEntryRule ?? 'none')} sourceOfDisplayedStrategy=${sourceOfDisplayedStrategy} validExecutedStrategy=${String(validExecutedStrategy)} isOpenPosition=false isClosedPosition=true`);
   const marketTrendAtEntry = bs?.groupTrend ?? bs?.groupRegime ?? null;
   const marketRegimeAtEntry = bs?.marketRegime ?? null;
   const qty = trade.quantity ?? 0;
@@ -890,6 +957,22 @@ export function buildTradeV4PageModel(input: {
     _lastOpenUiAuditSig = auditSig;
     _lastOpenUiAuditAt = now;
     logger.info(`OPEN_POSITIONS_UI_BINDING_AUDIT: storeOpenPositionsCount=${storeOpenPositionsCount} positionManagerOpenCount=${positionManagerOpenCount} headerPositionsCount=${headerPositionsCount} openPanelRowsCount=${openPanelRowsCount} filteredOutCount=${filteredOutCount} activeMode=${input.activeMode ?? 'AUTO'} executionMode=${executionMode} rowSymbols=${rowSymbols} filterReasonCounts=${filterReasonCounts}`);
+    const rowsWithLivePrice = openPositions.filter(p => p.livePrice > 0 && p.livePrice !== p.entryPrice).length;
+    const rowsWithPnlComputed = openPositions.filter(p => Math.abs(p.pnlPct) > 0.001 || p.livePrice !== p.entryPrice).length;
+    const rowsWithStalePrice = openPositions.filter(p => p.livePrice <= 0 || p.livePrice === p.entryPrice).length;
+    const rowsWithStrategyWait = openPositions.filter(p => (p.strategy ?? '').toLowerCase() === 'wait').length;
+    logger.info(`OPEN_POSITIONS_UI_LIVE_BINDING_AUDIT: positionManagerOpenCount=${positionManagerOpenCount} uiRowCount=${openPositions.length} rowsWithLivePrice=${rowsWithLivePrice} rowsWithPnlComputed=${rowsWithPnlComputed} rowsWithStalePrice=${rowsWithStalePrice} rowsWithStrategyWait=${rowsWithStrategyWait} source=PositionManager refreshAgeMs=${now - (input.positions[0]?.openedAt ?? now)}`);
+    const rowsWithZeroPnlButPriceMoved = openPositions.filter(p => {
+      const livePrice = p.livePrice;
+      const entryPrice = p.entryPrice ?? 0;
+      const pnlPct = Math.abs(p.pnlPct ?? 0);
+      const priceDiff = Math.abs(livePrice - entryPrice);
+      return priceDiff > 0.0001 && pnlPct < 0.001 && entryPrice > 0 && livePrice > 0;
+    });
+    const symbolsWithZeroPnlButPriceMoved = rowsWithZeroPnlButPriceMoved.map(p => `${p.symbol}:entry=${p.entryPrice?.toFixed(6) ?? 'na'}:last=${p.livePrice?.toFixed(6) ?? 'na'}:pnl=${p.pnlPct?.toFixed(2) ?? 'na'}`).join('|') || 'none';
+    if (rowsWithZeroPnlButPriceMoved.length > 0) {
+      logger.warn(`OPEN_POSITIONS_UI_PNL_BINDING_AUDIT: positionManagerOpenCount=${positionManagerOpenCount} uiRowCount=${openPositions.length} rowsWithLivePrice=${rowsWithLivePrice} rowsWithPnlComputed=${rowsWithPnlComputed} rowsWithZeroPnlButPriceMoved=${rowsWithZeroPnlButPriceMoved.length} symbolsWithZeroPnlButPriceMoved=${symbolsWithZeroPnlButPriceMoved} source=PositionManager rowUsesStaticEntrySnapshot=${String(rowsWithStalePrice > 0)} rowUsesCandidateState=false`);
+    }
   }
   const rowBindingMismatch = positionManagerOpenCount !== openPositions.length
     || storeOpenPositionsCount !== positionManagerOpenCount

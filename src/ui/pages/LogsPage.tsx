@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { logger, type LogEntry } from '../../utils/logger';
+import { formatSystemLocalTime, getRawUtcTooltip } from '../../utils/timeFormatter';
 
 type FilterLevel = 'ALL' | 'ERROR' | 'WARN' | 'INFO' | 'TRADE';
 type SourceOption = 'ALL' | 'Binance' | 'Scanner' | 'AutoBots' | 'EntryGate' | 'Market Analyzer' | 'Execution' | 'Exit' | 'UI' | 'Other';
@@ -299,8 +300,8 @@ export function LogsPage() {
             onScroll={handleScroll}
           >
             {displayLogs.slice(-1000).map((l, i) => (
-              <div key={i} className="log-entry" title={`${l.timestamp}\nSource: ${l.source ?? 'unknown'}`}>
-                <span className="log-time">{l.timestamp.slice(11, 23)}</span>
+              <div key={i} className="log-entry" title={`${formatSystemLocalTime(l.timestamp)}\n${getRawUtcTooltip(l.timestamp)}\nSource: ${l.source ?? 'unknown'}`}>
+                <span className="log-time">{formatSystemLocalTime(l.timestamp)}</span>
                 <span className={`log-level ${l.level}`}>{l.level}</span>
                 {l.source && (
                   <span className="log-source">{l.source}</span>

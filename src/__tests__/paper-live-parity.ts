@@ -22,6 +22,7 @@ import type { TraderBrainConfig, TraderAction, EntryGateInput, LiveSafetyState, 
 import type { ExchangeAdapter } from '../core/exchange/ExchangeAdapter';
 import { buildExecutionPlan } from '../core/scanner/ExecutionPlanner';
 import { buildExecutionModeParityAudit, getExecutionAdapterDisplay, sanitizeExecutionDisplayText } from '../lib/execution/executionDisplay';
+import { validateStrategyContract } from '../core/strategy-audit/strategy-contracts';
 import type { EntryGateOutput, ScannerCandidate, ScannerSnapshot } from '../core/types';
 
 let passed = 0;
@@ -232,7 +233,7 @@ async function main() {
     candidateId: symbol, symbol, createdAt: '', updatedAt: '', mode: 'AUTO', riskGroup: 'mid_caps', selectedStrategy: 'momentum',
     selectedPlaybook: null, confidence: 0.8, status: 'BUY', traderBrainDecision: { entryPlan: { side: 'BUY', price: 10, quantity: 1, reason: 'test' } } as any,
     entryGateDecision: gateAllow(), mainReason: 'ok', requiredNextActions: [], blockReasons: [], warnings: [], price: 10, priceAgeMs: 100, spreadPct: 0.1,
-    volumeRel: 1, tpRoomOk: true, reboundConfirmed: true, momentumConfirmed: true, dipPercent: 0, reboundPercent: 0, m5Change: 0, m15Change: 0, h1Change: 0, change24h: 0, mlBadEntryRisk: false, mlWinProbability: 0.8, bookFresh: true,
+    volumeRel: 1, tpRoomOk: true, reboundConfirmed: true, momentumConfirmed: true,     dipPercent: 0, reboundPercent: 1.2, m5Change: 0, m15Change: 0, h1Change: 0, change24h: 0, mlBadEntryRisk: false, mlWinProbability: 0.8, bookFresh: true,
   });
   const parityCandidate = makeCandidate('ETHUSDT');
   const scannerSnapshot: ScannerSnapshot = { scanId: 'demo-live-parity', startedAt: '', finishedAt: '', status: 'COOLDOWN', universeMode: 'TOP_50', universeSize: 1, scannedCount: 1, candidateCount: 1, buyCount: 1, waitCount: 0, blockCount: 0, avoidCount: 0, candidates: [parityCandidate], summary: '', diagnostics: {} as any };
@@ -240,11 +241,98 @@ async function main() {
   const demoPlan = buildExecutionPlan({ ...basePlanInput, executionAdapter: 'paper_simulated' });
   const livePlan = buildExecutionPlan({ ...basePlanInput, executionAdapter: 'binance_live' });
   assertEqual(demoPlan.selectedCandidates.map(c => c.symbol).join(','), livePlan.selectedCandidates.map(c => c.symbol).join(','), 'Demo candidate selection equals Live for same scanner inputs');
+  assert(demoPlan.selectedCandidates.length > 0, `Demo plan has at least 1 selected candidate (got ${demoPlan.selectedCandidates.length})`);
+  assert(livePlan.selectedCandidates.length > 0, `Live plan has at least 1 selected candidate (got ${livePlan.selectedCandidates.length})`);
   assert(!!demoPlan.selectedCandidates[0]?.gateSnapshot && !!livePlan.selectedCandidates[0]?.gateSnapshot, 'Both modes use EntryGate snapshot path');
   assert(!!demoPlan.selectedCandidates[0]?.entryPlan && !!livePlan.selectedCandidates[0]?.entryPlan, 'Both modes carry canonical entryPlan');
   const audit = buildExecutionModeParityAudit({ executionAdapter: 'paper_simulated', decisionMode: 'unified', plannerInputCount: 1, plannerInputWithEntryPlan: 1, generatedEntryPlanCount: 0, selectedCount: 1, selectedWithEntryPlan: 1, entryGateSnapshotUsed: true, plannerUsed: true });
   assert(audit.includes('executionMode=demo') && audit.includes('executionAdapter=demo_simulated') && audit.includes('finalAdapterOnlyDifference=true') && audit.includes('parityOk=true'), 'EXECUTION_MODE_PARITY_AUDIT reports unified Demo/Live semantics');
   assert(!sanitizeExecutionDisplayText('PAPER_EXECUTION_ADAPTER_CALLED paper_simulated Paper').includes('Paper'), 'Visible execution text sanitizes Paper wording');
+
+  // ── Test 9: Strategy contract hardening — negative threshold tests ──
+  console.log('\n── Test 9: Strategy contract hardening — threshold enforcement ──\n');
+
+  const contractParams = (overrides: Record<string, unknown>) => ({
+    strategy: 'momentum',
+    finalEntryRule: 'MOMENTUM_READY',
+    marketRegimeBucket: 'unknown' as const,
+    dipDepthPct: null,
+    reboundPct: 1.0,
+    requiredReboundPct: null,
+    reboundConfirmed: true,
+    momentumConfirmed: true,
+    finalExecutable: true,
+    ...overrides,
+  });
+
+  // Momentum: reboundPercent = 0 => blocked
+  const mcZero = validateStrategyContract(contractParams({ strategy: 'momentum', reboundPct: 0, reboundConfirmed: true }));
+  assert(!mcZero.contractValid, `Momentum: reboundPct=0 → contractValid=false (got ${mcZero.contractValid}, reason=${mcZero.invalidReason})`);
+  assert(['rebound_below_required', 'actualReboundPct_missing_or_zero'].includes(mcZero.invalidReason), `Momentum: reboundPct=0 → blocked (reason=${mcZero.invalidReason})`);
+
+  // Momentum: reboundPercent = 0.79 => blocked
+  const mc79 = validateStrategyContract(contractParams({ strategy: 'momentum', reboundPct: 0.79, reboundConfirmed: true }));
+  assert(!mc79.contractValid, `Momentum: reboundPct=0.79 → contractValid=false (got ${mc79.contractValid}, reason=${mc79.invalidReason})`);
+  assert(mc79.invalidReason === 'rebound_below_required', `Momentum: reboundPct=0.79 → invalidReason=rebound_below_required (got ${mc79.invalidReason})`);
+
+  // Momentum: reboundPercent = 0.8 + all true → allowed
+  const mcGood = validateStrategyContract(contractParams({ strategy: 'momentum', reboundPct: 0.8, reboundConfirmed: true, momentumConfirmed: true, finalExecutable: true }));
+  assert(mcGood.contractValid, `Momentum: reboundPct=0.8 → contractValid=true (got ${mcGood.contractValid})`);
+
+  // Balanced: reboundPercent = 0 => blocked
+  const bcZero = validateStrategyContract(contractParams({ strategy: 'balanced', reboundPct: 0, reboundConfirmed: true, momentumConfirmed: true }));
+  assert(!bcZero.contractValid, `Balanced: reboundPct=0 → contractValid=false (got ${bcZero.contractValid}, reason=${bcZero.invalidReason})`);
+  assert(['rebound_below_required', 'actualReboundPct_missing_or_zero'].includes(bcZero.invalidReason), `Balanced: reboundPct=0 → blocked (reason=${bcZero.invalidReason})`);
+
+  // Balanced: reboundPercent = 0.39 => blocked
+  const bc39 = validateStrategyContract(contractParams({ strategy: 'balanced', reboundPct: 0.39, reboundConfirmed: true, momentumConfirmed: true }));
+  assert(!bc39.contractValid, `Balanced: reboundPct=0.39 → contractValid=false (got ${bc39.contractValid}, reason=${bc39.invalidReason})`);
+  assert(bc39.invalidReason === 'rebound_below_required', `Balanced: reboundPct=0.39 → invalidReason=rebound_below_required (got ${bc39.invalidReason})`);
+
+  // Balanced: reboundPercent = 0.4 + all true → allowed
+  const bcGood = validateStrategyContract(contractParams({ strategy: 'balanced', reboundPct: 0.4, reboundConfirmed: true, momentumConfirmed: true, finalExecutable: true }));
+  assert(bcGood.contractValid, `Balanced: reboundPct=0.4 → contractValid=true (got ${bcGood.contractValid})`);
+
+  // Dip and Rebound: dip=0 rebound=0 → blocked
+  const drBadDip = validateStrategyContract({
+    strategy: 'dip_and_rebound', finalEntryRule: 'DIP_AND_REBOUND_READY', marketRegimeBucket: 'unknown',
+    dipDepthPct: 0, reboundPct: 0, requiredDipPct: null, requiredReboundPct: null,
+    dipConfirmed: true, reboundConfirmed: true, momentumConfirmed: true, finalExecutable: true,
+  });
+  assert(!drBadDip.contractValid, `DipAndRebound: dipPct=0 reboundPct=0 → contractValid=false (got ${drBadDip.contractValid}, reason=${drBadDip.invalidReason})`);
+  assert(['dip_below_required', 'rebound_below_required', 'actualDipPct_missing_or_zero', 'actualReboundPct_missing_or_zero'].includes(drBadDip.invalidReason), `DipAndRebound: dipPct=0 → blocked (reason=${drBadDip.invalidReason})`);
+
+  // Dip and Rebound: dip=0.8 rebound=0.4 + confirmed → allowed
+  const drGood = validateStrategyContract({
+    strategy: 'dip_and_rebound', finalEntryRule: 'DIP_AND_REBOUND_READY', marketRegimeBucket: 'unknown',
+    dipDepthPct: 0.8, reboundPct: 0.4, requiredDipPct: null, requiredReboundPct: null,
+    dipConfirmed: true, reboundConfirmed: true, momentumConfirmed: true, finalExecutable: true,
+  });
+  assert(drGood.contractValid, `DipAndRebound: dipPct=0.8 reboundPct=0.4 → contractValid=true (got ${drGood.contractValid})`);
+
+  // Conservative: dip=1 rebound=0 → blocked (dip below 2%)
+  const conBadDip = validateStrategyContract({
+    strategy: 'conservative', finalEntryRule: 'CONSERVATIVE_READY', marketRegimeBucket: 'unknown',
+    dipDepthPct: 1.0, reboundPct: 0.5, requiredDipPct: null, requiredReboundPct: null,
+    dipConfirmed: true, reboundConfirmed: true, momentumConfirmed: true, finalExecutable: true,
+  });
+  assert(!conBadDip.contractValid, `Conservative: dipPct=1 → contractValid=false (got ${conBadDip.contractValid}, reason=${conBadDip.invalidReason})`);
+
+  // Conservative: dip=2 rebound=0 → blocked (rebound below 1%)
+  const conBadRebound = validateStrategyContract({
+    strategy: 'conservative', finalEntryRule: 'CONSERVATIVE_READY', marketRegimeBucket: 'unknown',
+    dipDepthPct: 2.0, reboundPct: 0.5, requiredDipPct: null, requiredReboundPct: null,
+    dipConfirmed: true, reboundConfirmed: true, momentumConfirmed: true, finalExecutable: true,
+  });
+  assert(!conBadRebound.contractValid, `Conservative: dipPct=2 reboundPct=0.5 → contractValid=false (got ${conBadRebound.contractValid}, reason=${conBadRebound.invalidReason})`);
+
+  // Conservative: dip=2 rebound=1 + confirmed → allowed
+  const conGood = validateStrategyContract({
+    strategy: 'conservative', finalEntryRule: 'CONSERVATIVE_READY', marketRegimeBucket: 'unknown',
+    dipDepthPct: 2.0, reboundPct: 1.0, requiredDipPct: null, requiredReboundPct: null,
+    dipConfirmed: true, reboundConfirmed: true, momentumConfirmed: true, finalExecutable: true,
+  });
+  assert(conGood.contractValid, `Conservative: dipPct=2 reboundPct=1 → contractValid=true (got ${conGood.contractValid})`);
 
   // ── Summary ────────────────────────────────────────
   console.log('\n══════════════════════════════════════════════');

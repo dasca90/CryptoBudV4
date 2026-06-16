@@ -3,6 +3,7 @@ import type { TradeV4CandidateView, TradingParametersView } from './types';
 import { computeMarketGroupSummary, type SuggestedAction, type GroupSummaryRow } from '../../core/scanner/MarketGroupSummary';
 import { getDipperMarketAnalysisV3, type GroupRegimeVerdict, type RegimeVerdict } from '../../core/scanner/MarketAnalyzerV3';
 import { getTrendColor } from '../../lib/ui/trendColorHelper';
+import { formatLocalTime } from '../../utils/timeFormatter';
 
 const GROUP_ORDER = ['top_caps', 'large_caps', 'mid_caps', 'high_risk', 'very_high_risk'];
 
@@ -59,7 +60,7 @@ export function LeftControlSidebar(props: {
           </div>
           {props.lastScanAt && (
             <div style={{ fontSize: 8, color: '#484f58' }}>
-              Last: {new Date(props.lastScanAt).toLocaleTimeString()}
+              Last: {formatLocalTime(props.lastScanAt, { format: 'time' })}
             </div>
           )}
           <div style={{ display: 'flex', gap: 4 }}>
@@ -97,7 +98,8 @@ export function LeftControlSidebar(props: {
                 {props.scannerRunning ? 'RUNNING' : 'STOPPED'}
               </span>
               <span style={{ color: '#7a8ea8' }}>
-                Strategy: <span style={{ color: '#58a6ff' }}>{marketAnalysis.overall.bestFitStrategy}</span>
+                Market Best Fit: <span style={{ color: '#58a6ff' }}>{marketAnalysis.overall.bestFitStrategy}</span>
+                &middot; <span style={{ color: '#7a8ea8' }}>Mode: <span style={{ color: '#bc8cff' }}>dynamic per coin</span></span>
               </span>
             </div>
             <div style={{ fontSize: 8, color: '#8b949e', marginTop: 2 }}>
@@ -246,7 +248,7 @@ function OverallMarketCard(props: { verdict: RegimeVerdict; scanPeriod: string; 
         <Badge label="Bias" value={props.verdict.bias.replace(/_/g, ' ')} color={biasColor} />
         <Badge label="Conf" value={`${props.verdict.confidenceLabel} ${props.verdict.confidenceScore}%`} color={confColor} />
         <Badge label="Action" value={props.verdict.action.replace(/_/g, ' ')} color={props.verdict.action === 'selective_entries' ? '#22c55e' : '#d29922'} />
-        <Badge label="Strategy" value={props.verdict.bestFitStrategy} color="#58a6ff" />
+        <Badge label="Best Fit" value={props.verdict.bestFitStrategy} color="#58a6ff" />
       </div>
       <div style={{ fontSize: 8, color: '#7a8ea8', lineHeight: '13px' }}>{props.verdict.explanation}</div>
     </section>

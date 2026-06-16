@@ -39,7 +39,7 @@ export function resolveTradeSourceLabel(input: Position | TradeRecord | Record<s
   const entryConfig = bs?.entryConfigSnapshot ?? {};
   const settings = bs?.settingsSnapshot ?? {};
   let chosen: SourceResolved['label'] = 'Unknown / Legacy';
-  let executionPath = 'legacy_fallback';
+  let executionPath = 'unknown_runtime_source';
   // Strict ownership-first classification:
   // 1) Explicit owner/source from entry snapshot and position row
   // 2) Candidate/execution hints

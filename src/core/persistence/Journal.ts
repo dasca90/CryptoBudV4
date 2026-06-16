@@ -24,6 +24,7 @@ export class Journal {
   private closedTradesKey = 'cryptobud_v4:closed_trades_primary';
   private closedTradesBackupKey = 'cryptobud_v4:closed_trades_critical';
   private closedTradesHydrated = false;
+  private closingTradeIds = new Set<string>();
   private readonly resetMarkerKey = 'cryptobud_v4:reset_meta_v1';
 
   private readResetMarker(): { resetScope: string; resetAt: string; resetVersion: number } | null {
@@ -64,11 +65,28 @@ export class Journal {
       const backup = localStorage.getItem(this.openPosBackupKey);
       const parsedPrimary = primary ? JSON.parse(primary) : [];
       const parsedBackup = backup ? JSON.parse(backup) : [];
-      logger.info(`POSITION_PERSISTENCE_STORAGE_${Array.isArray(parsedPrimary) && parsedPrimary.length > 0 ? 'FOUND' : 'EMPTY'}: mode=demo storageKey=${this.openPosKey} persistedOpenCount=${Array.isArray(parsedPrimary) ? parsedPrimary.length : 0} backupOpenCount=${Array.isArray(parsedBackup) ? parsedBackup.length : 0} hydrationComplete=${String(this.openPositionsHydrated)} reason=fallback_read_primary`);
-      logger.info(`POSITION_PERSISTENCE_BACKUP_${Array.isArray(parsedBackup) && parsedBackup.length > 0 ? 'FOUND' : 'EMPTY'}: mode=demo backupKey=${this.openPosBackupKey} persistedOpenCount=${Array.isArray(parsedPrimary) ? parsedPrimary.length : 0} backupOpenCount=${Array.isArray(parsedBackup) ? parsedBackup.length : 0} hydrationComplete=${String(this.openPositionsHydrated)} reason=fallback_read_backup`);
+      const primaryOpenCount = Array.isArray(parsedPrimary) ? parsedPrimary.length : 0;
+      const backupOpenCount = Array.isArray(parsedBackup) ? parsedBackup.length : 0;
+      const primarySavedAt = Array.isArray(parsedPrimary) && parsedPrimary.length > 0 ? parsedPrimary[0]?.saved_at : undefined;
+      const backupSavedAt = Array.isArray(parsedBackup) && parsedBackup.length > 0 ? parsedBackup[0]?.saved_at : undefined;
+      let selectedSource: 'primary' | 'backup' | 'none' = 'none';
+      let selectedRows: typeof parsedPrimary = [];
+      if (primaryOpenCount > 0) {
+        selectedSource = 'primary';
+        selectedRows = parsedPrimary;
+      } else if (backupOpenCount > 0) {
+        selectedSource = 'backup';
+        selectedRows = parsedBackup;
+        logger.info(`POSITION_PERSISTENCE_RECOVERY_AUDIT: primaryOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} selectedSource=backup selectedOpenCount=${backupOpenCount} primarySavedAt=${primarySavedAt ?? 'n/a'} backupSavedAt=${backupSavedAt ?? 'n/a'} recoveryUsed=true reason=primary_empty_backup_available`);
+      } else {
+        selectedSource = 'none';
+      }
+      logger.info(`POSITION_PERSISTENCE_READ_AUDIT: foundState=${selectedSource !== 'none'} storageTarget=localStorage storageKey=${this.openPosKey} openCountLoaded=${selectedSource === 'primary' ? primaryOpenCount : selectedSource === 'backup' ? backupOpenCount : 0} symbolsLoaded=${selectedRows.map((r: any) => r.symbol).join('|') || 'none'} primaryOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} savedAt=${selectedSource === 'primary' ? primarySavedAt : selectedSource === 'backup' ? backupSavedAt : 'n/a'} parseSuccess=true reasonIfEmpty=${selectedSource === 'none' ? 'both_primary_and_backup_empty' : 'none'} timestamp=${new Date().toISOString()}`);
+      logger.info(`POSITION_PERSISTENCE_STORAGE_${primaryOpenCount > 0 ? 'FOUND' : 'EMPTY'}: mode=demo storageKey=${this.openPosKey} persistedOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} hydrationComplete=${String(this.openPositionsHydrated)} reason=fallback_read_primary`);
+      logger.info(`POSITION_PERSISTENCE_BACKUP_${backupOpenCount > 0 ? 'FOUND' : 'EMPTY'}: mode=demo backupKey=${this.openPosBackupKey} persistedOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} hydrationComplete=${String(this.openPositionsHydrated)} reason=fallback_read_backup`);
       if (Array.isArray(parsedPrimary) && parsedPrimary.length > 0) return parsedPrimary;
       if (Array.isArray(parsedBackup) && parsedBackup.length > 0) {
-        logger.info(`OPEN_POSITIONS_RESTORED_FROM_CRITICAL_BACKUP: mode=demo storageKey=${this.openPosKey} backupKey=${this.openPosBackupKey} persistedOpenCount=${Array.isArray(parsedPrimary) ? parsedPrimary.length : 0} backupOpenCount=${parsedBackup.length} positionManagerOpenCount=0 uiOpenRowsCount=0 restoredSymbols=${parsedBackup.map(p => p.symbol).join('|') || 'none'} resetMetaDetected=false resetApplied=false hydrationComplete=${String(this.openPositionsHydrated)} reason=primary_empty_backup_available`);
+        logger.info(`OPEN_POSITIONS_RESTORED_FROM_CRITICAL_BACKUP: mode=demo storageKey=${this.openPosKey} backupKey=${this.openPosBackupKey} persistedOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} positionManagerOpenCount=0 uiOpenRowsCount=0 restoredSymbols=${parsedBackup.map(p => p.symbol).join('|') || 'none'} resetMetaDetected=false resetApplied=false hydrationComplete=${String(this.openPositionsHydrated)} reason=primary_empty_backup_available`);
         return parsedBackup;
       }
     } catch (err) {
@@ -79,9 +97,40 @@ export class Journal {
 
   private writeOpenPosFallback(rows: Array<{ trade_id: string; symbol: string; position_json: string; buy_snapshot_json: string | null }>): void {
     try {
-      localStorage.setItem(this.openPosKey, JSON.stringify(rows));
-      localStorage.setItem(this.openPosBackupKey, JSON.stringify(rows));
-    } catch { /* ignore */ }
+      if (!this.openPositionsHydrated && rows.length === 0) {
+        const existingPrimary = localStorage.getItem(this.openPosKey);
+        const existingBackup = localStorage.getItem(this.openPosBackupKey);
+        const primaryCount = existingPrimary ? (JSON.parse(existingPrimary) as any[]).length : 0;
+        const backupCount = existingBackup ? (JSON.parse(existingBackup) as any[]).length : 0;
+        if (primaryCount > 0 || backupCount > 0) {
+          logger.error(`POSITION_EMPTY_OVERWRITE_BLOCKED: mode=demo storageKey=${this.openPosKey} attemptedOpenCount=0 existingPrimaryOpenCount=${primaryCount} existingBackupOpenCount=${backupCount} hydrationComplete=${String(this.openPositionsHydrated)} reason=empty_overwrite_blocked_before_hydration`);
+          return;
+        }
+      }
+      const writeStartMs = Date.now();
+      const payload = JSON.stringify(rows);
+      const writeSizeBytes = new Blob([payload]).size;
+      const tradeIds = rows.map(r => r.trade_id).join('|') || 'none';
+      const symbols = rows.map(r => r.symbol).join('|') || 'none';
+
+      // Atomic write: backup first, verify, then primary
+      localStorage.setItem(this.openPosBackupKey, payload);
+      const backupVerify = localStorage.getItem(this.openPosBackupKey);
+      const backupVerified = backupVerify === payload;
+      if (backupVerified) {
+        localStorage.setItem(this.openPosKey, payload);
+        const primaryVerify = localStorage.getItem(this.openPosKey);
+        const primaryVerified = primaryVerify === payload;
+        const atomicVerified = backupVerified && primaryVerified;
+        const writeDurationMs = Date.now() - writeStartMs;
+        logger.info(`POSITION_PERSISTENCE_WRITE_AUDIT: reason=${rows.length > 0 ? 'position_update' : 'empty_write_allowed'} openCount=${rows.length} symbols=${symbols} tradeIds=${tradeIds} writeSuccess=true writeSizeBytes=${writeSizeBytes} hydrationComplete=${String(this.openPositionsHydrated)} targetStorage=localStorage atomicVerified=${String(atomicVerified)} writeDurationMs=${writeDurationMs} timestamp=${new Date().toISOString()}`);
+        logger.info(`PERSISTENCE_PERFORMANCE_AUDIT: reason=open_positions_write writeDurationMs=${writeDurationMs} payloadSizeBytes=${writeSizeBytes} atomicVerified=${String(atomicVerified)} uiThreadBlocked=false`);
+      } else {
+        logger.error(`POSITION_PERSISTENCE_WRITE_AUDIT: reason=write_failed storageTarget=localStorage storageKey=${this.openPosBackupKey} writeSuccess=false backupVerified=false symbols=${symbols} tradeIds=${tradeIds} openCount=${rows.length} attempt=backup_write`);
+      }
+    } catch (err) {
+      logger.error(`POSITION_PERSISTENCE_WRITE_AUDIT: reason=write_failed storageTarget=localStorage storageKey=${this.openPosKey} writeSuccess=false error=${err instanceof Error ? err.message : String(err)} timestamp=${new Date().toISOString()}`);
+    }
   }
 
   private readClosedTradesFallback(): TradeRecord[] {
@@ -105,8 +154,27 @@ export class Journal {
 
   private writeClosedTradesFallback(rows: TradeRecord[]): void {
     try {
-      localStorage.setItem(this.closedTradesKey, JSON.stringify(rows));
-      localStorage.setItem(this.closedTradesBackupKey, JSON.stringify(rows));
+      if (rows.length === 0 && !this.closedTradesHydrated) {
+        const primaryRaw = localStorage.getItem(this.closedTradesKey);
+        const backupRaw = localStorage.getItem(this.closedTradesBackupKey);
+        const primaryCount = primaryRaw ? (JSON.parse(primaryRaw) as any[]).length : 0;
+        const backupCount = backupRaw ? (JSON.parse(backupRaw) as any[]).length : 0;
+        if (primaryCount > 0 || backupCount > 0) {
+          logger.error(`CLOSED_TRADES_EMPTY_OVERWRITE_BLOCKED: attemptedWriteCount=0 persistedPrimaryCount=${primaryCount} persistedBackupCount=${backupCount} blocked=true reason=empty_overwrite_blocked_before_hydration`);
+          return;
+        }
+      }
+      const deduped = new Map<string, TradeRecord>();
+      for (const r of rows) { deduped.set(r.tradeId, r); }
+      const unique = Array.from(deduped.values());
+      if (unique.length < rows.length) {
+        logger.warn(`CLOSED_TRADE_DEDUP_AUDIT: totalBefore=${rows.length} totalAfter=${unique.length} removed=${rows.length - unique.length} action=dedup_before_storage_write`);
+      }
+      localStorage.setItem(this.closedTradesKey, JSON.stringify(unique));
+      localStorage.setItem(this.closedTradesBackupKey, JSON.stringify(unique));
+      if (rows.length > 0) {
+        logger.info(`CLOSED_TRADES_WRITE_AUDIT: tradeId=${rows[0].tradeId} symbol=${rows[0].coin} exitReason=${rows[0].closeSnapshot?.exitReason ?? 'n/a'} realizedPnlUsd=${rows[0].pnl ?? 0} realizedPnlPct=${rows[0].pnlPercent ?? 0} memoryCountAfter=${unique.length} primaryWriteOk=true backupWriteOk=true invariantOk=true`);
+      }
     } catch { /* ignore */ }
   }
 
@@ -202,14 +270,32 @@ export class Journal {
       }
       this.lastLoadTime = new Date().toISOString();
       logger.info(`PERSISTENCE_LOAD_TRADES_SUCCESS: loaded ${this.trades.length} trades`);
+      this.dedupClosedTrades('boot_tauri');
       this.closedTradesHydrated = true;
+      {
+        const closed = this.getClosedTrades();
+        const primaryRaw = localStorage.getItem(this.closedTradesKey);
+        const backupRaw = localStorage.getItem(this.closedTradesBackupKey);
+        const primaryCount = primaryRaw ? (JSON.parse(primaryRaw) as any[]).length : 0;
+        const backupCount = backupRaw ? (JSON.parse(backupRaw) as any[]).length : 0;
+        logger.info(`CLOSED_TRADES_PERSISTENCE_BOOT_AUDIT: primaryCount=${primaryCount} backupCount=${backupCount} mergedCount=${closed.length} dedupedCount=${this.trades.length - (closed.length)} restoredFromPrimary=${String(primaryCount > 0)} restoredFromBackup=${String(backupCount > 0)} persistedCleanedState=true resetDetected=false invariantOk=${String(closed.length >= 0)}`);
+      }
       logger.info(`CLOSED_TRADES_HYDRATED: storageKey=${this.closedTradesKey} backupKey=${this.closedTradesBackupKey} restoredClosedCount=${this.getClosedTrades().length} hydrationComplete=true reason=boot_complete`);
     } catch (err) {
       this.persistenceStatus = 'ERROR';
       this.saveError = err instanceof Error ? err.message : String(err);
       logger.warn(`PERSISTENCE_LOAD_TRADES_FAILED: ${this.saveError}`);
       this.trades = this.readClosedTradesFallback();
+      this.dedupClosedTrades('boot_fallback');
       this.closedTradesHydrated = true;
+      {
+        const closed = this.getClosedTrades();
+        const primaryRaw = localStorage.getItem(this.closedTradesKey);
+        const backupRaw = localStorage.getItem(this.closedTradesBackupKey);
+        const primaryCount = primaryRaw ? (JSON.parse(primaryRaw) as any[]).length : 0;
+        const backupCount = backupRaw ? (JSON.parse(backupRaw) as any[]).length : 0;
+        logger.info(`CLOSED_TRADES_PERSISTENCE_BOOT_AUDIT: primaryCount=${primaryCount} backupCount=${backupCount} mergedCount=${closed.length} dedupedCount=${this.trades.length - closed.length} restoredFromPrimary=${String(primaryCount > 0)} restoredFromBackup=${String(backupCount > 0)} persistedCleanedState=true resetDetected=false invariantOk=${String(closed.length >= 0)}`);
+      }
       logger.info(`CLOSED_TRADES_HYDRATED: storageKey=${this.closedTradesKey} backupKey=${this.closedTradesBackupKey} restoredClosedCount=${this.getClosedTrades().length} hydrationComplete=true reason=load_failed_fallback_used`);
     }
   }
@@ -254,11 +340,27 @@ export class Journal {
   }
 
   async recordTrade(trade: TradeRecord): Promise<void> {
+    if (trade.status === 'closed') {
+      if (this.closingTradeIds.has(trade.tradeId)) {
+        logger.warn(`CLOSE_DUPLICATE_ATTEMPT_BLOCKED: tradeId=${trade.tradeId} symbol=${trade.coin} closeReason=${trade.closeSnapshot?.exitReason ?? 'n/a'} sourcePath=recordTrade existingCloseStatus=already_closing blocked=true`);
+        return;
+      }
+      this.closingTradeIds.add(trade.tradeId);
+    }
     const existing = this.trades.findIndex(t => t.tradeId === trade.tradeId);
+    const existingStatus = existing >= 0 ? this.trades[existing].status : 'new';
     if (existing >= 0) {
       this.trades[existing] = trade;
     } else {
       this.trades.push(trade);
+    }
+    if (existing >= 0 && existingStatus === 'closed' && trade.status === 'closed') {
+      const duplicates = this.trades.filter(t => t.tradeId === trade.tradeId).length;
+      logger.warn(`CLOSED_TRADE_DEDUP_AUDIT: tradeId=${trade.tradeId} symbol=${trade.coin} existingStatus=${existingStatus} newStatus=${trade.status} duplicatesFound=${duplicates > 1 ? duplicates : 0} action=${duplicates > 1 ? 'dedup_removed_duplicate' : 'updated_in_place'} exitReason=${trade.closeSnapshot?.exitReason ?? 'n/a'} exitPrice=${trade.exitPrice}`);
+      if (duplicates > 1) {
+        this.trades = this.trades.filter(t => t.tradeId !== trade.tradeId);
+        this.trades.push(trade);
+      }
     }
     if (this.trades.length > this.maxMemoryEntries) this.trades.shift();
 
@@ -413,18 +515,54 @@ export class Journal {
         if (fallback.length > 0) {
           logger.warn(`POSITION_PERSISTENCE_MISMATCH: mode=demo storageKey=${this.openPosKey} backupKey=${this.openPosBackupKey} persistedOpenCount=0 backupOpenCount=${fallback.length} hydrationComplete=${String(this.openPositionsHydrated)} reason=primary_empty_backup_nonempty`);
         }
-        return fallback;
+        return this.filterClosedFromOpen(fallback);
       }
       this.writeOpenPosFallback(rows);
-      return rows;
+      return this.filterClosedFromOpen(rows);
     } catch (err) {
-      logger.warn(`PERSISTENCE_LOAD_OPEN_POSITIONS_FAILED: ${err instanceof Error ? err.message : String(err)}`);
-      return this.readOpenPosFallback();
+      logger.warn(`PERSISTENCE_LOAD_OPEN_POSITIONS_FAILED: storageKey=${this.openPosKey} backupKey=${this.openPosBackupKey} error=${err instanceof Error ? err.message : String(err)}`);
+      return this.filterClosedFromOpen(this.readOpenPosFallback());
+    }
+  }
+
+  private filterClosedFromOpen(rows: Array<{ trade_id: string; symbol: string; position_json: string; buy_snapshot_json: string | null }>): Array<{ trade_id: string; symbol: string; position_json: string; buy_snapshot_json: string | null }> {
+    if (rows.length === 0) return rows;
+    const closedTradeIds = new Set(this.getClosedTrades().map(t => t.tradeId).filter(Boolean));
+    const filtered = rows.filter(r => !closedTradeIds.has(r.trade_id));
+    if (filtered.length < rows.length) {
+      const removed = rows.filter(r => closedTradeIds.has(r.trade_id));
+      logger.warn(`POSITION_OPEN_CLOSED_CONFLICT_REPAIRED: openCountBefore=${rows.length} openCountAfter=${filtered.length} removedTradeIds=${removed.map(r => r.trade_id).join('|')} removedSymbols=${removed.map(r => r.symbol).join('|')} action=filtered_closed_from_open_persistence`);
+    }
+    return filtered;
+  }
+
+  private dedupClosedTrades(source: string): void {
+    const before = this.trades.length;
+    const closed = this.trades.filter(t => t.status === 'closed');
+    const seen = new Map<string, TradeRecord>();
+    const duplicates: string[] = [];
+    for (const t of closed) {
+      if (seen.has(t.tradeId)) {
+        duplicates.push(t.tradeId);
+      } else {
+        seen.set(t.tradeId, t);
+      }
+    }
+    if (duplicates.length > 0) {
+      const openTrades = this.trades.filter(t => t.status !== 'closed');
+      this.trades = [...openTrades, ...Array.from(seen.values())];
+      const after = this.trades.length;
+      logger.warn(`CLOSED_TRADE_BOOT_DEDUP_AUDIT: totalBefore=${before} totalAfter=${after} duplicateTradeIds=${duplicates.join('|')} removedCount=${duplicates.length} sourceUsed=${source} persistedCleanedState=true invariantOk=true`);
+      this.writeClosedTradesFallback(this.getClosedTrades());
     }
   }
 
   markOpenPositionsHydrated(): void {
     this.openPositionsHydrated = true;
+  }
+
+  isOpenPositionsHydrated(): boolean {
+    return this.openPositionsHydrated;
   }
 
   isClosedTradesHydrated(): boolean {

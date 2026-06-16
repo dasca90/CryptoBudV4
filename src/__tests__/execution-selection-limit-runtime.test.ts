@@ -95,13 +95,19 @@ const plan = buildExecutionPlan({
   enabledRiskGroups: { mid_caps: true },
 });
 
-const skippedByLimit = plan.skippedCandidates.filter((s) => s.reason.includes('Execution selection limit reached'));
+const skippedByLimit = plan.skippedCandidates.filter((s) => s.reason.includes('MAX_POSITIONS') || s.reason.includes('CAPITAL_BLOCKED') || s.reason.includes('BLOCK_MAX_POSITIONS') || s.reason.includes('BLOCK_CAPITAL'));
 ok(plan.executionPoolSize === 20, 'buyReadyCount/executionPoolSize is 20');
-ok(plan.maxSelectedPerScan === 10, 'effective maxSelectedPerScan is 10');
-ok(plan.selectedCandidates.length === 10, 'selectedCount is 10');
-ok(skippedByLimit.length === 10, 'skippedBySelectionLimitCount is 10');
-ok(!skippedByLimit.some((s) => s.reason.includes('maxSelectedPerScan=4')), 'selection limit audit/reason never reports maxSelectedPerScan=4');
-ok(!plan.selectedCandidates.length || plan.selectedCandidates.length !== 4, 'selectedCount is not capped at 4');
+ok(plan.maxSelectedPerScan === 10, 'effective maxSelectedPerScan is 10 (not used as cap)');
+ok(plan.selectedCandidates.length === 20, 'selectedCount is 20 — no artificial selection cap, all candidates pass real safety');
+ok(skippedByLimit.length === 0, 'skippedByRealSafetyLimitCount is 0 — adequate slots/capital');
+ok(plan.noBuyReasons.length === 0, 'no buy reasons — all candidates selected');
+ok(!plan.selectedCandidates.some((c) => c.reason?.includes('selection_limit_reached')), 'no candidate blocked by selection_limit_reached');
+ok(!plan.skippedCandidates.some((s) => s.reason?.includes('selection_limit')), 'no skipped reason contains selection limit');
+ok(!plan.skippedCandidates.some((s) => s.gate === 'ExecutionPlannerLimit'), 'no candidate skipped by ExecutionPlannerLimit gate');
+const skippedBySafetyGate = plan.skippedCandidates.filter((s) => s.gate === 'ExecutionPlannerLimit');
+ok(skippedBySafetyGate.length === 0, 'no candidate blocked by ExecutionPlannerLimit with 20 available slots');
+const selected = plan.selectedCandidates.map((c) => c.symbol);
+ok(selected.length === 20, 'all 20 candidates selected when slots available');
 
 const explicitFour = buildExecutionPlan({
   scannerSnapshot: makeSnapshot(candidates),
@@ -112,7 +118,7 @@ const explicitFour = buildExecutionPlan({
   pendingOrderSymbols: [],
   capital: 10000,
   usedCapital: 0,
-  maxPositions: 20,
+  maxPositions: 4,
   maxSelectedPerScan: 4,
   maxEntriesPerCycle: 4,
   maxSelectedPerScanSource: 'ui_setting',
@@ -123,7 +129,9 @@ const explicitFour = buildExecutionPlan({
   executionAdapter: 'paper_simulated',
   enabledRiskGroups: { mid_caps: true },
 });
-ok(explicitFour.selectedCandidates.length === 4 && explicitFour.maxSelectedPerScan === 4, 'selectedCount=4 only when canonical config explicitly says 4');
+ok(explicitFour.selectedCandidates.length === 4 && explicitFour.maxSelectedPerScan === 4, 'selectedCount=4 when maxPositions=4 limits via real safety (not artificial maxSelectedPerScan)');
+ok(explicitFour.skippedCandidates.length === 16, 'skipped=16 due to max positions reached, not selection limit');
+ok(explicitFour.skippedCandidates.every((s) => s.reason.includes('BLOCK_MAX_POSITIONS') || s.gate === 'ExecutionPlannerLimit'), 'skipped reasons use real safety labels');
 
 if (failed > 0) {
   console.error(`execution-selection-limit-runtime: ${passed} passed, ${failed} failed`);

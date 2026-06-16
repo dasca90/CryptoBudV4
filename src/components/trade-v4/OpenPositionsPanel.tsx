@@ -1,8 +1,10 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { TradeV4OpenPositionView } from "./types";
 import { logger } from "../../utils/logger";
+import { formatLocalTime } from "../../utils/timeFormatter";
 
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 15;
 const trendTone = (v?: string) => {
   const t = String(v ?? "").toLowerCase();
   if (t.includes("bull") || t.includes("up")) return "pill-green";
@@ -30,16 +32,17 @@ export const V3_OPEN_POSITION_COLUMNS = [
   "Strategy",
   "Qty",
   "Entry Value",
-  "Entry",
-  "Ref",
-  "Last",
   "Dip",
-  "Trend",
+  "Rebound",
   "PnL%",
   "Unrealized",
+  "Risk",
   "TP1 (%)",
   "TP2 (%)",
   "Stop (%)",
+  "Entry",
+  "Ref",
+  "Last",
   "Stop Trigger",
   "Decision",
   "Owner",
@@ -61,7 +64,6 @@ const V4_OPEN_DETAILED_COLUMNS = [
   "Spread",
   "Used $",
   "Rule",
-  "Risk",
   "Score/Conf",
   "Reason/Quality",
   "Diag",
@@ -78,6 +80,30 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
   const [resultFilter, setResultFilter] = useState<'all' | 'profit' | 'loss' | 'flat'>('all');
   const [priceFilter, setPriceFilter] = useState<'all' | 'fresh' | 'stale' | 'pending' | 'unavailable' | 'fallback'>('all');
   const [diagRow, setDiagRow] = useState<TradeV4OpenPositionView | null>(null);
+  const [tooltipState, setTooltipState] = useState<{ position: TradeV4OpenPositionView; x: number; y: number; align: 'right' | 'left'; flipY: boolean } | null>(null);
+  const handleRowEnter = useCallback((p: TradeV4OpenPositionView, e: React.MouseEvent<HTMLTableRowElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const ttWidth = 340;
+    const ttHeight = 520;
+    let x = rect.right + 8;
+    let align: 'right' | 'left' = 'right';
+    if (x + ttWidth > vw - 8) {
+      x = rect.left - ttWidth - 8;
+      align = 'left';
+      if (x < 8) x = 8;
+    }
+    let y = rect.top;
+    let flipY = false;
+    if (y + ttHeight > vh - 8) {
+      y = rect.bottom - ttHeight;
+      flipY = true;
+      if (y < 8) y = 8;
+    }
+    setTooltipState({ position: p, x, y, align, flipY });
+  }, []);
+  const handleRowLeave = useCallback(() => setTooltipState(null), []);
   const cycleFilter = () => setOwnerFilter((f) => (f === 'all' ? 'manual' : f === 'manual' ? 'auto' : 'all'));
   const filteredPositions = props.positions.filter((p) => {
     if (ownerFilter === 'all') return true;
@@ -105,14 +131,35 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
     return filteredPositions.slice(start, start + PAGE_SIZE);
   }, [filteredPositions, safePage]);
   useMemo(() => {
+    let emittedCount = 0;
+    let suppressedCount = 0;
+    const MAX_UI_AUDIT_PER_CYCLE = 3;
     for (const p of rows) {
       const invalidTp1 = p.tp1Pct == null || p.tp1Pct <= 0;
       const valueDisplayed = invalidTp1 ? 'BUG: TP1 INVALID' : `${Number(p.tp1Pct).toFixed(2)}%`;
-      logger.info(`OPEN_POSITION_UI_CELL_AUDIT: symbol=${p.symbol} column=TP1 valueDisplayed=${valueDisplayed} sourceField=tp1Pct sourceObjectPath=TradeV4OpenPositionView.tp1Pct riskSnapshotStatus=${p.riskSnapshotStatus ?? 'n/a'} sourceUsed=${p.sourceUsed ?? 'n/a'}`);
+      if (emittedCount < MAX_UI_AUDIT_PER_CYCLE) {
+        logger.info(`OPEN_POSITION_UI_CELL_AUDIT: symbol=${p.symbol} column=TP1 valueDisplayed=${valueDisplayed} sourceField=tp1Pct sourceObjectPath=TradeV4OpenPositionView.tp1Pct riskSnapshotStatus=${p.riskSnapshotStatus ?? 'n/a'} sourceUsed=${p.sourceUsed ?? 'n/a'}`);
+        emittedCount++;
+      } else {
+        suppressedCount++;
+      }
       if (invalidTp1 && p.isLivePosition && !p.isLegacyPosition) {
         logger.warn(`UI_TP1_BINDING_BUG: symbol=${p.symbol} column=TP1 valueDisplayed=BUG_TP1_INVALID sourceField=tp1Pct reason=live_position_missing_or_invalid_tp1`);
       }
     }
+    if (suppressedCount > 0) {
+      logger.info(`UI_AUDIT_RATE_LIMIT_AUDIT: auditName=OPEN_POSITION_UI_CELL_AUDIT emittedCount=${emittedCount} suppressedCount=${suppressedCount} reason=rate_limit_per_render_cycle`);
+    }
+    return null;
+  }, [rows]);
+
+  useMemo(() => {
+    const panel = document.querySelector('[data-testid="open-positions-workspace"]');
+    const panelWidth = panel?.clientWidth ?? 0;
+    const table = panel?.querySelector('table') as HTMLElement | null;
+    const tableWidth = table?.scrollWidth ?? 0;
+    const horizontalScrollRequired = tableWidth > panelWidth && panelWidth > 0;
+    logger.info(`OPEN_POSITIONS_TABLE_COLUMNS_AUDIT: visibleColumns=${V3_OPEN_POSITION_COLUMNS.join('|')} hiddenColumns=none trendColumnVisible=false pnlColumnsVisible=true unrealizedColumnVisible=true riskColumnVisible=true horizontalScrollRequired=${String(horizontalScrollRequired)} tableWidth=${tableWidth} availablePanelWidth=${panelWidth} rowCount=${rows.length} pageSize=${PAGE_SIZE}`);
     return null;
   }, [rows]);
 
@@ -161,20 +208,23 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
               </thead>
               <tbody>
                 {rows.map((p) => (
-                  <tr key={p.id} className={`row-hover-glow ${selectedRowId === p.id ? 'row-selected-v4' : ''}`} onClick={() => setSelectedRowId(p.id)}>
+                  <tr key={p.id} className={`row-hover-glow ${selectedRowId === p.id ? 'row-selected-v4' : ''}`} onClick={() => setSelectedRowId(p.id)} onMouseEnter={(e) => handleRowEnter(p, e)} onMouseLeave={handleRowLeave}>
                     <td style={{ fontWeight: 600 }}>
                       {p.symbol}
                       {!p.hasSnapshot && <div className="status-warn" style={{ fontSize: 9 }}>LEGACY / MISSING SNAPSHOT</div>}
                     </td>
                     <td><span className={`v3-pill ${stateTone(p).cls}`}>{stateTone(p).label}</span></td>
-                    <td><span className={`v3-pill ${strategyTone(p.strategy)}`}>{p.strategy}</span></td>
+                    <td><span className={`v3-pill ${strategyTone(p.strategy)}`}>{p.strategy}</span>{p.strategy === 'dip_and_rebound' && p.reboundPct != null && p.reboundPct <= 0 && <span className="status-bad" style={{fontSize:8,marginLeft:4}}>INVALID D&R</span>}</td>
                     <td>{p.quantity != null ? Number(p.quantity).toFixed(4) : 'n/a'}</td>
                     <td>{p.usedCapitalUsd != null ? `$${p.usedCapitalUsd.toFixed(2)}` : 'n/a'}</td>
-                    <td>{p.entryPrice.toFixed(4)}</td>
-                    <td>{typeof p.refPrice === 'number' ? p.refPrice.toFixed(4) : (p.marketRegimeAtEntry ?? p.groupTrend ?? 'n/a')}</td>
-                    <td>{p.livePrice > 0 ? p.livePrice.toFixed(4) : <span className={`v3-pill ${freshnessTone(p.priceQuality)}`}>{p.priceQuality === 'pending' ? 'PRICE PENDING' : 'PRICE UNAVAILABLE'}</span>}</td>
-                    <td>{p.dipPct != null ? `${p.dipPct.toFixed(2)}%` : '--'}</td>
-                    <td><span className={`v3-pill ${trendTone(p.groupTrend)}`}>{p.groupTrend ?? 'unknown'}</span></td>
+                    <td>{p.dipPct != null ? (p.dipPct === 0 && p.strategy === 'dip_and_rebound' ? '--' : (p.dipPct > 0 && p.dipPct < 0.005 ? '<0.01%' : `${Math.abs(p.dipPct).toFixed(2)}%`)) : '--'}</td>
+                    <td>{(() => {
+                      const r = p.reboundPct;
+                      if (r == null) return '--';
+                      if (r > 0 && r < 0.005) return '+<0.01%';
+                      if (r <= 0 && p.strategy === 'dip_and_rebound') return <span className="status-bad">+0.00% <span style={{fontSize:8}}>INVALID</span></span>;
+                      return `+${r.toFixed(2)}%`;
+                    })()}</td>
                     <td className={p.pnlPct >= 0 ? "status-good" : "status-bad"}>
                       <span className="pnl-tooltip-wrap">
                         {p.pnlPct.toFixed(2)}%
@@ -202,15 +252,19 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                     <td className={p.pnlUsd >= 0 ? "status-good" : "status-bad"}>
                       <span className="pnl-tooltip-wrap">{p.pnlUsd.toFixed(2)}</span>
                     </td>
+                    <td><span className="v3-pill pill-gray">{p.riskGroup}</span></td>
                     <td className={p.tp1Pct != null && p.tp1Pct > 0 ? "status-good" : "status-bad"}>
                       {p.tp1Pct != null && p.tp1Pct > 0 ? `${p.tp1Pct.toFixed(2)}%` : (p.riskSnapshotStatus === 'BUG_TP1_INVALID' ? 'BUG: TP1 INVALID' : (p.riskSnapshotStatus ? `${p.riskSnapshotStatus} / TP1 SNAPSHOT MISSING` : 'BUG: TP1 SNAPSHOT MISSING'))}
                     </td>
                     <td className="status-good">{p.tp2Pct != null ? `${p.tp2Pct.toFixed(2)}%` : '0.00%'}</td>
                     <td className="status-bad">{p.slPct != null ? `${p.slPct.toFixed(2)}%` : 'n/a'}</td>
+                    <td>{p.entryPrice.toFixed(4)}</td>
+                    <td>{typeof p.refPrice === 'number' ? p.refPrice.toFixed(4) : (p.marketRegimeAtEntry ?? p.groupTrend ?? 'n/a')}</td>
+                    <td>{p.livePrice > 0 ? p.livePrice.toFixed(4) : <span className={`v3-pill ${freshnessTone(p.priceQuality)}`}>{p.priceQuality === 'pending' ? 'PRICE PENDING' : 'PRICE UNAVAILABLE'}</span>}</td>
                     <td style={{ fontSize: 9 }}>{p.slPct != null ? `$${(p.entryPrice * (1 - (p.slPct / 100))).toFixed(6)}` : 'n/a'}</td>
                     <td><span className="v3-pill pill-gray">{p.exitStatus === 'sl_risk' ? 'DEFEND' : 'HOLD'}</span></td>
                     <td><span className={`v3-pill ${String(p.ownerType ?? '').toLowerCase().includes('manual') ? 'pill-gray' : 'pill-cyan'}`}>{p.sourceLabel ?? p.ownerType ?? 'n/a'}</span></td>
-                    <td>{p.openedAtLabel ?? 'n/a'}</td>
+                    <td>{formatLocalTime(p.openedAtLabel, { format: 'datetime' })}</td>
                     <td>{p.ageLabel}</td>
                     {detailed && <td><span className={`v3-pill ${String(p.mode ?? '').toLowerCase().includes('live') ? 'pill-orange' : 'pill-blue'}`}>{p.mode ?? 'n/a'}</span></td>}
                     {detailed && <td><span className={`v3-pill ${String(p.executionMode ?? '').toLowerCase() === 'live' ? 'pill-orange' : 'pill-blue'}`}>{p.executionMode ?? 'Demo'}</span></td>}
@@ -226,7 +280,6 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                     {detailed && <td>{p.spreadPct != null ? `${p.spreadPct.toFixed(3)}%` : 'n/a'}</td>}
                     {detailed && <td>{p.usedCapitalUsd != null ? p.usedCapitalUsd.toFixed(2) : 'n/a'}</td>}
                     {detailed && <td>{p.entryRule ?? p.entryReason ?? p.strategy}</td>}
-                    {detailed && <td>{p.riskGroup}</td>}
                     {detailed && <td>{p.score ?? 'n/a'} / {p.confidence != null ? `${p.confidence}%` : 'n/a'}</td>}
                     {detailed && <td>{p.entryReason ?? 'n/a'} / {p.dataQuality ?? 'n/a'}</td>}
                     {detailed && <td><button className="btn btn-sm btn-default" onClick={(e) => { e.stopPropagation(); setDiagRow(p); }}>Inspect</button></td>}
@@ -299,6 +352,45 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
             </div>
           </div>
         </div>
+      )}
+      {tooltipState && createPortal(
+        <div className="row-tooltip-portal" style={{
+          position: 'fixed',
+          left: tooltipState.x,
+          top: tooltipState.y,
+          zIndex: 50,
+          maxHeight: 'calc(100vh - 16px)',
+          overflowY: 'auto',
+        }}>
+          <div className="row-tooltip-section"><b>Symbol:</b> {tooltipState.position.symbol}</div>
+          <div className="row-tooltip-section"><b>Strategy:</b> <span className={`v3-pill ${strategyTone(tooltipState.position.strategy)}`}>{tooltipState.position.strategy}</span></div>
+          <div className="row-tooltip-section"><b>Entry:</b> {tooltipState.position.entryPrice.toFixed(6)}</div>
+          <div className="row-tooltip-section"><b>Ref:</b> {typeof tooltipState.position.refPrice === 'number' ? tooltipState.position.refPrice.toFixed(6) : 'n/a'}</div>
+          <div className="row-tooltip-section"><b>Live:</b> {tooltipState.position.livePrice > 0 ? tooltipState.position.livePrice.toFixed(6) : 'n/a'} · <span className="v3-pill pill-gray">{tooltipState.position.priceQuality}</span></div>
+          <div className="row-tooltip-section"><b>Dip:</b> {tooltipState.position.dipPct != null ? `${tooltipState.position.dipPct.toFixed(2)}%` : 'n/a'} {tooltipState.position.requiredDipPct != null ? `/ req ${tooltipState.position.requiredDipPct.toFixed(2)}%` : ''} · source: {tooltipState.position.strategySetupSource ?? 'n/a'}</div>
+          <div className="row-tooltip-section"><b>Rebound:</b> {(() => {
+            const r = tooltipState.position.reboundPct;
+            if (r == null) return 'n/a';
+            if (r > 0 && r < 0.005) return `<0.01%`;
+            return `+${r.toFixed(2)}%`;
+          })()} {tooltipState.position.requiredReboundPct != null ? `/ req ${tooltipState.position.requiredReboundPct.toFixed(2)}%` : ''} · source: {tooltipState.position.strategySetupSource ?? 'n/a'}</div>
+          <div className="row-tooltip-section"><b>Momentum:</b> {tooltipState.position.momentumConfirmed === true ? 'OK' : tooltipState.position.momentumConfirmed === false ? 'MISS' : 'N/A'}</div>
+          <div className="row-tooltip-section"><b>TP1:</b> {tooltipState.position.tp1Pct != null && tooltipState.position.tp1Pct > 0 ? `${tooltipState.position.tp1Pct.toFixed(2)}%` : 'n/a'} {tooltipState.position.tp1TargetPrice != null ? `→ ${tooltipState.position.tp1TargetPrice.toFixed(6)}` : ''} · source: {tooltipState.position.tp1Source ?? tooltipState.position.riskSnapshotStatus ?? 'n/a'}</div>
+          <div className="row-tooltip-section"><b>TP2:</b> {tooltipState.position.tp2Pct != null ? `${tooltipState.position.tp2Pct.toFixed(2)}%` : '0.00%'} · source: {tooltipState.position.tp2Source ?? tooltipState.position.riskSnapshotStatus ?? 'n/a'}</div>
+          <div className="row-tooltip-section"><b>SL:</b> {tooltipState.position.slPct != null ? `${tooltipState.position.slPct.toFixed(2)}%` : 'n/a'} · source: {tooltipState.position.slSource ?? tooltipState.position.riskSnapshotStatus ?? 'n/a'}</div>
+          <div className="row-tooltip-section"><b>PnL:</b> <span className={tooltipState.position.pnlUsd >= 0 ? 'status-good' : 'status-bad'}>{tooltipState.position.pnlPct.toFixed(2)}% / ${tooltipState.position.pnlUsd.toFixed(2)}</span> · source: {tooltipState.position.pnlBreakdown?.livePriceSource ?? 'n/a'}</div>
+          <div className="row-tooltip-section"><b>Owner:</b> {tooltipState.position.sourceLabel ?? tooltipState.position.ownerType ?? 'n/a'}</div>
+          <div className="row-tooltip-section"><b>Mode:</b> {tooltipState.position.mode ?? 'n/a'} · {tooltipState.position.executionMode ?? 'Demo'}</div>
+          <div className="row-tooltip-section"><b>Entry Rule:</b> {tooltipState.position.entryRule ?? 'n/a'}</div>
+          {tooltipState.position.hasSnapshot === false && <div className="row-tooltip-section status-bad">MISSING ENTRY SNAPSHOT</div>}
+          {tooltipState.position.strategy === 'dip_and_rebound' && (() => {
+            const r = tooltipState.position.reboundPct;
+            const drViolation = r != null && r <= 0;
+            if (drViolation) return <div className="row-tooltip-section status-bad">Invalid D&R entry: rebound missing</div>;
+            return null;
+          })()}
+        </div>,
+        document.body,
       )}
     </section>
   );
