@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Environment, Stars } from '@react-three/drei';
 import { EffectComposer, Bloom } from '@react-three/postprocessing';
-import { useFrame } from '@react-three/fiber';
-import type { Vector3Tuple } from 'three';
-import { CORE_POSITION, QUALITY_PARTICLE_BUDGET, type AirScannerQuality, type AnimationDebugState, type CoinVisualState, type MockScannerCoin, type ScannerToggles } from '../state/airScannerVisualState';
+import { useFrame, useThree } from '@react-three/fiber';
+import { Vector3, type Vector3Tuple } from 'three';
+import { CORE_POSITION, MAX_RENDERED_COINS, QUALITY_PARTICLE_BUDGET, type AirScannerQuality, type AnimationDebugState, type CoinVisualState, type MockScannerCoin, type ScannerToggles, type ScreenPoint } from '../state/airScannerVisualState';
 import { mockScannerCoins } from '../state/mockScannerFeed';
 import { mapMockCoinToVisualState } from '../utils/visualStateMapper';
 import { BLOCKED_PUSH_DURATION_MS, BUY_PULL_DURATION_MS, acquireBuyLightningLock, createAnimationId, getActiveLightningLockCount, getBlockedPushFrame, getBuyPullProgress, getCurvedBuyPullPosition, getQualityParticleMultiplier, releaseBuyLightningLock } from '../utils/animationTimelines';
@@ -11,7 +11,6 @@ import { CoinOrb } from './CoinOrb';
 import { CoreEnergy } from './CoreEnergy';
 import { HolographicGrid } from './HolographicGrid';
 import { LightningArc } from './LightningArc';
-import { OrbitRings } from './OrbitRings';
 import { ParticleTrail } from './ParticleTrail';
 
 interface ScannerSceneProps {
@@ -21,6 +20,8 @@ interface ScannerSceneProps {
   lifecycleId: number;
   onDebugUpdate: (debug: AnimationDebugState) => void;
   onOpenPositionConfirmed: () => void;
+  onTransferSourceUpdate: (point: ScreenPoint | null) => void;
+  onCoinSelect: (coin: MockScannerCoin) => void;
 }
 
 interface CoinFrame {
@@ -39,13 +40,16 @@ function getSceneCoinState(coin: MockScannerCoin, selectedState: CoinVisualState
   return mapMockCoinToVisualState(coin);
 }
 
-export function ScannerScene({ visualState, quality, toggles, lifecycleId, onDebugUpdate, onOpenPositionConfirmed }: ScannerSceneProps) {
+export function ScannerScene({ visualState, quality, toggles, lifecycleId, onDebugUpdate, onOpenPositionConfirmed, onTransferSourceUpdate, onCoinSelect }: ScannerSceneProps) {
+  const { camera, size } = useThree();
   const startTimeRef = useRef(performance.now());
   const animationIdRef = useRef('');
   const lightningLockedRef = useRef(false);
   const performanceAuditRef = useRef(0);
   const framesRef = useRef(0);
   const fpsStartedRef = useRef(performance.now());
+  const sourceProjectRef = useRef(0);
+  const frameStateUpdateRef = useRef(0);
   const [coinFrames, setCoinFrames] = useState<CoinFrame[]>([]);
   const particleCount = Math.round(QUALITY_PARTICLE_BUDGET[quality] * getQualityParticleMultiplier(quality));
 
@@ -87,7 +91,7 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, onDeb
   useFrame(() => {
     const now = performance.now();
     const elapsed = now - startTimeRef.current;
-    const nextFrames = mockScannerCoins.slice(0, 80).map((coin) => {
+    const nextFrames = mockScannerCoins.slice(0, MAX_RENDERED_COINS).map((coin) => {
       const state = getSceneCoinState(coin, visualState);
       let position = coin.position;
       let opacity = 1;
@@ -113,7 +117,21 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, onDeb
       }
       return { coin, state, position, opacity };
     });
-    setCoinFrames(nextFrames);
+    if (now - frameStateUpdateRef.current > 33 || coinFrames.length === 0) {
+      frameStateUpdateRef.current = now;
+      setCoinFrames(nextFrames);
+    }
+    const uniFrame = nextFrames.find((frame) => frame.coin.base === 'UNI');
+    if (uniFrame && (visualState === 'open_position' || uniFrame.state === 'open_position') && now - sourceProjectRef.current > 90) {
+      sourceProjectRef.current = now;
+      const projected = new Vector3(...uniFrame.position).project(camera);
+      onTransferSourceUpdate({
+        x: (projected.x * 0.5 + 0.5) * size.width,
+        y: (-projected.y * 0.5 + 0.5) * size.height,
+      });
+    } else if (visualState !== 'open_position' && now - sourceProjectRef.current > 250) {
+      onTransferSourceUpdate(null);
+    }
 
     framesRef.current += 1;
     const fpsElapsed = now - fpsStartedRef.current;
@@ -138,6 +156,7 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, onDeb
 
   const buyCoinFrame = useMemo(() => coinFrames.find((frame) => frame.coin.base === 'UNI'), [coinFrames]);
   const blockedCoinFrame = useMemo(() => coinFrames.find((frame) => frame.coin.base === 'SUI'), [coinFrames]);
+  const blockedCoinFrames = useMemo(() => coinFrames.filter((frame) => frame.state === 'blocked_push_out'), [coinFrames]);
   const successPulse = visualState === 'open_position' || (visualState === 'buy_pull_to_core' && buyCoinFrame ? buyCoinFrame.opacity < 0.25 : false);
 
   return (
@@ -150,20 +169,25 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, onDeb
       <pointLight position={[-3.6, 2.2, 1.5]} intensity={1.2} color="#ffc04d" />
       <Stars radius={42} depth={18} count={quality === 'low' ? 800 : 1400} factor={2.2} saturation={0} fade speed={0.25} />
       {toggles.backgroundGrid && <HolographicGrid />}
-      <OrbitRings />
       <CoreEnergy successPulse={successPulse} />
       {coinFrames.map((frame) => (
-        <CoinOrb key={frame.coin.symbol} coin={frame.coin} visualState={frame.state} position={frame.position} opacity={frame.opacity} realisticMaterials={toggles.realisticMaterials} />
+        <CoinOrb key={frame.coin.symbol} coin={frame.coin} visualState={frame.state} position={frame.position} opacity={frame.opacity} realisticMaterials={toggles.realisticMaterials} onSelect={onCoinSelect} />
       ))}
       {buyCoinFrame && visualState === 'buy_pull_to_core' && (
         <>
           <LightningArc start={buyCoinFrame.position} end={CORE_POSITION} enabled={toggles.buyLightning && lightningLockedRef.current} />
-          <ParticleTrail position={buyCoinFrame.position} color="#ff52f7" count={toggles.particles ? Math.floor(particleCount * 0.48) : 0} active={toggles.particles} />
+          <ParticleTrail position={buyCoinFrame.position} color="#ff52f7" count={toggles.particles ? Math.floor(particleCount * 0.85) : 0} active={toggles.particles} />
         </>
       )}
-      {blockedCoinFrame && visualState === 'blocked_push_out' && (
-        <ParticleTrail position={blockedCoinFrame.position} color="#ff3158" count={toggles.particles ? Math.floor(particleCount * 0.38) : 0} active={toggles.particles} />
-      )}
+      {blockedCoinFrames.map((frame) => (
+        <ParticleTrail
+          key={`blocked-particles-${frame.coin.symbol}`}
+          position={frame.position}
+          color="#ff3158"
+          count={toggles.particles ? Math.floor(particleCount * (frame.coin.symbol === blockedCoinFrame?.coin.symbol && visualState === 'blocked_push_out' ? 0.72 : 0.18)) : 0}
+          active={toggles.particles}
+        />
+      ))}
       <Environment preset="night" />
       {toggles.bloom && (
         <EffectComposer multisampling={quality === 'low' ? 0 : 2}>

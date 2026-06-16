@@ -1,5 +1,5 @@
 import { Canvas } from '@react-three/fiber';
-import type { AirScannerQuality, AnimationDebugState, CoinVisualState, ScannerToggles } from './state/airScannerVisualState';
+import type { AirScannerQuality, AnimationDebugState, CoinVisualState, MockScannerCoin, ScannerToggles, ScreenPoint } from './state/airScannerVisualState';
 import { QUALITY_DPR } from './state/airScannerVisualState';
 import { ScannerScene } from './components/ScannerScene';
 
@@ -10,6 +10,8 @@ interface AirScannerCanvasProps {
   lifecycleId: number;
   onDebugUpdate: (debug: AnimationDebugState) => void;
   onOpenPositionConfirmed: () => void;
+  onTransferSourceUpdate: (point: ScreenPoint | null) => void;
+  onCoinSelect: (coin: MockScannerCoin) => void;
 }
 
 export function AirScannerCanvas(props: AirScannerCanvasProps) {
@@ -17,7 +19,7 @@ export function AirScannerCanvas(props: AirScannerCanvasProps) {
     <Canvas
       className="air-scanner-lab-canvas"
       dpr={QUALITY_DPR[props.quality]}
-      camera={{ position: [0, 4.15, 7.6], fov: 44, near: 0.1, far: 100 }}
+      camera={{ position: [0, 5.05, 9.8], fov: 50, near: 0.1, far: 100 }}
       gl={{ antialias: props.quality !== 'low', powerPreference: 'high-performance', alpha: false }}
     >
       <ScannerScene {...props} />

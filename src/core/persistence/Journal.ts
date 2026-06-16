@@ -44,11 +44,13 @@ export class Journal {
   private async consumeResetMarkerIfPresent(): Promise<void> {
     const marker = this.readResetMarker();
     if (!marker) return;
-    logger.info(`RESET_MARKER_CONSUMED: resetScope=${marker.resetScope} resetAt=${marker.resetAt} resetVersion=${marker.resetVersion}`);
+    const primaryOpen = this.readOpenPosFallback();
+    const primaryClosed = this.readClosedTradesFallback();
+    logger.info(`RESET_MARKER_FOUND_AT_BOOT: resetScope=${marker.resetScope} resetAt=${marker.resetAt} resetVersion=${marker.resetVersion} primaryOpenCount=${primaryOpen.length} primaryClosedCount=${primaryClosed.length} willClear=${String(marker.resetScope === 'reset_trading' || marker.resetScope === 'full_demo_reset')} wasExplicitReset=true`);
     if (marker.resetScope === 'reset_trading' || marker.resetScope === 'full_demo_reset') {
       this.writeOpenPosFallback([]);
       this.writeClosedTradesFallback([]);
-      logger.info(`STALE_BACKUP_IGNORED_AFTER_RESET: storageKeys=${this.openPosBackupKey}|${this.closedTradesBackupKey} resetAt=${marker.resetAt}`);
+      logger.info(`RESET_MARKER_CONSUMED: resetScope=${marker.resetScope} resetAt=${marker.resetAt} resetVersion=${marker.resetVersion} clearedOpenCount=${primaryOpen.length} clearedClosedCount=${primaryClosed.length}`);
       if (this.useTauri && this.tauriReady) {
         try { await tauriDb.clearOpenPositions(); } catch { /* ignore */ }
         try { await tauriDb.clearTrades(); } catch { /* ignore */ }
@@ -71,7 +73,15 @@ export class Journal {
       const backupSavedAt = Array.isArray(parsedBackup) && parsedBackup.length > 0 ? parsedBackup[0]?.saved_at : undefined;
       let selectedSource: 'primary' | 'backup' | 'none' = 'none';
       let selectedRows: typeof parsedPrimary = [];
-      if (primaryOpenCount > 0) {
+      if (primaryOpenCount > 0 && backupOpenCount > 0 && backupOpenCount > primaryOpenCount) {
+        const primarySymbols = (parsedPrimary as any[]).map((r: any) => r.symbol).sort().join('|');
+        const backupSymbols = (parsedBackup as any[]).map((r: any) => r.symbol).sort().join('|');
+        const missingInPrimary = (parsedBackup as any[]).filter((br: any) => !(parsedPrimary as any[]).some((pr: any) => pr.trade_id === br.trade_id));
+        logger.warn(`POSITION_PERSISTENCE_PRIMARY_TRUNCATED: primaryOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} primarySymbols=${primarySymbols} backupSymbols=${backupSymbols} missingFromPrimary=${missingInPrimary.length} missingTradeIds=${missingInPrimary.map((r: any) => r.trade_id).join('|') || 'none'} missingSymbols=${missingInPrimary.map((r: any) => r.symbol).join('|') || 'none'} action=recover_from_backup`);
+        selectedSource = 'backup';
+        selectedRows = parsedBackup;
+        logger.info(`OPEN_POSITIONS_BACKUP_RECOVERY: primaryOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} recoveredCount=${parsedBackup.length} recoveredSymbols=${backupSymbols} reason=primary_truncated_backup_newer`);
+      } else if (primaryOpenCount > 0) {
         selectedSource = 'primary';
         selectedRows = parsedPrimary;
       } else if (backupOpenCount > 0) {
@@ -81,14 +91,11 @@ export class Journal {
       } else {
         selectedSource = 'none';
       }
-      logger.info(`POSITION_PERSISTENCE_READ_AUDIT: foundState=${selectedSource !== 'none'} storageTarget=localStorage storageKey=${this.openPosKey} openCountLoaded=${selectedSource === 'primary' ? primaryOpenCount : selectedSource === 'backup' ? backupOpenCount : 0} symbolsLoaded=${selectedRows.map((r: any) => r.symbol).join('|') || 'none'} primaryOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} savedAt=${selectedSource === 'primary' ? primarySavedAt : selectedSource === 'backup' ? backupSavedAt : 'n/a'} parseSuccess=true reasonIfEmpty=${selectedSource === 'none' ? 'both_primary_and_backup_empty' : 'none'} timestamp=${new Date().toISOString()}`);
+      logger.info(`POSITION_PERSISTENCE_READ_AUDIT: foundState=${selectedSource !== 'none'} storageTarget=localStorage storageKey=${this.openPosKey} openCountLoaded=${selectedRows.length} symbolsLoaded=${selectedRows.map((r: any) => r.symbol).join('|') || 'none'} primaryOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} savedAt=${selectedSource === 'primary' ? primarySavedAt : selectedSource === 'backup' ? backupSavedAt : 'n/a'} parseSuccess=true reasonIfEmpty=${selectedSource === 'none' ? 'both_primary_and_backup_empty' : 'none'} timestamp=${new Date().toISOString()}`);
       logger.info(`POSITION_PERSISTENCE_STORAGE_${primaryOpenCount > 0 ? 'FOUND' : 'EMPTY'}: mode=demo storageKey=${this.openPosKey} persistedOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} hydrationComplete=${String(this.openPositionsHydrated)} reason=fallback_read_primary`);
       logger.info(`POSITION_PERSISTENCE_BACKUP_${backupOpenCount > 0 ? 'FOUND' : 'EMPTY'}: mode=demo backupKey=${this.openPosBackupKey} persistedOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} hydrationComplete=${String(this.openPositionsHydrated)} reason=fallback_read_backup`);
-      if (Array.isArray(parsedPrimary) && parsedPrimary.length > 0) return parsedPrimary;
-      if (Array.isArray(parsedBackup) && parsedBackup.length > 0) {
-        logger.info(`OPEN_POSITIONS_RESTORED_FROM_CRITICAL_BACKUP: mode=demo storageKey=${this.openPosKey} backupKey=${this.openPosBackupKey} persistedOpenCount=${primaryOpenCount} backupOpenCount=${backupOpenCount} positionManagerOpenCount=0 uiOpenRowsCount=0 restoredSymbols=${parsedBackup.map(p => p.symbol).join('|') || 'none'} resetMetaDetected=false resetApplied=false hydrationComplete=${String(this.openPositionsHydrated)} reason=primary_empty_backup_available`);
-        return parsedBackup;
-      }
+      if (selectedRows.length > 0) return selectedRows;
+      if (selectedRows.length > 0) return selectedRows;
     } catch (err) {
       logger.warn(`OPEN_POSITIONS_RESTORE_FAILED: source=fallback error=${err instanceof Error ? err.message : String(err)}`);
     }
@@ -497,7 +504,15 @@ export class Journal {
       return;
     }
     const existing = await this.loadOpenPositions();
+    const deleted = existing.find(p => p.trade_id === tradeId);
     this.writeOpenPosFallback(existing.filter(p => p.trade_id !== tradeId));
+    const closedRecord = this.getClosedTrades().find(t => t.tradeId === tradeId);
+    const removalAllowed = !!closedRecord && closedRecord.status === 'closed';
+    const reason = removalAllowed ? 'sell_confirmed_closed_record_exists' : 'no_closed_record';
+    logger.info(`OPEN_POSITION_REMOVAL_INVARIANT: symbol=${deleted?.symbol ?? 'n/a'} positionId=${tradeId} removalReason=${reason} sellConfirmed=${String(!!closedRecord)} closedRecordCreated=${String(!!closedRecord && closedRecord.status === 'closed')} persistenceConfirmed=true allowed=${String(removalAllowed)}`);
+    if (!removalAllowed) {
+      logger.warn(`OPEN_POSITION_REMOVAL_WITHOUT_CLOSED_RECORD: tradeId=${tradeId} symbol=${deleted?.symbol ?? 'n/a'} action=removed_anyway_pending_closed_record investigationNeeded=${String(!closedRecord)}`);
+    }
     if (!this.useTauri || !this.tauriReady) return;
     try {
       await tauriDb.deleteOpenPosition(tradeId);

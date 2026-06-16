@@ -54,6 +54,11 @@ export interface AnimationDebugState {
   renderedCoins: number;
 }
 
+export interface ScreenPoint {
+  x: number;
+  y: number;
+}
+
 export const DEFAULT_TOGGLES: ScannerToggles = {
   realisticMaterials: true,
   particles: true,
@@ -77,4 +82,6 @@ export const QUALITY_PARTICLE_BUDGET: Record<AirScannerQuality, number> = {
   ultra: 320,
 };
 
-export const CORE_POSITION: Vector3Tuple = [0, 0.92, 0];
+export const MAX_RENDERED_COINS = 40;
+
+export const CORE_POSITION: Vector3Tuple = [0, 0.34, 0];

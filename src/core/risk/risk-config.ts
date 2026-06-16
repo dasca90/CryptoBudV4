@@ -7,7 +7,7 @@ export const DEFAULT_RISK_CONFIG: RiskConfig = {
   maxPositionSizePercent: 10,
   maxPositionSizeUsd: 1000,
   maxCapitalAtRiskPerTrade: 200,
-  maxCapitalAtRiskTotal: 2000,
+  maxCapitalAtRiskTotal: 10000,
   maxDailyTrades: 20,
   maxConsecutiveLosses: 5,
   minWinRate: 0.3,

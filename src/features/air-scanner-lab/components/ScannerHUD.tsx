@@ -1,20 +1,156 @@
-import type { AnimationDebugState, CoinVisualState, OpenPositionVisualRow } from '../state/airScannerVisualState';
+import { useEffect, useRef, useState, type MutableRefObject, type RefObject } from 'react';
+import type { AnimationDebugState, CoinVisualState, MockScannerCoin, OpenPositionVisualRow, ScreenPoint } from '../state/airScannerVisualState';
 import { scanChecklist } from '../state/mockScannerFeed';
+import { createOpenPositionTransferAudit, createTransferBeamPath, getOpenPositionRowAnchor, shouldStartOpenPositionTransfer } from '../utils/openPositionTransfer';
 import { getVisualStateLabel } from '../utils/visualStateMapper';
 
 interface ScannerHUDProps {
   visualState: CoinVisualState;
   debug: AnimationDebugState;
   openPositions: OpenPositionVisualRow[];
+  openPositionConfirmed: boolean;
+  transferSource: ScreenPoint | null;
+  transferLifecycleId: number;
+  selectedCoin: MockScannerCoin | null;
 }
 
-export function ScannerHUD({ visualState, debug, openPositions }: ScannerHUDProps) {
+interface TransferBeamState {
+  path: string;
+  source: ScreenPoint;
+  target: ScreenPoint;
+  startedAt: string;
+  lifecycleId: number;
+}
+
+function OpenPositionTransferOverlay({
+  source,
+  openPositionConfirmed,
+  lifecycleId,
+  stageRef,
+  rowRefs,
+}: {
+  source: ScreenPoint | null;
+  openPositionConfirmed: boolean;
+  lifecycleId: number;
+  stageRef: RefObject<HTMLDivElement>;
+  rowRefs: MutableRefObject<Record<string, HTMLDivElement | null>>;
+}) {
+  const completedLifecyclesRef = useRef(new Set<number>());
+  const skippedLifecycleRef = useRef<number | null>(null);
+  const [beam, setBeam] = useState<TransferBeamState | null>(null);
+
+  useEffect(() => {
+    if (!openPositionConfirmed) {
+      setBeam(null);
+      return;
+    }
+    if (completedLifecyclesRef.current.has(lifecycleId)) return;
+
+    const stage = stageRef.current;
+    const row = rowRefs.current.UNIUSDT;
+    const decision = shouldStartOpenPositionTransfer({
+      symbol: 'UNIUSDT',
+      expectedSymbol: 'UNIUSDT',
+      openPositionConfirmed,
+      rowFound: Boolean(row),
+      targetPanelMounted: Boolean(stage),
+      lifecycleId,
+      completedLifecycles: completedLifecyclesRef.current,
+    });
+
+    if (!source || !decision.start) {
+      if (skippedLifecycleRef.current !== lifecycleId && decision.reason) {
+        skippedLifecycleRef.current = lifecycleId;
+        console.info('OPEN_POSITION_TRANSFER_SKIPPED', {
+          symbol: 'UNIUSDT',
+          reason: !source ? 'open position not confirmed' : decision.reason,
+          timestamp: new Date().toISOString(),
+        });
+      }
+      return;
+    }
+
+    if (!stage || !row) return;
+    completedLifecyclesRef.current.add(lifecycleId);
+    const startedAt = new Date().toISOString();
+    const target = getOpenPositionRowAnchor(stage.getBoundingClientRect(), row.getBoundingClientRect());
+    const nextBeam = {
+      path: createTransferBeamPath(source, target),
+      source,
+      target,
+      startedAt,
+      lifecycleId,
+    };
+
+    setBeam(nextBeam);
+    console.info('OPEN_POSITION_TRANSFER_AUDIT', createOpenPositionTransferAudit({
+      symbol: 'UNIUSDT',
+      rowFound: true,
+      rowHighlighted: true,
+      beamStartedAt: startedAt,
+    }));
+
+    const completeId = window.setTimeout(() => {
+      console.info('OPEN_POSITION_TRANSFER_AUDIT', createOpenPositionTransferAudit({
+        symbol: 'UNIUSDT',
+        rowFound: true,
+        rowHighlighted: true,
+        beamStartedAt: startedAt,
+        beamCompletedAt: new Date().toISOString(),
+      }));
+      setBeam(null);
+    }, 3400);
+
+    return () => window.clearTimeout(completeId);
+  }, [source, openPositionConfirmed, lifecycleId, rowRefs, stageRef]);
+
+  if (!beam) return null;
+
+  return (
+    <svg className="air-lab-transfer-overlay" aria-hidden="true">
+      <defs>
+        <filter id="air-lab-transfer-glow" x="-35%" y="-35%" width="170%" height="170%">
+          <feGaussianBlur stdDeviation="6" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+        <linearGradient id="air-lab-transfer-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor="#2dffe1" stopOpacity="0.15" />
+          <stop offset="42%" stopColor="#6dffd7" stopOpacity="1" />
+          <stop offset="100%" stopColor="#18ff9c" stopOpacity="0.92" />
+        </linearGradient>
+      </defs>
+      <path className="air-lab-transfer-path-glow" d={beam.path} />
+      <path className="air-lab-transfer-path-core" d={beam.path} />
+      <circle className="air-lab-transfer-origin" cx={beam.source.x} cy={beam.source.y} r="14" />
+      <circle className="air-lab-transfer-impact" cx={beam.target.x} cy={beam.target.y} r="18" />
+      {[0, 0.18, 0.36, 0.54].map((delay) => (
+        <circle key={delay} className="air-lab-transfer-particle" r="4">
+          <animateMotion dur="1.55s" begin={`${delay}s`} repeatCount="2" path={beam.path} />
+        </circle>
+      ))}
+    </svg>
+  );
+}
+
+export function ScannerHUD({ visualState, debug, openPositions, openPositionConfirmed, transferSource, transferLifecycleId, selectedCoin }: ScannerHUDProps) {
+  const stageRef = useRef<HTMLDivElement>(null);
+  const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const showScanPanel = visualState === 'scanning';
   const showWaitPanel = visualState === 'wait';
   const showBlockedPanel = visualState === 'blocked_push_out';
 
   return (
-    <div className="air-lab-hud" aria-label="Scanner visual telemetry">
+    <div ref={stageRef} className="air-lab-hud" aria-label="Scanner visual telemetry">
+      <OpenPositionTransferOverlay
+        source={transferSource}
+        openPositionConfirmed={openPositionConfirmed}
+        lifecycleId={transferLifecycleId}
+        stageRef={stageRef}
+        rowRefs={rowRefs}
+      />
       <div className="air-lab-title">
         <span>3D Air Scanner Lab</span>
         <strong>{getVisualStateLabel(visualState)}</strong>
@@ -53,6 +189,21 @@ export function ScannerHUD({ visualState, debug, openPositions }: ScannerHUDProp
         </section>
       )}
 
+      {selectedCoin && (
+        <section className="air-lab-selected-card">
+          <header>
+            <b>{selectedCoin.base}</b>
+            <span>{selectedCoin.symbol}</span>
+          </header>
+          <strong>{selectedCoin.price}</strong>
+          <p>Score {selectedCoin.score} / 100</p>
+          <div>
+            <span>{selectedCoin.group}</span>
+            <span>Risk {selectedCoin.risk}</span>
+          </div>
+        </section>
+      )}
+
       <section className="air-lab-positions">
         <header>
           <b>Open Positions</b>
@@ -68,14 +219,25 @@ export function ScannerHUD({ visualState, debug, openPositions }: ScannerHUDProp
           <span>Risk</span>
         </div>
         {openPositions.map((row) => (
-          <div key={row.symbol} className={`air-lab-position-grid ${row.highlighted ? 'is-highlighted' : ''}`}>
-            <span>{row.symbol}</span>
+          <div
+            key={row.symbol}
+            ref={(node) => {
+              rowRefs.current[row.symbol] = node;
+            }}
+            data-symbol={row.symbol}
+            className={`air-lab-position-grid ${row.highlighted ? 'is-highlighted' : ''}`}
+          >
+            <span className="air-lab-symbol-cell">
+              {row.symbol}
+              {row.highlighted && <em>NEW</em>}
+            </span>
             <span>{row.state}</span>
             <span>{row.entry}</span>
             <span>{row.value}</span>
             <span>{row.pnlPct}</span>
             <span>{row.pnlUsd}</span>
             <span>{row.risk}</span>
+            {row.highlighted && <i className="air-lab-ecg-line" aria-hidden="true" />}
           </div>
         ))}
       </section>

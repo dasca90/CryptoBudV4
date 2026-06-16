@@ -244,8 +244,21 @@ export default function App() {
         setTotalEquity(paperAdapter.getTotalEquity());
       }
       journal.markOpenPositionsHydrated();
+      const pmOpenCount = engine.getPositionManager().getOpenPositions().length;
+      const pmSymbols = engine.getPositionManager().getOpenPositions().map(p => p.coin).sort();
+      const persistedSymbols = savedPositions.map(p => p.symbol).sort();
+      const closedTradeIds = new Set(journal.getClosedTrades().map(t => t.tradeId).filter(Boolean));
+      const missingFromHydration = savedPositions.filter(sp => !pmSymbols.includes(sp.symbol));
+      const closedSet = new Set(journal.getClosedTrades().map(t => t.tradeId).filter(Boolean));
+      logger.info(`OPEN_POSITIONS_HYDRATION_AUDIT: mode=demo beforeHydrationStoreOpenCount=${savedPositions.length} persistedOpenCount=${savedPositions.length} persistedClosedCount=${journal.getClosedTrades().length} backupOpenCount=n/a backupClosedCount=n/a positionManagerOpenCountAfterHydration=${pmOpenCount} uiOpenRowsAfterHydration=${pmOpenCount} symbolsPersistedOpen=${persistedSymbols.join('|') || 'none'} symbolsHydratedOpen=${pmSymbols.join('|') || 'none'} symbolsMissingAfterHydration=${missingFromHydration.map(p => p.symbol).join('|') || 'none'} activeFilters=none resetMetaDetected=false resetApplied=false migrationApplied=false storageSourceUsed=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri' : 'localStorage'} fallbackSourceUsed=false timestamp=${new Date().toISOString()}`);
+      if (missingFromHydration.length > 0) {
+        const missingSymbols = missingFromHydration.map(p => p.symbol);
+        const wasFilteredByClosed = missingFromHydration.filter(p => closedTradeIds.has(p.trade_id)).map(p => p.symbol);
+        const wasDuplicateCoin = missingFromHydration.filter(p => pmSymbols.includes(p.symbol)).map(p => p.symbol);
+        logger.warn(`OPEN_POSITIONS_LOSS_DETECTED: previousPersistedOpenCount=${savedPositions.length} hydratedOpenCount=${pmOpenCount} missingSymbols=${missingSymbols.join('|')} missingTradeIds=${missingFromHydration.map(p => p.trade_id).join('|')} filteredByClosedTrades=${wasFilteredByClosed.join('|') || 'none'} duplicateCoinConflict=${wasDuplicateCoin.join('|') || 'none'} storageSourceUsed=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri' : 'localStorage'} reason=${wasFilteredByClosed.length > 0 ? 'filtered_by_closed_trades' : wasDuplicateCoin.length > 0 ? 'duplicate_coin_in_restore' : 'unknown'} actionTaken=logged_loss`);
+      }
       logger.info(`POSITION_BOOT_HYDRATION_ORDER_AUDIT: bootStep=position_manager_hydrated hydrationCompleted=true positionManagerHydrated=true storeHydrated=${String(!!(journal as any).tauriReady)} scannerStarted=false paperHoldingsReconciled=false uiBoundAfterHydration=true emptyWriteBlocked=true`);
-      logger.info(`OPEN_POSITIONS_NOT_CLEARED_ON_BOOT: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=0 restoredSymbols=${engine.getPositionManager().getOpenPositions().map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=no_implicit_clear`);
+      logger.info(`OPEN_POSITIONS_NOT_CLEARED_ON_BOOT: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${pmOpenCount} uiOpenRowsCount=${pmOpenCount} restoredSymbols=${pmSymbols.join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=no_implicit_clear`);
 
       // Load ML brain
       const loadedBrain = loadMLBrain();

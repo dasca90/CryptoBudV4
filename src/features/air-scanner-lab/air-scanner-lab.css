@@ -114,6 +114,116 @@
   pointer-events: none;
 }
 
+.air-lab-transfer-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.air-lab-transfer-path-glow,
+.air-lab-transfer-path-core {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: url("#air-lab-transfer-glow");
+}
+
+.air-lab-transfer-path-glow {
+  stroke: rgba(36, 255, 210, 0.34);
+  stroke-width: 18;
+  stroke-dasharray: 940;
+  stroke-dashoffset: 940;
+  animation: airLabTransferDraw 3.1s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+.air-lab-transfer-path-core {
+  stroke: url("#air-lab-transfer-gradient");
+  stroke-width: 5;
+  stroke-dasharray: 940;
+  stroke-dashoffset: 940;
+  animation: airLabTransferDraw 2.6s cubic-bezier(0.2, 0.8, 0.2, 1) forwards, airLabTransferFade 3.4s ease forwards;
+}
+
+.air-lab-transfer-origin,
+.air-lab-transfer-impact {
+  fill: none;
+  stroke: rgba(48, 255, 218, 0.9);
+  stroke-width: 2;
+  filter: url("#air-lab-transfer-glow");
+  transform-origin: center;
+  animation: airLabTransferPulse 1.4s ease-in-out infinite;
+}
+
+.air-lab-transfer-impact {
+  stroke: rgba(50, 255, 170, 0.95);
+  animation-duration: 1s;
+}
+
+.air-lab-transfer-particle {
+  fill: #d7fff4;
+  filter: url("#air-lab-transfer-glow");
+  opacity: 0.95;
+}
+
+.air-lab-orb-label {
+  min-width: 45px;
+  padding: 3px 5px 4px;
+  border: 1px solid color-mix(in srgb, var(--orb-accent) 72%, transparent);
+  border-radius: 5px;
+  background:
+    radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--orb-accent) 28%, transparent), transparent 58%),
+    rgba(2, 13, 24, 0.72);
+  box-shadow:
+    0 0 10px color-mix(in srgb, var(--orb-accent) 34%, transparent),
+    inset 0 0 8px rgba(255, 255, 255, 0.07);
+  color: var(--orb-label);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: center;
+  text-shadow: 0 0 8px rgba(0, 0, 0, 0.95), 0 0 10px color-mix(in srgb, var(--orb-accent) 50%, transparent);
+  transform: translateZ(0);
+  user-select: none;
+  white-space: nowrap;
+}
+
+.air-lab-orb-label strong,
+.air-lab-orb-label span,
+.air-lab-orb-label em {
+  display: block;
+  letter-spacing: 0;
+}
+
+.air-lab-orb-label strong {
+  font-size: 11px;
+  line-height: 12px;
+  font-weight: 900;
+}
+
+.air-lab-orb-label span {
+  margin-top: 1px;
+  font-size: 7px;
+  line-height: 9px;
+  font-weight: 800;
+}
+
+.air-lab-orb-label em {
+  width: fit-content;
+  min-width: 28px;
+  margin: 3px auto -1px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--orb-accent) 22%, rgba(2, 13, 24, 0.9));
+  color: var(--orb-label);
+  font-size: 7px;
+  line-height: 9px;
+  font-style: normal;
+  font-weight: 900;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--orb-accent) 60%, transparent);
+}
+
 .air-lab-title {
   position: absolute;
   top: 22px;
@@ -166,6 +276,67 @@
 .air-lab-floating em {
   color: #1dffa9;
   font-style: normal;
+}
+
+.air-lab-selected-card {
+  position: absolute;
+  left: 30px;
+  bottom: 126px;
+  width: 210px;
+  padding: 12px;
+  border: 1px solid rgba(51, 238, 255, 0.36);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 18% 0%, rgba(43, 255, 226, 0.18), transparent 48%),
+    rgba(2, 13, 26, 0.76);
+  box-shadow: 0 0 30px rgba(20, 218, 255, 0.16);
+  backdrop-filter: blur(12px);
+}
+
+.air-lab-selected-card header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.air-lab-selected-card b {
+  color: #f4fbff;
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.air-lab-selected-card header span,
+.air-lab-selected-card p,
+.air-lab-selected-card div span {
+  color: #8fb7ca;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.air-lab-selected-card strong {
+  display: block;
+  color: #2dffe1;
+  font-size: 15px;
+  line-height: 18px;
+}
+
+.air-lab-selected-card p {
+  margin: 8px 0;
+}
+
+.air-lab-selected-card div {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.air-lab-selected-card div span {
+  padding: 4px 7px;
+  border: 1px solid rgba(60, 221, 255, 0.22);
+  border-radius: 5px;
+  background: rgba(8, 42, 64, 0.52);
 }
 
 .air-lab-wait-card {
@@ -230,6 +401,7 @@
 }
 
 .air-lab-position-grid {
+  position: relative;
   display: grid;
   grid-template-columns: 1.2fr 1.2fr 0.8fr 0.9fr 0.8fr 0.8fr 0.6fr;
   gap: 10px;
@@ -257,9 +429,55 @@
 .air-lab-position-grid.is-highlighted {
   position: relative;
   color: #edfffa;
-  background: rgba(0, 255, 188, 0.16);
-  box-shadow: inset 0 0 0 1px rgba(33, 255, 208, 0.55), 0 0 34px rgba(0, 255, 196, 0.25);
+  background: linear-gradient(90deg, rgba(0, 255, 188, 0.28), rgba(0, 255, 188, 0.12) 42%, rgba(0, 255, 188, 0.03));
+  box-shadow: inset 0 0 0 1px rgba(33, 255, 208, 0.78), 0 0 34px rgba(0, 255, 196, 0.35);
   animation: airLabRowPulse 2s ease-in-out infinite;
+}
+
+.air-lab-position-grid.is-highlighted::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: #35ffd6;
+  box-shadow: 0 0 18px rgba(53, 255, 214, 0.9);
+}
+
+.air-lab-symbol-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.air-lab-symbol-cell em {
+  display: inline-grid;
+  place-items: center;
+  min-width: 34px;
+  height: 16px;
+  border: 1px solid rgba(52, 255, 188, 0.48);
+  border-radius: 4px;
+  background: rgba(0, 255, 174, 0.14);
+  color: #41ffc4;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.air-lab-ecg-line {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  width: 82px;
+  height: 25px;
+  transform: translateY(-50%);
+  opacity: 0.92;
+  background:
+    linear-gradient(90deg, transparent 0 6%, #38ffd7 6% 8%, transparent 8% 16%, #38ffd7 16% 19%, transparent 19% 30%, #38ffd7 30% 34%, transparent 34% 44%, #38ffd7 44% 46%, transparent 46% 100%);
+  clip-path: polygon(0 54%, 18% 54%, 24% 38%, 31% 70%, 38% 20%, 45% 54%, 62% 54%, 68% 42%, 74% 60%, 100% 60%, 100% 64%, 74% 64%, 68% 48%, 62% 58%, 45% 58%, 38% 28%, 31% 78%, 24% 46%, 18% 58%, 0 58%);
+  filter: drop-shadow(0 0 8px rgba(45, 255, 218, 0.85));
 }
 
 .air-lab-debug {
@@ -308,6 +526,34 @@
   }
   50% {
     filter: brightness(1.26);
+  }
+}
+
+@keyframes airLabTransferDraw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes airLabTransferFade {
+  0%,
+  78% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes airLabTransferPulse {
+  0%,
+  100% {
+    transform: scale(0.82);
+    opacity: 0.65;
+  }
+  50% {
+    transform: scale(1.22);
+    opacity: 1;
   }
 }
 

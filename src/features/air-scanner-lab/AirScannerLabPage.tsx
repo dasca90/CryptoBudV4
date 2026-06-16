@@ -3,7 +3,7 @@ import { AirScannerCanvas } from './AirScannerCanvas';
 import { ScannerHUD } from './components/ScannerHUD';
 import { StateControlPanel } from './components/StateControlPanel';
 import { confirmedUniPosition, mockOpenPositions } from './state/mockScannerFeed';
-import { DEFAULT_TOGGLES, type AirScannerQuality, type AnimationDebugState, type CoinVisualState, type ScannerToggles } from './state/airScannerVisualState';
+import { DEFAULT_TOGGLES, type AirScannerQuality, type AnimationDebugState, type CoinVisualState, type MockScannerCoin, type ScannerToggles, type ScreenPoint } from './state/airScannerVisualState';
 import './air-scanner-lab.css';
 
 const emptyDebug: AnimationDebugState = {
@@ -23,6 +23,8 @@ export function AirScannerLabPage() {
   const [debug, setDebug] = useState<AnimationDebugState>(emptyDebug);
   const [lifecycleId, setLifecycleId] = useState(1);
   const [openPositionConfirmed, setOpenPositionConfirmed] = useState(false);
+  const [transferSource, setTransferSource] = useState<ScreenPoint | null>(null);
+  const [selectedCoin, setSelectedCoin] = useState<MockScannerCoin | null>(null);
 
   const openPositions = useMemo(() => (openPositionConfirmed || visualState === 'open_position' ? [confirmedUniPosition, ...mockOpenPositions] : mockOpenPositions), [openPositionConfirmed, visualState]);
 
@@ -73,12 +75,22 @@ export function AirScannerLabPage() {
           toggles={toggles}
           lifecycleId={lifecycleId}
           onDebugUpdate={setDebug}
+          onTransferSourceUpdate={setTransferSource}
+          onCoinSelect={setSelectedCoin}
           onOpenPositionConfirmed={() => {
             setOpenPositionConfirmed(true);
             setVisualState('open_position');
           }}
         />
-        <ScannerHUD visualState={visualState} debug={debug} openPositions={openPositions} />
+        <ScannerHUD
+          visualState={visualState}
+          debug={debug}
+          openPositions={openPositions}
+          openPositionConfirmed={openPositionConfirmed || visualState === 'open_position'}
+          transferSource={transferSource}
+          transferLifecycleId={lifecycleId}
+          selectedCoin={selectedCoin}
+        />
       </section>
     </main>
   );
