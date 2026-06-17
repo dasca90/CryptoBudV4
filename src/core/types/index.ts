@@ -1777,7 +1777,7 @@ export function createDefaultAppSettings(): AppSettings {
     cooldownAfterLossMs: 60000,
     riskStyle: 'moderate',
     capitalPerTrade: 100,
-    maxPositions: 10,
+    maxPositions: 24,
     allowedGroups: 'all',
     manualScannerBanlist: [],
     scannerBanlist: [],

@@ -31,7 +31,12 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
   const v = props.value;
   const auto = props.paperAutoEnabled ?? v.paperAutoEnabled;
   const manualOverrideActive = v.strategySource === 'manual_override';
-  const patch = <K extends keyof TradingParametersView>(k: K, val: TradingParametersView[K]) => props.onChange({ ...v, [k]: val });
+  const [applyState, setApplyState] = useState<'idle' | 'applying' | 'applied' | 'error'>('idle');
+  const [dirty, setDirty] = useState(false);
+  const patch = <K extends keyof TradingParametersView>(k: K, val: TradingParametersView[K]) => {
+    setDirty(true);
+    props.onChange({ ...v, [k]: val });
+  };
   const patchMaxSelectedPerScan = (raw: string) => {
     const next = Math.max(1, Math.min(20, Math.floor(Number(raw) || 10)));
     props.onChange({ ...v, maxSelectedPerScan: next, maxEntriesPerCycle: next, maxSelectedPerScanUserSet: true });
@@ -102,9 +107,38 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
       </div>
       {props.onApply && (
         <div style={{ marginBottom: 6 }}>
-          <button className="btn btn-primary" onClick={props.onApply} style={{ fontSize: 10, padding: '3px 10px', width: '100%' }}>
-            Apply Settings
+          <button
+            className={`btn ${dirty ? 'btn-green' : 'btn-outline'}`}
+            disabled={applyState === 'applying'}
+            onClick={async () => {
+              setApplyState('applying');
+              try {
+                await props.onApply!();
+                setDirty(false);
+                setApplyState('applied');
+                setTimeout(() => setApplyState('idle'), 2000);
+              } catch {
+                setApplyState('error');
+                setTimeout(() => setApplyState('idle'), 3000);
+              }
+            }}
+            style={{ fontSize: 11, fontWeight: 700, padding: '6px 10px', width: '100%' }}
+          >
+            {applyState === 'applying' ? 'APPLYING...' : applyState === 'applied' ? 'APPLIED ✓' : applyState === 'error' ? 'ERROR — Retry' : 'APPLY SETTINGS'}
           </button>
+          {dirty && (
+            <div style={{ fontSize: 9, color: '#d29922', marginTop: 2, textAlign: 'center' }}>
+              Unsaved changes — click Apply Settings
+            </div>
+          )}
+          {applyState === 'applied' && (
+            <div style={{ fontSize: 9, color: '#3fb950', marginTop: 2, textAlign: 'center' }}>
+              Applied at {new Date().toLocaleTimeString()}
+            </div>
+          )}
+          <div style={{ fontSize: 8, color: '#484f58', marginTop: 4, textAlign: 'center' }}>
+            Pushes to Scanner, RiskEngine, EntryGate, and persistence.
+          </div>
         </div>
       )}
       <div className="param-grid">

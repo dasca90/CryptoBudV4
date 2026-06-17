@@ -185,7 +185,7 @@
   stroke-width: 12;
   stroke-dasharray: 940;
   stroke-dashoffset: 940;
-  animation: airLabTransferDraw 1.8s cubic-bezier(0.2, 0.8, 0.2, 1) forwards, airLabTransferFade 20s ease forwards;
+  animation: airLabTransferDraw 1.8s cubic-bezier(0.2, 0.8, 0.2, 1) forwards, airLabTransferFade 30s ease forwards;
 }
 
 .air-lab-transfer-path-core {
@@ -193,7 +193,7 @@
   stroke-width: 2.4;
   stroke-dasharray: 940;
   stroke-dashoffset: 940;
-  animation: airLabTransferDraw 1.35s cubic-bezier(0.2, 0.8, 0.2, 1) forwards, airLabTransferFade 20s ease forwards;
+  animation: airLabTransferDraw 1.35s cubic-bezier(0.2, 0.8, 0.2, 1) forwards, airLabTransferFade 30s ease forwards;
 }
 
 .air-lab-transfer-atom {
@@ -202,6 +202,14 @@
   stroke-width: 0.2;
   filter: url("#air-lab-transfer-glow");
   opacity: var(--orb-opacity);
+}
+
+.air-lab-transfer-stream-particle {
+  fill: rgba(210, 255, 246, var(--orb-opacity));
+  stroke: rgba(60, 255, 211, 0.52);
+  stroke-width: 0.35;
+  filter: url("#air-lab-transfer-glow");
+  opacity: 0;
 }
 
 .air-lab-orb-label {

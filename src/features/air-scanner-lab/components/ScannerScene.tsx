@@ -8,7 +8,7 @@ import { mockScannerCoins } from '../state/mockScannerFeed';
 import { mapMockCoinToVisualState } from '../utils/visualStateMapper';
 import { BUY_PULL_DURATION_MS, acquireBuyLightningLock, createAnimationId, getBlockedPushFrame, getBuyPullProgress, getQualityParticleMultiplier, releaseBuyLightningLock } from '../utils/animationTimelines';
 import { CoinOrb } from './CoinOrb';
-import { CoreEnergy } from './CoreEnergy';
+import { CoreEnergy, getScanPulseFrame } from './CoreEnergy';
 import { HolographicGrid } from './HolographicGrid';
 import { ParticleTrail } from './ParticleTrail';
 
@@ -29,6 +29,7 @@ interface CoinFrame {
   position: Vector3Tuple;
   opacity: number;
   transferProgress?: number;
+  scanPulseIntensity?: number;
 }
 
 function getSceneCoinState(coin: MockScannerCoin, selectedState: CoinVisualState): CoinVisualState {
@@ -88,9 +89,10 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, onDeb
     };
   }, [visualState, lifecycleId, toggles.buyLightning]);
 
-  useFrame(() => {
+  useFrame((stateFrame) => {
     const now = performance.now();
     const elapsed = now - startTimeRef.current;
+    const scanFrame = getScanPulseFrame(stateFrame.clock.elapsedTime);
     const nextFrames = mockScannerCoins.slice(0, MAX_RENDERED_COINS).map((coin) => {
       const state = getSceneCoinState(coin, visualState);
       let position = coin.position;
@@ -119,7 +121,12 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, onDeb
         position = frame.position;
         opacity = frame.opacity;
       }
-      return { coin, state, position, opacity, transferProgress: state === 'buy_pull_to_core' ? getBuyPullProgress(elapsed) : undefined };
+      const shellDistance = Math.hypot(position[0], position[2], position[1] * 0.78);
+      const shellDelta = Math.abs(shellDistance - scanFrame.radius);
+      const scanPulseIntensity = visualState === 'scanning'
+        ? Math.min(1, Math.exp(-(shellDelta * shellDelta) / 0.18) * scanFrame.opacity * 1.45)
+        : 0;
+      return { coin, state, position, opacity, transferProgress: state === 'buy_pull_to_core' ? getBuyPullProgress(elapsed) : undefined, scanPulseIntensity };
     });
     if (now - frameStateUpdateRef.current > 33 || coinFrames.length === 0) {
       frameStateUpdateRef.current = now;
@@ -175,7 +182,7 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, onDeb
       {toggles.backgroundGrid && <HolographicGrid />}
       <CoreEnergy successPulse={successPulse} scanningPulse={visualState === 'scanning'} />
       {coinFrames.filter((frame) => frame.opacity > 0.04).map((frame) => (
-        <CoinOrb key={frame.coin.symbol} coin={frame.coin} visualState={frame.state} position={frame.position} opacity={frame.opacity} transferProgress={frame.transferProgress} realisticMaterials={toggles.realisticMaterials} onSelect={onCoinSelect} />
+        <CoinOrb key={frame.coin.symbol} coin={frame.coin} visualState={frame.state} position={frame.position} opacity={frame.opacity} transferProgress={frame.transferProgress} scanPulseIntensity={frame.scanPulseIntensity} realisticMaterials={toggles.realisticMaterials} onSelect={onCoinSelect} />
       ))}
       {buyCoinFrame && visualState === 'buy_pull_to_core' && (
         <ParticleTrail

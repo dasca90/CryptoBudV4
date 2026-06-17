@@ -27,6 +27,8 @@ import { getReferencePeriodConfig, mapLegacyScannerPeriodToReferenceWindow } fro
 import type { ReferencePeriodConfig } from './ReferencePeriodConfig';
 import { calculateReferencePrice } from './ReferencePriceCalculator';
 import type { RefMode } from './ReferencePriceCalculator';
+import { evaluateSmartLateEntryGuard } from './SmartModeGuard';
+import { autoBuyQueue } from '../trading/AutoBuyExecutionQueue';
 
 
 let _scanIdCounter = 0;
@@ -87,6 +89,7 @@ export class MarketScanner {
     highs: number[];
     lows: number[];
     volumes: number[];
+    cachedAt: number;
   }>();
   private publicClient = new BinancePublicClient();
 
@@ -112,7 +115,7 @@ export class MarketScanner {
   private userStopLossPct = 1.5;
   private dynamicTrailingEnabled = false;
   private userTrailPullbackPct = 0.25;
-  private executionMaxPositions = 10;
+  private executionMaxPositions = 24;
   private executionMaxSelectedPerScan = 10;
   private executionMaxSelectedPerScanSource: MaxSelectedPerScanSource = 'default_10';
   private executionMaxSelectedPerScanMigrationApplied = false;
@@ -144,6 +147,9 @@ export class MarketScanner {
   private recentlyClosedCooldownMs = 300000;
   private lossCooldownMs = 900000;
   private recentlyClosedSymbols: Map<string, { closedAt: number; pnlPct: number; pnlUsd: number; exitReason: string; strategy: string; cooldownUntil: number }> = new Map();
+
+  private lastAutoBuyAt: number = 0;
+  private autoBuyCooldownMs: number = 30000; // 30s minimum between auto buys
 
   // Fast candidate revalidation loop — updates live data for WAIT/BUY_READY without full scan
   private lastSnapshot: ScannerSnapshot | null = null;
@@ -440,6 +446,13 @@ export class MarketScanner {
 
       const previousStatus = c.status;
       if (nowBuyReady && (wasWait || wasBlock)) {
+        // Require fresh scan for WAIT->BUY promotion: candidate must not be older than max queued age
+        const candidateAgeMs = Date.now() - new Date(c.updatedAt).getTime();
+        const maxAgeMs = autoBuyQueue.getState().maxQueuedAgeMs;
+        if (candidateAgeMs > maxAgeMs) {
+          logger.info(`WAIT_CANDIDATE_RESCAN_REQUIRED symbol=${c.symbol} previousStatus=${previousStatus} previousScanCycleId=${c.createdAt ?? 'n/a'} currentScanCycleId=${cycleId} ageMs=${candidateAgeMs} maxAgeMs=${maxAgeMs} action=require_new_scan_before_buy`);
+          continue; // skip promotion — requires new scan
+        }
         c.status = 'BUY';
         promotedCount++;
         logger.info(`WAIT_CANDIDATE_LIVE_REVALIDATION_AUDIT: revalidationCycleId=${cycleId} symbol=${c.symbol} previousStatus=${previousStatus} newStatus=BUY_READY previousPrice=${c.price} livePrice=${livePrice} priceAgeMs=${c.priceAgeMs} spreadPct=${spreadPct.toFixed(3)} spreadOk=${String(spreadOk)} actualDipPct=${String(setup.setupMetrics.find(m => m.key === 'actualDipPct')?.actualValue ?? 'n/a')} requiredDipPct=${String(setup.setupMetrics.find(m => m.key === 'requiredDipPct')?.requiredValue ?? 'n/a')} actualReboundPct=${String(setup.setupMetrics.find(m => m.key === 'actualReboundPct')?.actualValue ?? 'n/a')} requiredReboundPct=${String(setup.setupMetrics.find(m => m.key === 'requiredReboundPct')?.requiredValue ?? 'n/a')} momentumConfirmed=${String(setup.setupMetrics.find(m => m.key === 'momentumConfirmed')?.passed ?? 'n/a')} tpRoomOk=${String(setup.tpRoomOk)} priceFresh=${String(priceFresh)} finalExecutable=${String(setup.finalExecutable)} buyAllowed=${String(setup.buyAllowed)} primaryBlocker=${setup.blockReasons[0] ?? 'none'} changedStatus=true`);
@@ -609,6 +622,7 @@ export class MarketScanner {
         highs,
         lows,
         volumes,
+        cachedAt: Date.now(),
       };
       this.periodCache.set(cacheKey, period);
       return period;
@@ -1836,12 +1850,217 @@ export class MarketScanner {
             }
             logger.info(`DEMO_EXECUTION_CONTROLLER_RECEIVED: symbol=${sc.symbol} scanId=${scanId} selectedCount=${buyableCandidates.length} openPositionsBefore=${currentOpenSymbols.length}`);
             if (!revalResult.blocked && revalResult.attempted) {
+              // Inter-buy cooldown via execution queue
+              const cooldownCheck = autoBuyQueue.blockIfCooldownActive(sc.symbol);
+              if (cooldownCheck.blocked) {
+                perSymbolDecisions.push({ symbol: sc.symbol, reason: 'cooldown_active', passed: false });
+                logger.info(`AUTO_BUY_RATE_LIMIT_ENFORCEMENT_AUDIT now=${Date.now()} symbol=${sc.symbol} lastAutoBuyAt=${autoBuyQueue.getState().lastBuyAt} elapsedMs=${Date.now() - autoBuyQueue.getState().lastBuyAt} requiredCooldownMs=${autoBuyQueue.getState().cooldownMs} buyAllowedByCooldown=false blockedSymbols=${sc.symbol} violation=false`);
+                continue;
+              }
+
+              // ── FULL PRE-BUY FRESH SNAPSHOT ──
+              // Refresh all critical fields from live market data before strategy recalculation
+              const oldPrice = sc.price;
+              const oldSpreadPct = sc.spreadPct;
+              const oldTpRoomOk = (sc as any).tpRoomOk !== false;
+              const oldDipPct = sc.dipPercent;
+              const oldReboundPct = sc.reboundPercent;
+              const oldMomentumConfirmed = sc.momentumConfirmed;
+              const oldBlockReasons = [...(sc.blockReasons ?? [])];
+              const oldOverextended = (sc.blockReasons ?? []).some(r => String(r).toLowerCase().includes('overextended'));
+              const oldCandleExhaustion = (sc.blockReasons ?? []).some(r => String(r).toLowerCase().includes('candle'));
+
+              // Fresh price + spread from live feed
+              const freshFeedPrice = this.feed.getLastPrice(sc.symbol);
+              const freshSpreadPct = this.feed.getSpreadPct(sc.symbol);
+              const freshPriceAgeMs = this.feed.getPriceAgeMs(sc.symbol);
+              if (freshFeedPrice > 0) {
+                sc.price = freshFeedPrice;
+                sc.priceAgeMs = freshPriceAgeMs;
+              }
+              if (freshSpreadPct < 999) {
+                sc.spreadPct = freshSpreadPct;
+              }
+
+              // Fresh tpRoomOk: compute from fresh price vs TP1 target (never default true)
+              const tpOwnership = (sc as any).tradingTargetOwnership;
+              const tp1Target: number = Number.isFinite(tpOwnership?.tp1Value) ? tpOwnership.tp1Value : 2.0;
+              const MIN_REQUIRED_TP_ROOM_PCT = 0.5;
+              let freshTpRoomOk = false;
+              let freshTpRoomPct = 0;
+              if (Number.isFinite(tp1Target) && freshFeedPrice > 0 && tp1Target >= MIN_REQUIRED_TP_ROOM_PCT) {
+                const tp1TargetPrice = freshFeedPrice * (1 + tp1Target / 100);
+                freshTpRoomPct = ((tp1TargetPrice - freshFeedPrice) / freshFeedPrice) * 100;
+                freshTpRoomOk = freshTpRoomPct >= MIN_REQUIRED_TP_ROOM_PCT;
+              }
+              (sc as any).tpRoomOk = freshTpRoomOk;
+
+              logger.info(`PRE_BUY_TP_ROOM_REVALIDATION_AUDIT symbol=${sc.symbol} freshPrice=${freshFeedPrice} freshTp1TargetPrice=${(freshFeedPrice * (1 + tp1Target / 100)).toFixed(4)} freshTpRoomPct=${freshTpRoomPct.toFixed(2)} minRequiredTpRoomPct=${MIN_REQUIRED_TP_ROOM_PCT} freshTpRoomOk=${freshTpRoomOk} blockReason=${freshTpRoomOk ? 'none' : 'tp_room_revalidation_failed'}`);
+
+              if (!freshTpRoomOk) {
+                perSymbolDecisions.push({ symbol: sc.symbol, reason: 'tp_room_revalidation_failed', passed: false });
+                continue;
+              }
+
+              // Fresh dip/rebound using cached period data — check cache freshness first
+              const kc = this.getReferencePeriodKlineConfig();
+              const periodCached = this['periodCache']?.get(`${sc.symbol}_${kc.interval}_${kc.limit}`);
+              const MAX_ALLOWED_PERIOD_CACHE_AGE_MS = kc.interval === '1m' ? 120000   // 2 min for 1h period
+                : kc.interval === '5m' ? 300000   // 5 min
+                : kc.interval === '15m' ? 600000  // 10 min
+                : kc.interval === '1h' ? 1800000  // 30 min
+                : kc.interval === '4h' ? 7200000  // 2h
+                : 3600000;                         // 1h default
+              const periodCacheAgeMs = periodCached?.cachedAt ? Date.now() - periodCached.cachedAt : Infinity;
+              const cacheFresh = periodCached && periodCached.closes.length > 0 && periodCacheAgeMs <= MAX_ALLOWED_PERIOD_CACHE_AGE_MS;
+
+              logger.info(`PRE_BUY_REFERENCE_CACHE_FRESHNESS_AUDIT symbol=${sc.symbol} periodCacheAgeMs=${periodCached?.cachedAt ? periodCacheAgeMs : 'n/a'} maxAllowedPeriodCacheAgeMs=${MAX_ALLOWED_PERIOD_CACHE_AGE_MS} cacheFresh=${cacheFresh} usedForDipRebound=${cacheFresh} usedForMomentum=${cacheFresh} blockReason=${cacheFresh ? 'none' : 'reference_data_stale_before_buy'}`);
+
+              if (!cacheFresh) {
+                perSymbolDecisions.push({ symbol: sc.symbol, reason: 'reference_data_stale_before_buy', passed: false });
+                continue;
+              }
+
+              if (cacheFresh) {
+                const refResult = calculateReferencePrice({
+                  closes: periodCached.closes,
+                  highs: periodCached.highs,
+                  lows: periodCached.lows,
+                  volumes: periodCached.volumes,
+                  referenceMode: this['referenceMode'] ?? 'sma',
+                  scannerReferenceCandles: kc.scannerReferenceCandles,
+                  symbol: sc.symbol,
+                });
+                const refPrice = refResult.refPrice > 0 ? refResult.refPrice : freshFeedPrice;
+                if (refPrice > 0 && freshFeedPrice > 0) {
+                  sc.dipPercent = freshFeedPrice < refPrice ? ((refPrice - freshFeedPrice) / refPrice) * 100 : 0;
+                  const refCloses = periodCached.closes.slice(-Math.min(kc.scannerReferenceCandles, periodCached.closes.length));
+                  let localLow = refCloses[0];
+                  for (const c of refCloses) { if (c < localLow) localLow = c; }
+                  sc.reboundPercent = localLow > 0 && freshFeedPrice > localLow ? ((freshFeedPrice - localLow) / localLow) * 100 : 0;
+                }
+              }
+
+              // Fresh momentum check
+              if (freshFeedPrice > 0 && periodCached) {
+                sc.momentumConfirmed = periodCached.momentum > 0;
+              }
+
+              // Fresh block reasons: re-check overextended/candle exhaustion from latest RSI
+              const freshBlockReasons = [...(sc.blockReasons ?? [])];
+              const rsiVal = (sc as any)._rsiAtScan ?? 50;
+              const isOverextended = rsiVal > 75 && !freshBlockReasons.some(r => String(r).toLowerCase().includes('overextended'));
+              const isCandleExhaustion = (rsiVal > 80 || rsiVal < 20) && !freshBlockReasons.some(r => String(r).toLowerCase().includes('candle'));
+              if (isOverextended) freshBlockReasons.push('overextended_fresh_check');
+              if (isCandleExhaustion) freshBlockReasons.push('candle_exhaustion_fresh_check');
+              sc.blockReasons = freshBlockReasons;
+
+              const allCriticalFieldsFresh = freshFeedPrice > 0 && freshSpreadPct < 999 && freshPriceAgeMs < 60000;
+              const missingFreshFields: string[] = [];
+              if (freshFeedPrice <= 0) missingFreshFields.push('price');
+              if (freshSpreadPct >= 999) missingFreshFields.push('spread');
+              if (freshPriceAgeMs >= 60000) missingFreshFields.push('price_age');
+
+              logger.info(`PRE_BUY_FRESH_SNAPSHOT_AUDIT symbol=${sc.symbol} oldPrice=${oldPrice} freshPrice=${freshFeedPrice} priceAgeMs=${freshPriceAgeMs} oldSpreadPct=${oldSpreadPct?.toFixed(3)} freshSpreadPct=${freshSpreadPct?.toFixed(3)} oldTpRoomOk=${oldTpRoomOk} freshTpRoomOk=${(sc as any).tpRoomOk !== false} oldDipPct=${oldDipPct?.toFixed(2)} freshDipPct=${sc.dipPercent?.toFixed(2)} oldReboundPct=${oldReboundPct?.toFixed(2)} freshReboundPct=${sc.reboundPercent?.toFixed(2)} oldMomentumConfirmed=${oldMomentumConfirmed} freshMomentumConfirmed=${sc.momentumConfirmed} oldBlockReasons=${oldBlockReasons.join('|') || 'none'} freshBlockReasons=${freshBlockReasons.join('|') || 'none'} oldOverextended=${oldOverextended} freshOverextended=${isOverextended} oldCandleExhaustion=${oldCandleExhaustion} freshCandleExhaustion=${isCandleExhaustion} allCriticalFieldsFresh=${allCriticalFieldsFresh} missingFreshFields=${missingFreshFields.join('|') || 'none'} revalidationPassed=${allCriticalFieldsFresh}`);
+
+              if (!allCriticalFieldsFresh) {
+                perSymbolDecisions.push({ symbol: sc.symbol, reason: 'pre_buy_revalidation_incomplete', passed: false });
+                logger.info(`PRE_BUY_REVALIDATION_INCOMPLETE_AUDIT symbol=${sc.symbol} missingFreshFields=${missingFreshFields.join('|')} adapterCallAllowed=false blockReason=critical_fields_stale`);
+                continue;
+              }
+
+              // Queue-based revalidation tracking
+              autoBuyQueue.startRevalidation(sc.symbol);
+
+              // Force fresh strategy recalculation on fully refreshed candidate
+              const oldQueuedStrategy = (sc as any)._queuedStrategy ?? sc.selectedStrategy ?? 'unknown';
+              const freshStrategyAudit = buildStrategyAuditSnapshotFromCandidate(sc);
+              const freshFinalExecutable = freshStrategyAudit.finalExecutable;
+              const freshBuyAllowed = freshStrategyAudit.buyAllowed;
+              const freshEntryRule = freshStrategyAudit.finalEntryRule;
+              const revalidationPassed = (sc.priceAgeMs ?? 0) < this.maxPriceAgeMs
+                && (sc.spreadPct ?? 0) <= this.maxSpreadPct
+                && (sc as any).tpRoomOk !== false
+                && freshFinalExecutable
+                && freshBuyAllowed;
+
+              autoBuyQueue.markRevalidationResult({
+                symbol: sc.symbol,
+                passed: revalidationPassed,
+                oldPrice: sc.price ?? 0,
+                freshPrice: sc.price ?? 0,
+                priceChangePct: 0,
+                spreadOk: (sc.spreadPct ?? 0) <= this.maxSpreadPct,
+                tpRoomOk: (sc as any).tpRoomOk !== false,
+                priceFresh: (sc.priceAgeMs ?? 0) < this.maxPriceAgeMs,
+                finalExecutable: freshFinalExecutable,
+                buyAllowed: freshBuyAllowed,
+                duplicateOpenPosition: currentOpenSymbols.includes(sc.symbol),
+                pendingOrder: currentPendingSymbols.includes(sc.symbol),
+                banned: false,
+                blockReasons: revalidationPassed ? [] : ['strategy_not_executable'],
+              });
+
+              logger.info(`QUEUED_STRATEGY_REVALIDATION_AUDIT symbol=${sc.symbol} oldStrategy=${oldQueuedStrategy} freshStrategy=${freshStrategyAudit.strategySelected} strategyChanged=${oldQueuedStrategy !== freshStrategyAudit.strategySelected} oldEntryRule=${(sc as any).finalEntryRule ?? 'n/a'} freshEntryRule=${freshEntryRule} oldFinalExecutable=${String((sc as any).finalExecutable ?? 'n/a')} freshFinalExecutable=${freshFinalExecutable} oldBuyAllowed=${String((sc as any).buyAllowed ?? 'n/a')} freshBuyAllowed=${freshBuyAllowed} finalDecision=${freshFinalExecutable && freshBuyAllowed ? 'ALLOW' : 'BLOCK'}`);
+
+              // Full strategy revalidation audit
+              const setupRequired = freshStrategyAudit.setupRequired?.map((s: any) => s.key).join('|') ?? 'n/a';
+              const setupPassed = freshStrategyAudit.setupPassed?.join('|') ?? 'n/a';
+              const setupMissing = freshStrategyAudit.setupMissing?.map((s: any) => s.key).join('|') ?? 'n/a';
+              const dipMetric: any = freshStrategyAudit.setupMetrics?.find((m: any) => m.key === 'actualDipPct');
+              const reboundMetric: any = freshStrategyAudit.setupMetrics?.find((m: any) => m.key === 'actualReboundPct');
+
+              logger.info(`FULL_STRATEGY_REVALIDATION_AUDIT symbol=${sc.symbol} oldStrategy=${oldQueuedStrategy} freshStrategy=${freshStrategyAudit.strategySelected} strategyChanged=${oldQueuedStrategy !== freshStrategyAudit.strategySelected} oldEntryRule=${(sc as any).finalEntryRule ?? 'n/a'} freshEntryRule=${freshEntryRule} oldFinalExecutable=${String((sc as any).finalExecutable ?? 'n/a')} freshFinalExecutable=${freshFinalExecutable} oldBuyAllowed=${String((sc as any).buyAllowed ?? 'n/a')} freshBuyAllowed=${freshBuyAllowed} oldDipPct=${(sc as any)._queuedDip ?? sc.dipPercent} freshDipPct=${sc.dipPercent?.toFixed(2)} oldReboundPct=${(sc as any)._queuedRebound ?? sc.reboundPercent} freshReboundPct=${sc.reboundPercent?.toFixed(2)} oldMomentumConfirmed=${oldMomentumConfirmed} freshMomentumConfirmed=${sc.momentumConfirmed} oldBlockReasons=${oldBlockReasons.join('|') || 'none'} freshBlockReasons=${freshBlockReasons.join('|') || 'none'} marketBestFit=n/a freshMarketBestFit=n/a finalDecision=${freshFinalExecutable && freshBuyAllowed ? 'ALLOW' : 'BLOCK'} adapterCallAllowed=${String(freshFinalExecutable && freshBuyAllowed)}`);
+
+              logger.info(`PRE_BUY_STRATEGY_CONTRACT_AUDIT symbol=${sc.symbol} freshStrategy=${freshStrategyAudit.strategySelected} requiredSetup=${setupRequired} passedSetup=${setupPassed} missingSetup=${setupMissing} hardBlockers=${freshBlockReasons.join('|') || 'none'} dipRequired=${dipMetric?.requiredValue ?? 'n/a'} dipActual=${dipMetric?.actualValue ?? 'n/a'} reboundRequired=${reboundMetric?.requiredValue ?? 'n/a'} reboundActual=${reboundMetric?.actualValue ?? 'n/a'} reboundFreshnessStatus=unknown momentumConfirmed=${sc.momentumConfirmed ?? 'n/a'} spreadOk=${(sc.spreadPct ?? 0) <= this.maxSpreadPct} tpRoomOk=${(sc as any).tpRoomOk !== false} priceFresh=${(sc.priceAgeMs ?? 0) < this.maxPriceAgeMs} conservativeSafetyScore=n/a finalExecutable=${freshFinalExecutable} buyAllowed=${freshBuyAllowed}`);
+
+              if (!freshFinalExecutable || !freshBuyAllowed) {
+                perSymbolDecisions.push({ symbol: sc.symbol, reason: 'fresh_strategy_not_executable', passed: false });
+                logger.info(`PRE_ADAPTER_REVALIDATION_GATE_AUDIT symbol=${sc.symbol} revalidationPassed=false freshStrategy=${freshStrategyAudit.strategySelected} freshEntryRule=${freshEntryRule} freshFinalExecutable=${freshFinalExecutable} freshBuyAllowed=${freshBuyAllowed} duplicateOpenPosition=${currentOpenSymbols.includes(sc.symbol)} pendingOrder=${currentPendingSymbols.includes(sc.symbol)} adapterCallAllowed=false blockReasons=${freshStrategyAudit.blockReasons?.join('|') || 'strategy_not_executable'}`);
+                continue;
+              }
+
+              if (freshStrategyAudit.strategySelected.toLowerCase() === 'wait') {
+                perSymbolDecisions.push({ symbol: sc.symbol, reason: 'fresh_strategy_is_wait', passed: false });
+                continue;
+              }
+
+              // Smart-mode late entry guard — use FRESH strategy from audit
+              const smartGuardResult = evaluateSmartLateEntryGuard({
+                symbol: sc.symbol,
+                entryMode: this.entryConfirmationMode,
+                strategy: freshStrategyAudit.strategySelected,
+                momentum: sc.m5Change ?? 0,
+                dipPct: sc.dipPercent ?? 0,
+                reboundPct: sc.reboundPercent ?? 0,
+                reboundFreshnessStatus: 'unknown',
+                refPrice: (sc as any).refPrice ?? (sc.price ?? 0),
+                currentPrice: sc.price ?? 0,
+                overextended: Array.isArray(sc.blockReasons) && sc.blockReasons.some(r => String(r).toLowerCase().includes('overextended')),
+                candleExhaustion: Array.isArray(sc.blockReasons) && sc.blockReasons.some(r => String(r).toLowerCase().includes('candle')),
+                priceFresh: (sc.priceAgeMs ?? 0) < this.maxPriceAgeMs,
+                spreadOk: (sc.spreadPct ?? 0) <= this.maxSpreadPct,
+                tpRoomOk: (sc as any).tpRoomOk !== false,
+                momentumConfirmed: sc.momentumConfirmed ?? false,
+                marketAction: sc.periodRegime ?? 'unknown',
+              });
+
+              if (!smartGuardResult.allowed) {
+                perSymbolDecisions.push({ symbol: sc.symbol, reason: smartGuardResult.blockReason ?? 'smart_guard_blocked', passed: false });
+                logger.info(`SMART_MOMENTUM_ENTRY_AUDIT symbol=${sc.symbol} entryMode=${this.entryConfirmationMode} strategySource=${sc.strategySource ?? 'n/a'} marketBestFit=n/a candidateSelectedStrategy=${sc.selectedStrategy ?? 'n/a'} finalExecutionStrategy=${sc.selectedStrategy ?? 'n/a'} momentumConfirmed=${sc.momentumConfirmed ?? false} dipPct=${sc.dipPercent ?? 0} reboundPct=${sc.reboundPercent ?? 0} overextended=${smartGuardResult.warnings.join('|')} candleExhaustion=${sc.blockReasons?.some(r => String(r).toLowerCase().includes('candle')) ?? false} priceFresh=${(sc.priceAgeMs ?? 0) < this.maxPriceAgeMs} finalExecutable=${String((sc as any).finalExecutable ?? 'n/a')} buyAllowed=${String((sc as any).buyAllowed ?? 'n/a')} whyMomentumAllowed=false whySmartAllowedThis=false blockReason=${smartGuardResult.blockReason} sourceFunction=MarketScanner.successPath`);
+
+                // Log the entry mode behavior
+                logger.info(`ENTRY_MODE_BEHAVIOR_AUDIT mode=${this.entryConfirmationMode} symbol=${sc.symbol} strategy=${sc.selectedStrategy ?? 'unknown'} smartRulesApplied=${String(this.entryConfirmationMode === 'smart')} aggressiveRulesApplied=${String(this.entryConfirmationMode === 'aggressive')} decision=BLOCKED reason=${smartGuardResult.blockReason}`);
+                continue;
+              }
+
               preAdapterAllowedCount++;
               perSymbolDecisions.push({ symbol: sc.symbol, reason: 'pre_adapter_allowed', passed: true });
               try {
                 transactionAuditSymbols.push(sc.symbol);
                 logger.info(`DEMO_EXECUTION_CONTROLLER_HANDOFF: symbol=${sc.symbol} scanId=${scanId} adapterCalled=pending transactionAuditExpected=true`);
                 const runResult = await this.paperAutoBuyFn(firstCandidate, sc);
+                autoBuyQueue.recordBuySubmitted(sc.symbol);
                 paperAutoResult = { ...revalResult, ...runResult };
                 if (paperAutoResult.adapterCalled) adapterCalledCount++;
                 if (paperAutoResult.positionCreated) positionCreatedCount++;
@@ -2010,11 +2229,33 @@ export class MarketScanner {
           groupEnabled: this.scannerRiskGroups[bc.riskGroup as keyof typeof this.scannerRiskGroups] ?? true,
         });
         if (!reval.blocked && reval.attempted) {
+          // Queue-based cooldown for backfill
+          const cb = autoBuyQueue.blockIfCooldownActive(bc.symbol);
+          if (cb.blocked) {
+            skippedSymbols.push(bc.symbol);
+            skipReasonsBySymbol[bc.symbol] = 'cooldown_active';
+            continue;
+          }
+          autoBuyQueue.startRevalidation(bc.symbol);
+          autoBuyQueue.markRevalidationResult({
+            symbol: bc.symbol,
+            passed: true,
+            spreadOk: (bc.spreadPct ?? 0) <= this.maxSpreadPct,
+            tpRoomOk: (bc as any).tpRoomOk !== false,
+            priceFresh: (bc.priceAgeMs ?? 0) < this.maxPriceAgeMs,
+            finalExecutable: (bc as any).finalExecutable !== false,
+            buyAllowed: (bc as any).buyAllowed !== false,
+            duplicateOpenPosition: currentOpen.includes(bc.symbol),
+            pendingOrder: false,
+            banned: false,
+            blockReasons: [],
+          });
           try {
             attemptedSymbols.push(bc.symbol);
             transactionAuditSymbols.push(bc.symbol);
             backfillCandidateSymbols.push(bc.symbol);
             const bfResult = await this.paperAutoBuyFn(bfEntryPlan, bc);
+            autoBuyQueue.recordBuySubmitted(bc.symbol);
             if (bfResult.adapterCalled) adapterCalledCount++;
             if (bfResult.positionCreated) positionCreatedCount++;
             openPositionsAfterHandoff = this.executionOpenSymbolsFn?.().length ?? bfResult.openPositionsAfter ?? openPositionsAfterHandoff;

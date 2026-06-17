@@ -131,7 +131,37 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   scoredExecutionPool.sort((a, b) => b.score - a.score);
   logger.info(`SELECTION_LIMIT_REMOVED_AUDIT: totalPoolCandidates=${executionPool.length} evaluatedCandidates=${scoredExecutionPool.length} blockedByRealSafety=0 blockedByDuplicatePosition=0 blockedByPendingOrder=0 blockedByMaxOpenPositions=${availableSlots <= 0 ? executionPool.length : 0} blockedByCapital=${capitalLimitedSlots <= 0 ? executionPool.length : 0} blockedBySpread=0 blockedByTpRoom=0 blockedByPriceStale=0 selectionLimitApplied=false maxSelectedPerScan=unlimited`);
 
-  for (const { candidate, score } of scoredExecutionPool) {
+  // Group-aware round-robin reordering: interleave candidates from each risk group
+  // so selection diversifies across groups instead of picking global top-N
+  const GROUP_ORDER = ['top_caps', 'large_caps', 'mid_caps', 'high_risk', 'very_high_risk'];
+  const grouped: Map<string, typeof scoredExecutionPool> = new Map();
+  for (const item of scoredExecutionPool) {
+    const rg = item.candidate.riskGroup ?? 'unknown';
+    if (!grouped.has(rg)) grouped.set(rg, []);
+    grouped.get(rg)!.push(item);
+  }
+  for (const [, items] of grouped) { items.sort((a, b) => b.score - a.score); }
+
+  // Build round-robin ordered pool
+  const roundRobinPool: typeof scoredExecutionPool = [];
+  let round = 0;
+  const MAX_ROUNDS = 10;
+  while (round < MAX_ROUNDS) {
+    let added = false;
+    for (const group of GROUP_ORDER) {
+      const items = grouped.get(group);
+      if (items && round < items.length) { roundRobinPool.push(items[round]); added = true; }
+    }
+    // Also include unknown-group candidates
+    const unknown = grouped.get('unknown');
+    if (unknown && round < unknown.length) { roundRobinPool.push(unknown[round]); added = true; }
+    if (!added) break;
+    round++;
+  }
+
+  logger.info(`GROUP_ROUND_ROBIN_SELECTION_AUDIT totalCandidates=${scoredExecutionPool.length} groupCaps=5|5|6|4|4 candidateCountByGroup=${[...grouped.entries()].map(([g, items]) => `${g}=${items.length}`).join('|')} rankedTopByGroup=${[...grouped.entries()].map(([g, items]) => `${g}:${items.slice(0, 3).map(i => i.candidate.symbol).join('|')}`).join('|')} selectionRounds=${round} roundRobinPoolSize=${roundRobinPool.length}`);
+
+  for (const { candidate, score } of roundRobinPool) {
     emitEntryPlanObjectTrace(candidate, 'insideExecutionPlanner', 'ExecutionPlanner.buildExecutionPlan');
     const candidateWithPlan: ScannerCandidate = { ...candidate };
     const fromCandidateEntryPlan = candidate.entryPlan;

@@ -11,6 +11,7 @@ interface CoinOrbProps {
   position: Vector3Tuple;
   opacity?: number;
   transferProgress?: number;
+  scanPulseIntensity?: number;
   realisticMaterials: boolean;
   onSelect: (coin: MockScannerCoin) => void;
 }
@@ -57,7 +58,7 @@ function hashSymbol(symbol: string) {
   return symbol.split('').reduce((value, char) => value + char.charCodeAt(0), 0);
 }
 
-export function CoinOrb({ coin, visualState, position, opacity = 1, transferProgress = 0, realisticMaterials, onSelect }: CoinOrbProps) {
+export function CoinOrb({ coin, visualState, position, opacity = 1, transferProgress = 0, scanPulseIntensity = 0, realisticMaterials, onSelect }: CoinOrbProps) {
   const groupRef = useRef<Group>(null);
   const shellRef = useRef<Group>(null);
   const stateRingsRef = useRef<Group>(null);
@@ -155,7 +156,7 @@ export function CoinOrb({ coin, visualState, position, opacity = 1, transferProg
         <meshStandardMaterial
           color={colors.main}
           emissive={colors.emissive}
-          emissiveIntensity={isBlocked ? 1.55 : isBuyingTransfer ? 3.8 : isBuy ? 1.65 : isWait ? 1.05 : 0.7}
+          emissiveIntensity={(isBlocked ? 1.55 : isBuyingTransfer ? 3.8 : isBuy ? 1.65 : isWait ? 1.05 : 0.7) + scanPulseIntensity * 3.1}
           roughness={isBuyingTransfer ? 0.04 : realisticMaterials ? 0.12 : 0.4}
           metalness={isBuyingTransfer ? 0.82 : realisticMaterials ? 0.62 : 0.1}
           transparent
@@ -164,8 +165,14 @@ export function CoinOrb({ coin, visualState, position, opacity = 1, transferProg
         </mesh>
         <mesh>
           <sphereGeometry args={[ORB_AURA_RADIUS, 48, 48]} />
-          <meshBasicMaterial color={colors.emissive} transparent opacity={(isBlocked ? 0.2 : isBuyingTransfer ? 0.52 : isOpen ? 0.24 : 0.13) * opacity} blending={isBuyingTransfer ? AdditiveBlending : undefined} depthWrite={!isBuyingTransfer} />
+          <meshBasicMaterial color={scanPulseIntensity > 0.05 ? '#42ffc8' : colors.emissive} transparent opacity={((isBlocked ? 0.2 : isBuyingTransfer ? 0.52 : isOpen ? 0.24 : 0.13) + scanPulseIntensity * 0.46) * opacity} blending={(isBuyingTransfer || scanPulseIntensity > 0.02) ? AdditiveBlending : undefined} depthWrite={!isBuyingTransfer && scanPulseIntensity <= 0.02} />
         </mesh>
+        {scanPulseIntensity > 0.02 && (
+          <mesh>
+            <sphereGeometry args={[ORB_AURA_RADIUS * 1.52, 48, 48]} />
+            <meshBasicMaterial color="#22d7ff" transparent opacity={scanPulseIntensity * 0.22 * opacity} blending={AdditiveBlending} depthWrite={false} />
+          </mesh>
+        )}
         {isBuyingTransfer && (
           <>
             <mesh>

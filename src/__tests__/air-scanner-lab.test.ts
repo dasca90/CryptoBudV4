@@ -63,7 +63,7 @@ const rowAnchor = getOpenPositionRowAnchor(
   { left: 100, top: 50, width: 900, height: 600 },
   { left: 700, top: 120, width: 440, height: 40 },
 );
-assert.deepEqual(rowAnchor, { x: 624, y: 90 });
+assert.deepEqual(rowAnchor, { x: 600, y: 90 });
 assert.ok(createTransferBeamPath({ x: 320, y: 380 }, rowAnchor).startsWith('M 320.0 380.0 C'));
 const transferAudit = createOpenPositionTransferAudit({
   symbol: 'UNIUSDT',

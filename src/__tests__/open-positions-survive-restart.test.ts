@@ -22,30 +22,34 @@ function assert(condition: boolean, msg: string) {
   else { failed++; console.error(`  ❌ ${msg}`); }
 }
 
-function makePosition(symbol: string, tradeId: string, entryPrice: number, qty: number): Position {
+function makePosition(coin: string, tradeId: string, entryPrice: number, qty: number): Position {
   return {
-    coin: symbol,
+    coin,
     tradeId,
-    symbol,
     mode: 'AUTO',
-    strategy: 'momentum',
     avgEntryPrice: entryPrice,
     quantity: qty,
+    pnl: 0,
+    pnlPercent: 0,
     tp1Percent: 2.7,
     tp2Percent: 0,
     stopLossPercent: 1.5,
     trailFromPeakPercent: 0,
     tpArmed: false,
+    tpArmedAt: 0,
     tp1Hit: false,
     tp2Hit: false,
+    tpMode: 'fixed',
+    tpTriggerType: 'percent',
+    maxHoldSec: 86400,
+    ownerType: 'scanner',
+    adapter: 'Paper',
     openedAt: Date.now() - 3600000,
     currentPrice: entryPrice * 1.01,
     lastPrice: entryPrice * 1.01,
-    priceTimestamp: Date.now(),
     highestPrice: entryPrice * 1.05,
     highestPriceSinceTp: entryPrice * 1.02,
-    unrealizedPnlPercent: 1,
-    pnlPercent: 1,
+    unrealizedPnlPercent: 0,
     buySnapshot: {
       selectedStrategy: 'momentum',
       riskGroup: 'mid_caps',

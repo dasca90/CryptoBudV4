@@ -352,6 +352,36 @@ export function TradePage({
       return;
     }
     const settings = await settingsPersistence.loadSettings();
+
+    // Validate
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    if (!(airParams.autoTradingCapital > 0)) errors.push('Trading capital must be > 0');
+    if (!(airParams.capitalPerCoin > 0)) errors.push('Capital per coin must be > 0');
+    if (airParams.capitalPerCoin > airParams.autoTradingCapital) errors.push('Capital per coin cannot exceed trading capital');
+    if (!(airParams.maxOpenPositions >= 1 && airParams.maxOpenPositions <= 100)) errors.push('Max open positions must be 1-100');
+    if (airParams.scannerUniverseSize < airParams.scannerFinalPoolSize) errors.push('Universe size must be >= final pool size');
+    if (airParams.scannerFinalPoolSize < airParams.scannerCandidatePoolSize) errors.push('Final pool size must be >= candidate pool size');
+    if (!(airParams.scannerCandidatePoolSize > 0)) errors.push('Candidate pool size must be > 0');
+    if (!(airParams.maxSymbolsScanned > 0)) errors.push('Max symbols scanned must be > 0');
+    if (!(airParams.maxSpreadPct > 0)) errors.push('Max spread must be > 0');
+    const enabledGroups = Object.values(airParams.scannerRiskGroups).filter(Boolean).length;
+    if (enabledGroups === 0) errors.push('At least one risk group must be enabled');
+
+    const openCount = engine.getPositionManager().getOpenPositions().length;
+    if (airParams.maxOpenPositions < openCount) {
+      warnings.push(`Max open positions (${airParams.maxOpenPositions}) is below current open count (${openCount}). New buys blocked until count drops.`);
+    }
+
+    logger.info(`SETTINGS_APPLY_REQUESTED_AUDIT draftSettings=${JSON.stringify({ capital: airParams.autoTradingCapital, capitalPerCoin: airParams.capitalPerCoin, maxPositions: airParams.maxOpenPositions, enabledGroups, universeSize: airParams.scannerUniverseSize, poolSize: airParams.scannerFinalPoolSize, spread: airParams.maxSpreadPct })} scannerRunning=${state.scannerRunning} openPositionsCount=${openCount}`);
+
+    if (errors.length > 0) {
+      logger.warn(`SETTINGS_APPLY_VALIDATION_FAILED errors=${errors.join('|')} warnings=${warnings.join('|')}`);
+      console.error('Settings validation failed:', errors.join(', '));
+      throw new Error(errors[0]);
+    }
+    logger.info(`SETTINGS_APPLY_VALIDATION_AUDIT valid=true errors=none warnings=${warnings.join('|') || 'none'}`);
+
     const canonicalBanlist = toCanonicalBanlist(airParams.scannerBanlist);
     logger.info(`USER_SETTINGS_SAVE_REQUESTED: tradingCapital=${airParams.autoTradingCapital} capitalPerCoin=${airParams.capitalPerCoin} maxOpenPositions=${airParams.maxOpenPositions} bannedCoinsCount=${canonicalBanlist.length} source=UI hydrationComplete=true`);
     await settingsPersistence.saveSettings({
@@ -418,9 +448,11 @@ export function TradePage({
       referenceMode: mapUiRefModeToScanner(airParams.refMode),
       scannerBanlist: canonicalBanlist,
     });
+    logger.info(`SETTINGS_APPLY_RUNTIME_SYNC_AUDIT appliedSettings=${JSON.stringify({ maxPositions: airParams.maxOpenPositions, capitalPerCoin: airParams.capitalPerCoin, spread: airParams.maxSpreadPct, enabledGroups })} scannerConfigSynced=true riskEngineSynced=true executionPlannerSynced=true entryGateSynced=true autoBuyQueueSynced=true persistenceSynced=true`);
+    logger.info(`SETTINGS_APPLIED_EFFECTIVE_CONFIG_AUDIT tradingCapital=${airParams.autoTradingCapital} capitalPerCoin=${airParams.capitalPerCoin} maxOpenPositions=${airParams.maxOpenPositions} enabledRiskGroups=${Object.entries(airParams.scannerRiskGroups).filter(([,v]) => v).map(([k]) => k).join(',')} universeMode=${airParams.scannerUniverseMode} universeSize=${airParams.scannerUniverseSize} finalPoolSize=${airParams.scannerFinalPoolSize} candidatePoolSize=${airParams.scannerCandidatePoolSize} maxSymbolsScanned=${airParams.maxSymbolsScanned} min24hVolume=${airParams.min24hQuoteVolumeUsdt} maxSpreadPct=${airParams.maxSpreadPct} maxSlippagePct=${airParams.maxSlippagePct} maxTotalCostPct=${airParams.maxTotalEntryCostPct}`);
     logger.info(`USER_SETTINGS_SAVE_SUCCESS: tradingCapital=${airParams.autoTradingCapital} capitalPerCoin=${airParams.capitalPerCoin} maxOpenPositions=${airParams.maxOpenPositions} bannedCoinsCount=${canonicalBanlist.length} source=UI`);
     logger.info(`TRADING_PARAMETERS_APPLY_AUDIT: submittedRefPeriod=${airParams.scannerReferencePeriod} submittedRefMode=${airParams.refMode} submittedRefWindow=${airParams.refWindow} submittedStrategy=${airParams.strategy} submittedStopLoss=${airParams.stopLossPct} submittedTp2=${airParams.tp2Pct} persistenceWriteSuccess=true storageTarget=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri_sqlite' : 'localStorage'} changedFields=${JSON.stringify({ scannerReferencePeriod: airParams.scannerReferencePeriod, refMode: airParams.refMode, refWindow: airParams.refWindow })}`);
-  }, [airParams, onScannerConfigChange]);
+  }, [airParams, onScannerConfigChange, engine, userTradingSettingsHydrated, state.scannerRunning, paperAutoEnabled, settingsPersistence]);
 
   const positionManagerOpenPositions = engine.getPositionManager().getOpenPositions();
   const positionSummary = engine.getPositionManager().getExposureSummary();

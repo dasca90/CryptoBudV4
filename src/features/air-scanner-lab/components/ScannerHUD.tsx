@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type MutableRefObject, type RefObject } from 'react';
 import type { AnimationDebugState, CoinVisualState, MockScannerCoin, OpenPositionVisualRow, ScreenPoint } from '../state/airScannerVisualState';
 import { scanChecklist } from '../state/mockScannerFeed';
-import { createOpenPositionTransferAudit, createTransferBeamPath, getOpenPositionRowAnchor, shouldStartOpenPositionTransfer } from '../utils/openPositionTransfer';
+import { createOpenPositionTransferAudit, createOscillatingTransferBeamPath, createTransferBeamPath, getOpenPositionRowAnchor, shouldStartOpenPositionTransfer } from '../utils/openPositionTransfer';
 import { getVisualStateLabel } from '../utils/visualStateMapper';
 
 interface ScannerHUDProps {
@@ -16,19 +16,29 @@ interface ScannerHUDProps {
 
 interface TransferBeamState {
   path: string;
+  wavePathA: string;
+  wavePathB: string;
   source: ScreenPoint;
   target: ScreenPoint;
   startedAt: string;
   lifecycleId: number;
 }
 
-const TRANSFER_VISUAL_DURATION_MS = 20_000;
+const TRANSFER_VISUAL_DURATION_MS = 30_000;
 
 const transferAtoms = Array.from({ length: 72 }, (_, index) => ({
   delay: index * 0.245,
   radius: 0.9 + (index % 5) * 0.24,
   duration: 1.85 + (index % 6) * 0.075,
   opacity: 0.9 - (index % 7) * 0.05,
+}));
+
+const transferStreamParticles = Array.from({ length: 34 }, (_, index) => ({
+  delay: index * 0.13,
+  radius: 1.15 + (index % 4) * 0.26,
+  duration: 1.08 + (index % 5) * 0.08,
+  opacity: 0.86 - (index % 6) * 0.055,
+  path: index % 2 === 0 ? 'wavePathA' : 'wavePathB',
 }));
 
 function OpenPositionTransferOverlay({
@@ -85,6 +95,8 @@ function OpenPositionTransferOverlay({
     const target = getOpenPositionRowAnchor(stage.getBoundingClientRect(), row.getBoundingClientRect());
     const nextBeam = {
       path: createTransferBeamPath(source, target),
+      wavePathA: createOscillatingTransferBeamPath(source, target, 0.2),
+      wavePathB: createOscillatingTransferBeamPath(source, target, Math.PI * 0.92),
       source,
       target,
       startedAt,
@@ -132,7 +144,23 @@ function OpenPositionTransferOverlay({
         </linearGradient>
       </defs>
       <path className="air-lab-transfer-path-glow" d={beam.path} />
-      <path className="air-lab-transfer-path-core" d={beam.path} />
+      <path className="air-lab-transfer-path-core" d={beam.path}>
+        <animate attributeName="d" values={`${beam.path};${beam.wavePathA};${beam.wavePathB};${beam.path}`} dur="3.2s" repeatCount="indefinite" />
+      </path>
+      {transferStreamParticles.map((orb, index) => {
+        const particlePath = orb.path === 'wavePathA' ? beam.wavePathA : beam.wavePathB;
+        return (
+          <circle
+            key={`stream-${orb.delay}-${index}`}
+            className="air-lab-transfer-stream-particle"
+            r={orb.radius}
+            style={{ '--orb-opacity': orb.opacity } as CSSProperties}
+          >
+            <animateMotion dur={`${orb.duration}s`} begin={`${orb.delay}s`} repeatCount="indefinite" path={particlePath} />
+            <animate attributeName="opacity" values={`0;${orb.opacity};${orb.opacity};0`} keyTimes="0;0.18;0.78;1" dur={`${orb.duration}s`} begin={`${orb.delay}s`} repeatCount="indefinite" />
+          </circle>
+        );
+      })}
       {transferAtoms.map((orb, index) => (
         <circle
           key={`${orb.delay}-${index}`}
