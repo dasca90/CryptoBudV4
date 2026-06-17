@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { getBlockedPushFrame, acquireBuyLightningLock, releaseBuyLightningLock, resetAnimationLocksForTests } from '../features/air-scanner-lab/utils/animationTimelines';
+import { getBlockedPushFrame, getOpenPositionTransferPosition, acquireBuyLightningLock, releaseBuyLightningLock, resetAnimationLocksForTests } from '../features/air-scanner-lab/utils/animationTimelines';
 import { MAX_RENDERED_COINS } from '../features/air-scanner-lab/state/airScannerVisualState';
 import { mockScannerCoins } from '../features/air-scanner-lab/state/mockScannerFeed';
 import { auditOrbLabelOrientation, badgeLabelIsMirrored, calculateFrontFacingLabelOffset } from '../features/air-scanner-lab/utils/orbLabelOrientation';
@@ -25,6 +25,9 @@ const blockedStart: [number, number, number] = [3.45, 1.9, 0.25];
 const blockedFrame = getBlockedPushFrame(blockedStart, 9_000);
 assert.ok(Math.hypot(blockedFrame.position[0], blockedFrame.position[2]) > Math.hypot(blockedStart[0], blockedStart[2]));
 assert.ok(blockedFrame.opacity < 1);
+const openTransferEnd = getOpenPositionTransferPosition([0.25, 2.35, 0], 1);
+assert.ok(openTransferEnd[0] > 4, 'buy transfer should move toward open positions panel side');
+assert.ok(openTransferEnd[1] > 3, 'buy transfer should lift toward the open positions panel');
 
 const labelAudit = auditOrbLabelOrientation({
   symbol: 'UNIUSDT',

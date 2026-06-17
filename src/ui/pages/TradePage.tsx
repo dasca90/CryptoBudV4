@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { logger } from '../../utils/logger';
+import type { RefMode } from '../../core/scanner/ReferencePriceCalculator';
 import { PriceChart } from '../../components/charts/PriceChart';
 import { MiniSparkline } from '../../components/charts/MiniSparkline';
 import { StatusBadge } from '../../components/ui/StatusBadge';
@@ -17,6 +18,13 @@ import { getMicroScalperState } from '../../core/scalper/MicroScalperEngine';
 import type { TradeV4PageModel, TradingParametersView } from '../../components/trade-v4/types';
 
 const COMMON_COINS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT', 'XRPUSDT', 'DOGEUSDT', 'AVAXUSDT'];
+
+function mapUiRefModeToScanner(mode: string | undefined): RefMode | undefined {
+  if (!mode || mode === 'AUTO') return undefined;
+  const lower = mode.toLowerCase() as RefMode;
+  if (['sma', 'ema', 'vwap', 'bollinger'].includes(lower)) return lower;
+  return undefined;
+}
 
 interface Props {
   engine: TradingEngine;
@@ -47,6 +55,7 @@ interface Props {
       very_high_risk: boolean;
     };
     referencePeriod: '1h' | '4h' | '1d' | '1w';
+    referenceMode?: RefMode;
     scannerBanlist?: string[];
   }) => void;
   positionBootRestoring?: boolean;
@@ -308,11 +317,12 @@ export function TradePage({
         },
       }));
       logger.info(`MANUAL_DIPPER_SETUP_RESTORED: momentumMinReboundPct=${((s as any).manualDipperSetup?.momentumMinReboundPct ?? defaultManualDipperSetup.momentumMinReboundPct)} balancedMinDipPct=${((s as any).manualDipperSetup?.balancedMinDipPct ?? defaultManualDipperSetup.balancedMinDipPct)} balancedMinReboundPct=${((s as any).manualDipperSetup?.balancedMinReboundPct ?? defaultManualDipperSetup.balancedMinReboundPct)} dipReboundMinDipPct=${((s as any).manualDipperSetup?.dipReboundMinDipPct ?? defaultManualDipperSetup.dipReboundMinDipPct)} dipReboundMinReboundPct=${((s as any).manualDipperSetup?.dipReboundMinReboundPct ?? defaultManualDipperSetup.dipReboundMinReboundPct)} conservativeMinDipPct=${((s as any).manualDipperSetup?.conservativeMinDipPct ?? defaultManualDipperSetup.conservativeMinDipPct)} conservativeMinReboundPct=${((s as any).manualDipperSetup?.conservativeMinReboundPct ?? defaultManualDipperSetup.conservativeMinReboundPct)}`);
-    onScannerConfigChange?.({
-      riskGroups: scannerRiskGroups,
-      referencePeriod: scannerReferencePeriod,
-      scannerBanlist,
-    });
+      onScannerConfigChange?.({
+        riskGroups: scannerRiskGroups,
+        referencePeriod: scannerReferencePeriod,
+        referenceMode: mapUiRefModeToScanner(airParams.refMode),
+        scannerBanlist,
+      });
       // Restore AutoBots from persisted settings only if user hasn't toggled since mount
       const persistedAutoBots = s.paperAutoExecutionEnabled ?? false;
       const userToggleTime = autoBotsLastToggleRef.current;
@@ -405,6 +415,7 @@ export function TradePage({
     onScannerConfigChange?.({
       riskGroups: airParams.scannerRiskGroups,
       referencePeriod: airParams.scannerReferencePeriod,
+      referenceMode: mapUiRefModeToScanner(airParams.refMode),
       scannerBanlist: canonicalBanlist,
     });
     logger.info(`USER_SETTINGS_SAVE_SUCCESS: tradingCapital=${airParams.autoTradingCapital} capitalPerCoin=${airParams.capitalPerCoin} maxOpenPositions=${airParams.maxOpenPositions} bannedCoinsCount=${canonicalBanlist.length} source=UI`);

@@ -13,7 +13,7 @@ export function mapMockCoinToVisualState(coin: Pick<MockScannerCoin, 'rawState' 
 export function getVisualStateLabel(state: CoinVisualState): string {
   switch (state) {
     case 'buy_pull_to_core':
-      return 'BUY / Pull to Core';
+      return 'BUY / Transfer to Open Positions';
     case 'blocked_push_out':
       return 'Blocked / Pushed Out';
     case 'open_position':

@@ -1985,6 +1985,44 @@ export interface MLLabState {
   error: string | null;
 }
 
+// ── ML Runtime Safety types ───────────────────────────
+
+export type MlRuntimeMode = 'off' | 'shadow_only' | 'advisory_only' | 'active_guarded';
+
+export interface MlRuntimeEvent {
+  id: string;
+  timestamp: number;
+  symbol: string;
+  mode: MlRuntimeMode;
+  originalDecision: string;
+  mlPrediction: string | null;
+  brainVerdict: string | null;
+  wouldHaveChangedDecision: boolean;
+  wouldHaveChangedTo: string | null;
+  actualDecisionApplied: string;
+  mutationBlocked: boolean;
+  exitTriggered: boolean;
+  reason: string | null;
+}
+
+export interface MlRuntimeCounters {
+  shadowDecisions: number;
+  advisoryEvents: number;
+  activeDowngrades: number;
+  mlExitTriggers: number;
+  blockedMutations: number;
+  upgradeAttemptsBlocked: number;
+}
+
+export interface MlRuntimeGuardState {
+  mode: MlRuntimeMode;
+  brainLoaded: boolean;
+  modelTrained: boolean;
+  lastModeChangeAt: string | null;
+  persisted: boolean;
+  counters: MlRuntimeCounters;
+}
+
 // ── Phase 17: Paper Simulation types ──────────────────
 
 export type PaperExecutionStatus = 'FILLED' | 'PARTIALLY_FILLED' | 'REJECTED' | 'FAILED';

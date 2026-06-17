@@ -26,7 +26,10 @@ export function AirScannerLabPage() {
   const [transferSource, setTransferSource] = useState<ScreenPoint | null>(null);
   const [selectedCoin, setSelectedCoin] = useState<MockScannerCoin | null>(null);
 
-  const openPositions = useMemo(() => (openPositionConfirmed || visualState === 'open_position' ? [confirmedUniPosition, ...mockOpenPositions] : mockOpenPositions), [openPositionConfirmed, visualState]);
+  const openPositions = useMemo(
+    () => (openPositionConfirmed || visualState === 'buy_pull_to_core' || visualState === 'open_position' ? [confirmedUniPosition, ...mockOpenPositions] : mockOpenPositions),
+    [openPositionConfirmed, visualState],
+  );
 
   useEffect(() => {
     if (!toggles.autoDemoLoop) return;
@@ -68,29 +71,37 @@ export function AirScannerLabPage() {
         onToggleChange={handleToggleChange}
         onReset={handleReset}
       />
-      <section className="air-lab-stage">
-        <AirScannerCanvas
-          visualState={visualState}
-          quality={quality}
-          toggles={toggles}
-          lifecycleId={lifecycleId}
-          onDebugUpdate={setDebug}
-          onTransferSourceUpdate={setTransferSource}
-          onCoinSelect={setSelectedCoin}
-          onOpenPositionConfirmed={() => {
-            setOpenPositionConfirmed(true);
-            setVisualState('open_position');
-          }}
-        />
-        <ScannerHUD
-          visualState={visualState}
-          debug={debug}
-          openPositions={openPositions}
-          openPositionConfirmed={openPositionConfirmed || visualState === 'open_position'}
-          transferSource={transferSource}
-          transferLifecycleId={lifecycleId}
-          selectedCoin={selectedCoin}
-        />
+      <section className="air-lab-preview-area">
+        <div className="air-lab-production-frame">
+          <div className="air-lab-production-toolbar">
+            <span>3D AIR SCANNER</span>
+            <b>Production Size Preview</b>
+          </div>
+          <div className="air-lab-stage" data-testid="air-scanner-lab-production-size">
+            <AirScannerCanvas
+              visualState={visualState}
+              quality={quality}
+              toggles={toggles}
+              lifecycleId={lifecycleId}
+              onDebugUpdate={setDebug}
+              onTransferSourceUpdate={setTransferSource}
+              onCoinSelect={setSelectedCoin}
+              onOpenPositionConfirmed={() => {
+                setOpenPositionConfirmed(true);
+                setVisualState('open_position');
+              }}
+            />
+            <ScannerHUD
+              visualState={visualState}
+              debug={debug}
+              openPositions={openPositions}
+              openPositionConfirmed={openPositionConfirmed || visualState === 'buy_pull_to_core' || visualState === 'open_position'}
+              transferSource={transferSource}
+              transferLifecycleId={lifecycleId}
+              selectedCoin={selectedCoin}
+            />
+          </div>
+        </div>
       </section>
     </main>
   );

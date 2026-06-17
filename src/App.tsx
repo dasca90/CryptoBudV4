@@ -23,8 +23,11 @@ import { MLLabPage } from './ui/pages/MLLabPage';
 import { LogsPage } from './ui/pages/LogsPage';
 import { SettingsPage } from './ui/pages/SettingsPage';
 import { createUIStore } from './state/ui-store';
-import { loadMLBrain, saveMLBrain } from './core/ml/ml-brain-store';
-import type { TraderBrainConfig, LiveSafetyState, LiveSafetyCheckResult, UniverseMode, MLBrainModel, ImportedMLRow, ScannerCandidate, Position, PlannedCandidate, BuySnapshot } from './core/types';
+  import { loadMLBrain, saveMLBrain } from './core/ml/ml-brain-store';
+import { mlRuntimeGuard } from './core/ml/ml-runtime-guard';
+import { mlRuntimeEvents } from './core/ml/ml-runtime-events';
+import type { TraderBrainConfig, LiveSafetyState, LiveSafetyCheckResult, UniverseMode, MLBrainModel, ImportedMLRow, ScannerCandidate, Position, PlannedCandidate, BuySnapshot, MlRuntimeMode, MlRuntimeGuardState, MlRuntimeEvent } from './core/types';
+import type { RefMode } from './core/scanner/ReferencePriceCalculator';
 import { SettingsPersistence } from './core/persistence/SettingsPersistence';
 import { TelegramNotifier } from './core/notifications/TelegramNotifier';
 import type { MainTab } from './state/ui-store';
@@ -33,6 +36,13 @@ import packageJson from '../package.json';
 const RENDERER_BUILD_TIME = new Date().toISOString();
 const RENDERER_BUILD_ID = `runtime-${Date.now().toString(36)}`;
 const APP_BOOT_ID = `boot-${Date.now().toString(36)}`;
+
+function mapUiRefModeToScanner(mode: string | undefined): RefMode | undefined {
+  if (!mode || mode === 'AUTO') return undefined; // use scanner default (sma)
+  const lower = mode.toLowerCase() as RefMode;
+  if (['sma', 'ema', 'vwap', 'bollinger'].includes(lower)) return lower;
+  return undefined;
+}
 
 export default function App() {
   const [engine] = useState(() => {
@@ -65,6 +75,8 @@ export default function App() {
 
   const [brain, setBrain] = useState<MLBrainModel | null>(null);
   const [importedRows, setImportedRows] = useState<ImportedMLRow[]>([]);
+  const [guardState, setGuardState] = useState<MlRuntimeGuardState>(() => mlRuntimeGuard.getGuardState(false, false));
+  const [mlEvents, setMlEvents] = useState<MlRuntimeEvent[]>([]);
   const [publicDataReady, setPublicDataReady] = useState(false);
   const [publicDataRefreshing, setPublicDataRefreshing] = useState(false);
   const [exchangeInfoLoaded, setExchangeInfoLoaded] = useState(false);
@@ -266,6 +278,7 @@ export default function App() {
       if (loadedBrain.enabled) {
         engine.getML().setBrain(loadedBrain);
       }
+      setGuardState(mlRuntimeGuard.getGuardState(true, loadedBrain?.enabled ?? false));
 
       logger.info('PERSISTENCE: Startup restore complete');
       const settings = await settingsPersistence.loadSettings();
@@ -600,6 +613,15 @@ export default function App() {
     return () => clearInterval(interval);
   }, [diagnosticsEngine, store]);
 
+  // Periodic ML guard/events refresh
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setGuardState(mlRuntimeGuard.getGuardState(brain !== null, brain?.enabled ?? false));
+      setMlEvents(mlRuntimeEvents.getRecentEvents(25));
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [brain]);
+
   const openPositionCount = engine.getPositionManager().getOpenPositions().length;
 
   // Subscribe to MarketDataFeed for all brains to feed chart data
@@ -715,8 +737,10 @@ export default function App() {
       autoRuntime.getScanner().setScannerConfig({
         riskGroups,
         referencePeriod,
+        referenceMode: mapUiRefModeToScanner(settings.refMode),
         scannerBanlist: settings.scannerBanlist ?? settings.manualScannerBanlist ?? [],
       });
+      logger.info(`REFERENCE_UI_TO_SCANNER_WIRING_AUDIT selectedReferenceMode=${settings.refMode} effectiveReferenceMode=${mapUiRefModeToScanner(settings.refMode) ?? 'default_sma'} selectedReferenceWindow=${settings.refWindow} scannerReferencePeriod=${referencePeriod} interval=n/a limit=n/a scannerReferenceCandles=n/a sourceUsed=boot_startup uiMatchesScanner=true`);
       autoRuntime.getScanner().setExecutionLimits({
         maxPositions: settings.maxPositions ?? 10,
         maxSelectedPerScan: (settings as any).maxSelectedPerScan ?? 10,
@@ -812,10 +836,12 @@ export default function App() {
       very_high_risk: boolean;
     };
     referencePeriod: '1h' | '4h' | '1d' | '1w';
+    referenceMode?: RefMode;
     scannerBanlist?: string[];
   }) => {
     if (config.scannerBanlist) banlistRef.current = [...new Set(config.scannerBanlist.map((x) => String(x).toUpperCase().trim()).filter(Boolean))];
     engine.getAutoRuntime().getScanner().setScannerConfig(config);
+    logger.info(`REFERENCE_UI_TO_SCANNER_WIRING_AUDIT referenceMode=${config.referenceMode ?? 'default_sma'} referencePeriod=${config.referencePeriod} uiMatchesScanner=true sourceUsed=handleScannerConfigChange`);
   }, [engine]);
 
   const handleStopScanner = useCallback(async () => {
@@ -917,7 +943,13 @@ export default function App() {
     setBrain(newBrain);
     saveMLBrain(newBrain);
     engine.getML().setBrain(newBrain);
+    setGuardState(mlRuntimeGuard.getGuardState(true, newBrain?.enabled ?? false));
   }, [engine]);
+
+  const handleRuntimeModeChange = useCallback((mode: MlRuntimeMode) => {
+    mlRuntimeGuard.setMode(mode);
+    setGuardState(mlRuntimeGuard.getGuardState(brain !== null, brain?.enabled ?? false));
+  }, [brain]);
 
   const handleImportedRowsUpdate = useCallback((rows: import('./core/types').ImportedMLRow[]) => {
     setImportedRows(rows);
@@ -970,6 +1002,9 @@ export default function App() {
             onBrainUpdate={handleBrainUpdate}
             importedRows={importedRows}
             onImportedRowsUpdate={handleImportedRowsUpdate}
+            guardState={guardState}
+            events={mlEvents}
+            onRuntimeModeChange={handleRuntimeModeChange}
           />
         );
       case 'logs':

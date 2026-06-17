@@ -19,7 +19,7 @@ export function AirScannerCanvas(props: AirScannerCanvasProps) {
     <Canvas
       className="air-scanner-lab-canvas"
       dpr={QUALITY_DPR[props.quality]}
-      camera={{ position: [0, 5.05, 9.8], fov: 50, near: 0.1, far: 100 }}
+      camera={{ position: [0, 5.35, 10.7], fov: 54, near: 0.1, far: 100 }}
       gl={{ antialias: props.quality !== 'low', powerPreference: 'high-performance', alpha: false }}
     >
       <ScannerScene {...props} />

@@ -635,6 +635,266 @@ select option {
   transition: width 0.5s;
 }
 
+/* ── ML Runtime Mode Selector ─────────────────────── */
+.ml-mode-selector {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.ml-mode-btn {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.ml-mode-btn:hover {
+  border-color: rgba(0,234,255,0.25);
+  color: var(--text-primary);
+}
+
+.ml-mode-btn--active {
+  font-weight: 700;
+}
+
+/* ── ML Panels Row ────────────────────────────────── */
+.ml-panels-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  min-height: 0;
+}
+
+/* ── ML Safety Panel ──────────────────────────────── */
+.ml-safety-panel {
+  border: 1px solid rgba(0,234,255,0.12);
+  border-radius: 6px;
+  padding: 10px;
+  background: rgba(0,234,255,0.02);
+}
+
+.ml-safety-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.ml-safety-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 6px;
+  background: var(--bg-primary);
+  border-radius: 3px;
+}
+
+.ml-safety-label {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.ml-safety-value {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: 'Consolas', 'Courier New', monospace;
+}
+
+/* ── ML Counter Grid ──────────────────────────────── */
+.ml-counter-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.ml-counter-item {
+  text-align: center;
+  padding: 4px;
+  background: var(--bg-primary);
+  border-radius: 3px;
+}
+
+.ml-counter-value {
+  display: block;
+  font-size: 16px;
+  font-weight: 700;
+  font-family: 'Consolas', 'Courier New', monospace;
+}
+
+.ml-counter-label {
+  display: block;
+  font-size: 8px;
+  color: var(--text-muted);
+  margin-top: 1px;
+  text-transform: uppercase;
+}
+
+/* ── ML Decisions Panel ───────────────────────────── */
+.ml-decisions-panel {
+  border: 1px solid rgba(0,234,255,0.12);
+  border-radius: 6px;
+  padding: 10px;
+  background: rgba(0,234,255,0.02);
+  display: flex;
+  flex-direction: column;
+}
+
+.ml-events-table-wrapper {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 260px;
+  margin-top: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0,234,255,0.1) transparent;
+}
+
+.ml-events-table-wrapper::-webkit-scrollbar { width: 4px; }
+.ml-events-table-wrapper::-webkit-scrollbar-thumb { background: rgba(0,234,255,0.1); border-radius: 2px; }
+
+.ml-events-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.ml-events-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  font-size: 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+
+.ml-events-header {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  position: sticky;
+  top: 0;
+  background: rgba(13,17,23,0.95);
+}
+
+/* ── ML Impact Summary ────────────────────────────── */
+.ml-impact-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.ml-impact-card {
+  text-align: center;
+  padding: 8px 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+}
+
+.ml-impact-value {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-family: 'Consolas', 'Courier New', monospace;
+}
+
+.ml-impact-label {
+  display: block;
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* ── ML Training Card ─────────────────────────────── */
+.ml-training-card {
+  border: 1px solid rgba(63,185,80,0.18);
+  border-radius: 6px;
+  padding: 12px;
+  background: rgba(63,185,80,0.03);
+}
+
+.ml-training-body {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-top: 8px;
+}
+
+.ml-training-stats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.ml-training-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 180px;
+}
+
+.ml-train-main-btn {
+  width: 100%;
+  padding: 10px 20px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.ml-train-main-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── ML Equity Curve Card ─────────────────────────── */
+.ml-equity-card {
+  border: 1px solid rgba(0,234,255,0.1);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: rgba(0,234,255,0.015);
+  max-width: 600px;
+}
+
+.ml-equity-stats {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.ml-equity-stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 55px;
+}
+
+.ml-equity-stat-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.ml-equity-stat-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: 'Consolas', 'Courier New', monospace;
+}
+
 /* ── Settings ─────────────────────────────────────── */
 .settings-row {
   display: flex;

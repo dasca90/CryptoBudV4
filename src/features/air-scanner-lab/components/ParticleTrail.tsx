@@ -8,18 +8,21 @@ interface ParticleTrailProps {
   color: string;
   count: number;
   active: boolean;
+  spread?: number;
+  radius?: number;
+  opacity?: number;
 }
 
-export function ParticleTrail({ position, color, count, active }: ParticleTrailProps) {
+export function ParticleTrail({ position, color, count, active, spread = 1, radius = 0.036, opacity = 0.68 }: ParticleTrailProps) {
   const groupRef = useRef<Group>(null);
   const smoothPositionRef = useRef(new Vector3(...position));
   const targetPositionRef = useRef(new Vector3(...position));
   const offsets = useMemo(
     () =>
       Array.from({ length: count }, (_, index) => ({
-        x: (Math.sin(index * 12.9898) * 43758.5453 % 1 - 0.5) * 0.95,
-        y: (Math.sin(index * 78.233) * 12731.171 % 1 - 0.5) * 0.7,
-        z: (Math.sin(index * 39.425) * 9182.91 % 1 - 0.5) * 0.95,
+        x: (Math.sin(index * 12.9898) * 43758.5453 % 1 - 0.5) * 0.95 * spread,
+        y: (Math.sin(index * 78.233) * 12731.171 % 1 - 0.5) * 0.7 * spread,
+        z: (Math.sin(index * 39.425) * 9182.91 % 1 - 0.5) * 0.95 * spread,
         phase: index * 0.31,
         drift: 0.16 + (index % 7) * 0.018,
       })),
@@ -48,8 +51,8 @@ export function ParticleTrail({ position, color, count, active }: ParticleTrailP
     <group ref={groupRef}>
       {offsets.map((offset, index) => (
         <mesh key={`${offset.phase}-${index}`}>
-          <sphereGeometry args={[0.036, 10, 10]} />
-          <meshBasicMaterial color={color} transparent opacity={0.68} blending={AdditiveBlending} depthWrite={false} />
+          <sphereGeometry args={[radius, 10, 10]} />
+          <meshBasicMaterial color={color} transparent opacity={opacity} blending={AdditiveBlending} depthWrite={false} />
         </mesh>
       ))}
     </group>

@@ -8,6 +8,51 @@
   overflow: hidden;
 }
 
+.air-lab-preview-area {
+  min-width: 0;
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 34px 34px;
+  overflow: auto;
+}
+
+.air-lab-production-frame {
+  width: clamp(720px, 55vw, 980px);
+  height: clamp(360px, 50vh, 540px);
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
+  border: 1px solid rgba(62, 120, 184, 0.42);
+  border-radius: 8px;
+  background: rgba(3, 13, 26, 0.72);
+  box-shadow: 0 16px 54px rgba(0, 0, 0, 0.34), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+.air-lab-production-toolbar {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(2, 9, 20, 0.78);
+}
+
+.air-lab-production-toolbar span {
+  color: #f3fbff;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.air-lab-production-toolbar b {
+  color: #7da3bd;
+  font-size: 10px;
+  font-weight: 800;
+}
+
 .air-lab-controls {
   border-right: 1px solid rgba(34, 187, 255, 0.22);
   background: linear-gradient(180deg, rgba(4, 13, 29, 0.96), rgba(2, 9, 20, 0.98));
@@ -99,13 +144,16 @@
 .air-lab-stage {
   position: relative;
   min-width: 0;
-  min-height: 100vh;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: visible;
 }
 
 .air-scanner-lab-canvas {
   width: 100%;
-  height: 100vh;
+  height: 100%;
   display: block;
+  overflow: hidden;
 }
 
 .air-lab-hud {
@@ -133,40 +181,27 @@
 }
 
 .air-lab-transfer-path-glow {
-  stroke: rgba(36, 255, 210, 0.34);
-  stroke-width: 18;
+  stroke: rgba(44, 255, 216, 0.18);
+  stroke-width: 12;
   stroke-dasharray: 940;
   stroke-dashoffset: 940;
-  animation: airLabTransferDraw 3.1s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+  animation: airLabTransferDraw 1.8s cubic-bezier(0.2, 0.8, 0.2, 1) forwards, airLabTransferFade 20s ease forwards;
 }
 
 .air-lab-transfer-path-core {
   stroke: url("#air-lab-transfer-gradient");
-  stroke-width: 5;
+  stroke-width: 2.4;
   stroke-dasharray: 940;
   stroke-dashoffset: 940;
-  animation: airLabTransferDraw 2.6s cubic-bezier(0.2, 0.8, 0.2, 1) forwards, airLabTransferFade 3.4s ease forwards;
+  animation: airLabTransferDraw 1.35s cubic-bezier(0.2, 0.8, 0.2, 1) forwards, airLabTransferFade 20s ease forwards;
 }
 
-.air-lab-transfer-origin,
-.air-lab-transfer-impact {
-  fill: none;
-  stroke: rgba(48, 255, 218, 0.9);
-  stroke-width: 2;
+.air-lab-transfer-atom {
+  fill: rgba(78, 255, 214, var(--orb-opacity));
+  stroke: rgba(234, 255, 250, 0.24);
+  stroke-width: 0.2;
   filter: url("#air-lab-transfer-glow");
-  transform-origin: center;
-  animation: airLabTransferPulse 1.4s ease-in-out infinite;
-}
-
-.air-lab-transfer-impact {
-  stroke: rgba(50, 255, 170, 0.95);
-  animation-duration: 1s;
-}
-
-.air-lab-transfer-particle {
-  fill: #d7fff4;
-  filter: url("#air-lab-transfer-glow");
-  opacity: 0.95;
+  opacity: var(--orb-opacity);
 }
 
 .air-lab-orb-label {
@@ -226,21 +261,21 @@
 
 .air-lab-title {
   position: absolute;
-  top: 22px;
-  left: 28px;
+  top: 14px;
+  left: 16px;
   display: grid;
-  gap: 5px;
+  gap: 4px;
 }
 
 .air-lab-title span {
   color: #f3fbff;
-  font-size: 17px;
+  font-size: 13px;
   font-weight: 900;
 }
 
 .air-lab-title strong {
   color: #32d9ff;
-  font-size: 14px;
+  font-size: 11px;
   text-transform: uppercase;
 }
 
@@ -248,8 +283,8 @@
   position: absolute;
   left: 50%;
   top: 18%;
-  width: 236px;
-  padding: 15px;
+  width: 210px;
+  padding: 12px;
   border: 1px solid rgba(72, 200, 255, 0.26);
   border-radius: 8px;
   background: rgba(3, 13, 28, 0.82);
@@ -280,10 +315,10 @@
 
 .air-lab-selected-card {
   position: absolute;
-  left: 30px;
-  bottom: 126px;
-  width: 210px;
-  padding: 12px;
+  left: 16px;
+  bottom: 86px;
+  width: 184px;
+  padding: 10px;
   border: 1px solid rgba(51, 238, 255, 0.36);
   border-radius: 8px;
   background:
@@ -303,7 +338,7 @@
 
 .air-lab-selected-card b {
   color: #f4fbff;
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 900;
 }
 
@@ -340,8 +375,8 @@
 }
 
 .air-lab-wait-card {
-  left: 30px;
-  top: 19%;
+  left: 16px;
+  top: 22%;
   border-color: rgba(255, 184, 62, 0.5);
   box-shadow: 0 0 38px rgba(255, 184, 62, 0.17);
 }
@@ -371,50 +406,51 @@
 
 .air-lab-positions {
   position: absolute;
-  top: 28px;
-  right: 28px;
-  width: min(640px, 48vw);
+  top: 0;
+  right: -548px;
+  width: 520px;
   border: 1px solid rgba(79, 190, 255, 0.2);
   border-radius: 8px;
   background: rgba(3, 13, 26, 0.72);
   box-shadow: 0 12px 44px rgba(0, 0, 0, 0.28);
   backdrop-filter: blur(10px);
   overflow: hidden;
+  pointer-events: auto;
 }
 
 .air-lab-positions header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: 10px 12px;
   border-bottom: 1px solid rgba(108, 207, 255, 0.14);
 }
 
 .air-lab-positions header b {
-  font-size: 14px;
+  font-size: 11px;
   text-transform: uppercase;
 }
 
 .air-lab-positions header span {
   color: #39ffa9;
-  font-size: 12px;
+  font-size: 10px;
 }
 
 .air-lab-position-grid {
   position: relative;
   display: grid;
   grid-template-columns: 1.2fr 1.2fr 0.8fr 0.9fr 0.8fr 0.8fr 0.6fr;
-  gap: 10px;
+  gap: 7px;
   align-items: center;
-  min-height: 38px;
-  padding: 0 16px;
+  min-height: 30px;
+  padding: 0 12px;
   border-bottom: 1px solid rgba(85, 184, 255, 0.08);
   color: #c6dcf0;
-  font-size: 12px;
+  font-size: 10px;
 }
 
 .air-lab-position-head {
-  min-height: 30px;
+  min-height: 24px;
   color: #6f8ba4;
   font-size: 10px;
   text-transform: uppercase;
@@ -431,7 +467,7 @@
   color: #edfffa;
   background: linear-gradient(90deg, rgba(0, 255, 188, 0.28), rgba(0, 255, 188, 0.12) 42%, rgba(0, 255, 188, 0.03));
   box-shadow: inset 0 0 0 1px rgba(33, 255, 208, 0.78), 0 0 34px rgba(0, 255, 196, 0.35);
-  animation: airLabRowPulse 2s ease-in-out infinite;
+  animation: airLabRowPulse 1.35s ease-in-out infinite;
 }
 
 .air-lab-position-grid.is-highlighted::before {
@@ -482,12 +518,12 @@
 
 .air-lab-debug {
   position: absolute;
-  left: 28px;
-  bottom: 24px;
+  left: 16px;
+  bottom: 14px;
   display: grid;
-  grid-template-columns: repeat(5, minmax(86px, 1fr));
+  grid-template-columns: repeat(5, minmax(62px, 1fr));
   gap: 1px;
-  min-width: 560px;
+  min-width: 360px;
   border: 1px solid rgba(62, 197, 255, 0.2);
   border-radius: 8px;
   background: rgba(2, 12, 25, 0.8);
@@ -496,9 +532,9 @@
 
 .air-lab-debug header {
   grid-column: 1 / -1;
-  padding: 10px 14px;
+  padding: 7px 10px;
   color: #c8e6ff;
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 800;
   text-transform: uppercase;
 }
@@ -506,7 +542,7 @@
 .air-lab-debug span {
   display: grid;
   gap: 4px;
-  padding: 10px 14px;
+  padding: 8px 10px;
   border-top: 1px solid rgba(86, 193, 255, 0.1);
   background: rgba(9, 28, 48, 0.45);
   color: #7f9bb4;
@@ -516,7 +552,7 @@
 
 .air-lab-debug b {
   color: #f5fbff;
-  font-size: 17px;
+  font-size: 14px;
 }
 
 @keyframes airLabRowPulse {
@@ -537,23 +573,11 @@
 
 @keyframes airLabTransferFade {
   0%,
-  78% {
+  90% {
     opacity: 1;
   }
   100% {
     opacity: 0;
-  }
-}
-
-@keyframes airLabTransferPulse {
-  0%,
-  100% {
-    transform: scale(0.82);
-    opacity: 0.65;
-  }
-  50% {
-    transform: scale(1.22);
-    opacity: 1;
   }
 }
 
@@ -574,16 +598,21 @@
     border-bottom: 1px solid rgba(34, 187, 255, 0.22);
   }
 
-  .air-lab-stage,
-  .air-scanner-lab-canvas {
-    height: 76vh;
-    min-height: 620px;
+  .air-lab-preview-area {
+    min-height: auto;
+    padding: 18px;
+  }
+
+  .air-lab-production-frame {
+    width: min(100%, 900px);
+    height: clamp(360px, 58vh, 520px);
   }
 
   .air-lab-positions {
-    width: calc(100% - 36px);
-    right: 18px;
-    top: 72px;
+    width: 100%;
+    right: auto;
+    left: 0;
+    top: calc(100% + 14px);
   }
 
   .air-lab-debug {
@@ -599,7 +628,8 @@
   }
 
   .air-lab-positions,
-  .air-lab-floating {
+  .air-lab-floating,
+  .air-lab-selected-card {
     display: none;
   }
 

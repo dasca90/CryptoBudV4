@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MutableRefObject, type RefObject } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type MutableRefObject, type RefObject } from 'react';
 import type { AnimationDebugState, CoinVisualState, MockScannerCoin, OpenPositionVisualRow, ScreenPoint } from '../state/airScannerVisualState';
 import { scanChecklist } from '../state/mockScannerFeed';
 import { createOpenPositionTransferAudit, createTransferBeamPath, getOpenPositionRowAnchor, shouldStartOpenPositionTransfer } from '../utils/openPositionTransfer';
@@ -21,6 +21,15 @@ interface TransferBeamState {
   startedAt: string;
   lifecycleId: number;
 }
+
+const TRANSFER_VISUAL_DURATION_MS = 20_000;
+
+const transferAtoms = Array.from({ length: 72 }, (_, index) => ({
+  delay: index * 0.245,
+  radius: 0.9 + (index % 5) * 0.24,
+  duration: 1.85 + (index % 6) * 0.075,
+  opacity: 0.9 - (index % 7) * 0.05,
+}));
 
 function OpenPositionTransferOverlay({
   source,
@@ -99,7 +108,7 @@ function OpenPositionTransferOverlay({
         beamCompletedAt: new Date().toISOString(),
       }));
       setBeam(null);
-    }, 3400);
+    }, TRANSFER_VISUAL_DURATION_MS);
 
     return () => window.clearTimeout(completeId);
   }, [source, openPositionConfirmed, lifecycleId, rowRefs, stageRef]);
@@ -124,11 +133,16 @@ function OpenPositionTransferOverlay({
       </defs>
       <path className="air-lab-transfer-path-glow" d={beam.path} />
       <path className="air-lab-transfer-path-core" d={beam.path} />
-      <circle className="air-lab-transfer-origin" cx={beam.source.x} cy={beam.source.y} r="14" />
-      <circle className="air-lab-transfer-impact" cx={beam.target.x} cy={beam.target.y} r="18" />
-      {[0, 0.18, 0.36, 0.54].map((delay) => (
-        <circle key={delay} className="air-lab-transfer-particle" r="4">
-          <animateMotion dur="1.55s" begin={`${delay}s`} repeatCount="2" path={beam.path} />
+      {transferAtoms.map((orb, index) => (
+        <circle
+          key={`${orb.delay}-${index}`}
+          className="air-lab-transfer-atom"
+          r={orb.radius}
+          style={{ '--orb-opacity': orb.opacity } as CSSProperties}
+        >
+          <animateMotion dur={`${orb.duration}s`} begin={`${orb.delay}s`} repeatCount="1" fill="freeze" path={beam.path} />
+          <animate attributeName="r" values={`${orb.radius};${Math.max(0.45, orb.radius * 0.46)}`} dur={`${orb.duration}s`} begin={`${orb.delay}s`} fill="freeze" />
+          <animate attributeName="opacity" values={`${orb.opacity};${orb.opacity};0`} keyTimes="0;0.72;1" dur={`${orb.duration}s`} begin={`${orb.delay}s`} fill="freeze" />
         </circle>
       ))}
     </svg>

@@ -90,9 +90,17 @@ console.log('\n── B. Bearish group downgrades momentum ──\n');
   const d = computeAutoStrategy(mkInput({
     groupTrend: 'bearish', confidence: 85, momentumConfirmed: true,
   }));
-  assert(d.effectiveStrategy === 'conservative', 'B bearish + A_80_PLUS = conservative (downgrade)');
-  assert(d.blockedByGroupRegime === true, 'B blockedByGroupRegime true');
-  assert(d.warnings.includes('GROUP_BEARISH_DOWNGRADE') || d.reason.includes('bearish'), 'B bearish warning present');
+  assert(d.effectiveStrategy === 'momentum', 'B bearish + A_80_PLUS + momentum+rebound = momentum promoted');
+  assert(d.blockedByGroupRegime !== true, 'B promoted momentum — not blocked by group regime');
+  assert(d.warnings.includes('GROUP_BEARISH_PROMOTED'), 'B bearish promoted warning present');
+}
+{
+  // Bearish + A_80_PLUS but NO rebound → conservative downgrade (no promotion possible)
+  const d = computeAutoStrategy(mkInput({
+    groupTrend: 'bearish', confidence: 85, momentumConfirmed: true, reboundConfirmed: false,
+  }));
+  assert(d.effectiveStrategy === 'wait', 'B bearish + no rebound + A_80_PLUS = wait (rebound required)');
+  assert(d.warnings.includes('REBOUND_NOT_CONFIRMED'), 'B rebound not confirmed warning present');
 }
 {
   const d = computeAutoStrategy(mkInput({

@@ -164,7 +164,7 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     && tpRoomOk
     && priceFresh;
   let finalExecutable = requiredSetupPassed && candidate.status === 'BUY' && candidate.entryGateDecision?.decision === 'ALLOW';
-  const buyAllowed = finalExecutable;
+  let buyAllowed = finalExecutable;
 
   if (finalExecutable && strategySelected.toLowerCase() === 'wait') {
     const perCoin = String(auto?.perCoinSelectedStrategy ?? '');
@@ -252,6 +252,7 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
         });
         if (!recheck.contractValid) {
           finalExecutable = false;
+          buyAllowed = false;
           strategySelected = 'wait';
           finalEntryRule = 'WAITING_FOR_SETUP';
           logger.info(`STRATEGY_DOWNGRADE_FAILED: symbol=${candidate.symbol} downgradedTo=${strategySelected} contractCheckAfterDowngrade=${String(recheck.contractValid)} invalidReason=${recheck.invalidReason} finalExecutable=${String(finalExecutable)} validatorStage=builder_final_guard_downgrade_failed`);
@@ -265,6 +266,7 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
 ).toLowerCase());
           if (isNowMomentum && origWasDipOrConservative && noRebound) {
             finalExecutable = false;
+            buyAllowed = false;
             strategySelected = 'wait';
             finalEntryRule = 'WAITING_FOR_SETUP';
             logger.warn(`STRATEGY_DOWNGRADE_TO_MOMENTUM_REJECTED: symbol=${candidate.symbol} originalCandidateStrategy=${candidate.selectedStrategy} finalExecutionStrategy=momentum downgradeApplied=false dipPct=${dipDepthPct ?? 'n/a'} reboundPct=${reboundPct ?? 'n/a'} reboundConfirmed=${String(reboundConfirmed)} momentumConfirmed=${String(momentumConfirmed)} trend=${candidate.groupTrend ?? 'n/a'} marketTrend=${candidate.periodTrend ?? 'n/a'} btcContext=n/a ethContext=n/a htf=${candidate.periodTrend ?? 'n/a'} marketAction=${candidate.periodRegime ?? 'n/a'} strongMomentumOverrideEligible=false finalExecutable=${String(finalExecutable)} blockReason=rebound_missing_after_dip_based_downgrade`);
@@ -272,6 +274,7 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
           }
           if (isNowMomentum && weakMomentum) {
             finalExecutable = false;
+            buyAllowed = false;
             strategySelected = 'wait';
             finalEntryRule = 'WAITING_FOR_SETUP';
             logger.warn(`MOMENTUM_BLOCKED_NO_REBOUND: symbol=${candidate.symbol} downgradeFrom=${candidate.selectedStrategy} momentumConfirmed=false reboundPct=${reboundPct ?? 0} blockReason=momentum_requires_momentum_confirmation`);
@@ -283,6 +286,7 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
       } else {
         // momentum or balanced failed contract — hard-set as not executable
         finalExecutable = false;
+        buyAllowed = false;
         finalEntryRule = 'WAITING_FOR_SETUP';
         logger.info(`STRATEGY_CONTRACT_HARD_FAIL: symbol=${candidate.symbol} strategySelected=${strategySelected} contractValid=false invalidReason=${contractCheck.invalidReason} finalExecutable=${String(finalExecutable)} action=fixed_finalExecutable_false validatorStage=builder_final_guard`);
       }
@@ -290,9 +294,22 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
   }
   {
     const dp = dipDepthPct ?? (reboundPct != null && reboundPct > 0 ? (rawDipPct ?? 0) : null);
-    const reboundIsOld = reboundPct != null && reboundPct > 20; // >20% rebound likely from old reference
+    const reboundIsOld = reboundPct != null && reboundPct > 20;
     const reboundOverextended = reboundPct != null && reboundPct > 30;
-    logger.info(`REBOUND_FRESHNESS_AUDIT: symbol=${candidate.symbol} strategy=${strategySelected} scannerPeriod=${candidate.referencePeriod ?? candidate.periodTrend ?? 'n/a'} dipAtEntry=${dp ?? 'n/a'} reboundAtEntry=${reboundPct ?? 'n/a'} dipConfirmed=${String(dipConfirmed)} reboundConfirmed=${String(reboundConfirmed)} dipLowTimestamp=n/a reboundTimestamp=n/a reboundAgeMs=n/a maxAllowedReboundAgeMs=n/a reboundFromSameDip=${String(dp != null && reboundPct != null)} overextended=${String(reboundOverextended)} blockReason=${!finalExecutable ? (reboundOverextended ? 'REBOUND_OVEREXTENDED' : reboundIsOld ? 'REBOUND_TOO_LATE' : 'none') : 'none'}`);
+    const freshnessCanBeValidated = false; // scanner lacks full dipLowTimestamp/reboundTimestamp tracking
+    const freshnessStatus: 'valid' | 'unknown' | 'stale' = freshnessCanBeValidated ? (reboundIsOld ? 'stale' : 'valid') : 'unknown';
+    const isDipOrConservative = strategySelected === 'dip_and_rebound' || strategySelected === 'conservative';
+
+    // Freshness hardening: unknown/stale rebound blocks dip_and_rebound and conservative hard confirmation
+    if (isDipOrConservative && freshnessStatus !== 'valid' && finalExecutable) {
+      finalExecutable = false;
+      buyAllowed = false;
+      strategySelected = 'wait';
+      finalEntryRule = 'WAITING_FOR_SETUP';
+      logger.info(`REBOUND_FRESHNESS_HARDENED_AUDIT symbol=${candidate.symbol} strategy=${isDipOrConservative ? strategySelected : 'n/a'} localLow=n/a localLowTimestamp=n/a reboundTimestamp=n/a reboundAgeMs=n/a maxAllowedReboundAgeMs=n/a reboundFromSameDip=n/a freshnessStatus=${freshnessStatus} usedAsHardConfirmation=false usedAsAdvisoryOnly=true blockReason=${freshnessStatus === 'unknown' ? 'REBOUND_FRESHNESS_UNKNOWN' : 'REBOUND_FRESHNESS_STALE'} reboundPct=${reboundPct ?? 'n/a'} dipDepthPct=${dipDepthPct ?? 'n/a'}`);
+    } else {
+      logger.info(`REBOUND_FRESHNESS_AUDIT symbol=${candidate.symbol} strategy=${strategySelected} reboundAtEntry=${reboundPct ?? 'n/a'} dipAtEntry=${dp ?? 'n/a'} dipConfirmed=${String(dipConfirmed)} reboundConfirmed=${String(reboundConfirmed)} freshnessStatus=${freshnessStatus} usedAsHardConfirmation=${isDipOrConservative && finalExecutable} usedAsAdvisoryOnly=${strategySelected === 'momentum' || strategySelected === 'balanced'} overextended=${String(reboundOverextended)} blockReason=${!finalExecutable ? (reboundOverextended ? 'REBOUND_OVEREXTENDED' : reboundIsOld ? 'REBOUND_TOO_LATE' : 'none') : 'none'}`);
+    }
     if (strategySelected === 'balanced') {
       logger.info(`BALANCED_ENTRY_CONTRACT_AUDIT: symbol=${candidate.symbol} finalExecutedStrategy=balanced entryRuleAtEntry=${finalEntryRule} dipPctAtEntry=${dipDepthPct ?? 'n/a'} reboundPctAtEntry=${reboundPct ?? 'n/a'} requiredDipPctAtEntry=n/a requiredReboundPctAtEntry=0.4 momentumConfirmedAtEntry=${String(momentumConfirmed)} weakMomentumConfirmedAtEntry=n/a balancedMinDipSetting=n/a balancedMinReboundSetting=0.4 balancedUsesDipAsRequired=false balancedUsesReboundAsRequired=true balancedUsesMomentumAsRequired=false contractValid=${String(finalExecutable)} contractViolationReason=${finalExecutable ? 'none' : 'rebound_below_required'} finalExecutable=${String(finalExecutable)} buyAllowed=${String(finalExecutable)} sourceUsed=balanced_contract_rebound_required`);
     }

@@ -5,6 +5,8 @@ import type {
   BuyRuleName, PlaybookInput, AutobotsInput, MarketPrice, MLPredictionV2,
 } from '../types';
 import { MLPredictor } from '../ml/MLPredictor';
+import { mlRuntimeGuard } from '../ml/ml-runtime-guard';
+import { mlRuntimeEvents } from '../ml/ml-runtime-events';
 import { evaluateUnifiedEntrySignal, getBuyRuleEntryDefinition } from '../strategy-selector/buy-rule-matrix';
 import { selectPlaybook } from '../strategy-selector/strategy-playbooks';
 import { evaluateAutobots } from '../strategy-selector/autobots-selector';
@@ -107,7 +109,28 @@ export class TraderBrain {
       btcRegime: ctx.btcRegime,
       strategy: 'default',
     };
-    const mlBrainPrediction = this.ml.predictWithBrain(this.coin, brainFeatures);
+    const mlMode = mlRuntimeGuard.getMode();
+    const shouldApplyML = mlRuntimeGuard.canMutateDecision();
+    const shouldRunBrain = mlMode !== 'off';
+
+    let mlBrainPrediction: MLPredictionV2;
+    if (shouldRunBrain) {
+      mlBrainPrediction = this.ml.predictWithBrain(this.coin, brainFeatures);
+    } else {
+      mlBrainPrediction = {
+        symbol: this.coin,
+        setupId: `off_${Date.now()}`,
+        modelVersion: 'off',
+        isTrained: false,
+        winProbability: null,
+        badEntryRisk: 0,
+        expectedMovePct: null,
+        expectedHoldMinutes: null,
+        confidenceAdjustment: 0,
+        suggestedAction: 'ALLOW',
+        reasons: ['ML runtime mode is OFF'],
+      };
+    }
 
     let mlAdjustedConfidence = prediction?.confidence ?? 0.5;
     const mlWarnings: string[] = [];
@@ -115,12 +138,18 @@ export class TraderBrain {
     if (mlBrainPrediction.isTrained && mlBrainPrediction.reasons.length > 0) {
       if (mlBrainPrediction.suggestedAction === 'BLOCK') {
         mlWarnings.push(`ML BLOCK: ${mlBrainPrediction.reasons.join('; ')}`);
-        mlAdjustedConfidence = Math.max(0, mlAdjustedConfidence + mlBrainPrediction.confidenceAdjustment);
+        if (shouldApplyML) {
+          mlAdjustedConfidence = Math.max(0, mlAdjustedConfidence + mlBrainPrediction.confidenceAdjustment);
+        }
       } else if (mlBrainPrediction.suggestedAction === 'WAIT') {
         mlWarnings.push(`ML WAIT: ${mlBrainPrediction.reasons.join('; ')}`);
-        mlAdjustedConfidence = Math.max(0, mlAdjustedConfidence + mlBrainPrediction.confidenceAdjustment);
+        if (shouldApplyML) {
+          mlAdjustedConfidence = Math.max(0, mlAdjustedConfidence + mlBrainPrediction.confidenceAdjustment);
+        }
       } else {
-        mlAdjustedConfidence = Math.max(0, mlAdjustedConfidence + mlBrainPrediction.confidenceAdjustment);
+        if (shouldApplyML) {
+          mlAdjustedConfidence = Math.max(0, mlAdjustedConfidence + mlBrainPrediction.confidenceAdjustment);
+        }
       }
     }
 
@@ -265,17 +294,59 @@ export class TraderBrain {
 
     // ML can only downgrade, never upgrade to BUY
     if (mlBrainPrediction.isTrained) {
-      if (mlBrainPrediction.suggestedAction === 'BLOCK' && status !== 'BLOCK') {
-        if (status === 'BUY') {
+      const statusBeforeML = status;
+      const wouldDowngradeToBlock = mlBrainPrediction.suggestedAction === 'BLOCK' && status !== 'BLOCK' && status === 'BUY';
+      const wouldDowngradeToWait = mlBrainPrediction.suggestedAction === 'WAIT' && status === 'BUY';
+      const wouldHaveChanged = wouldDowngradeToBlock || wouldDowngradeToWait;
+
+      if (shouldApplyML) {
+        if (wouldDowngradeToBlock) {
           status = 'BLOCK';
           allBlockReasons.push('ML_BAD_ENTRY_RISK');
           allWarnings.push('ML blocked: bad entry risk too high');
           entryPlan = null;
+        } else if (wouldDowngradeToWait) {
+          status = 'WAITING';
+          allWarnings.push('ML suggests WAIT: bad entry risk elevated');
+          entryPlan = null;
         }
-      } else if (mlBrainPrediction.suggestedAction === 'WAIT' && status === 'BUY') {
-        status = 'WAITING';
-        allWarnings.push('ML suggests WAIT: bad entry risk elevated');
-        entryPlan = null;
+
+        mlRuntimeEvents.recordActiveDowngrade({
+          symbol: this.coin,
+          originalDecision: statusBeforeML,
+          mlPrediction: prediction?.prediction ?? null,
+          finalDecision: status,
+          downgraded: wouldHaveChanged,
+          exitTriggered: false,
+          upgradeBlocked: mlBrainPrediction.suggestedAction === 'ALLOW' && statusBeforeML !== 'BUY',
+          reason: mlBrainPrediction.reasons.join('; ') || null,
+        });
+      } else if (wouldHaveChanged) {
+        // Shadow/advisory: record what would have happened
+        const wouldHaveChangedTo = wouldDowngradeToBlock ? 'BLOCK' : 'WAIT';
+        if (mlMode === 'shadow_only') {
+          mlRuntimeEvents.recordShadowDecision({
+            symbol: this.coin,
+            originalDecision: statusBeforeML,
+            mlPrediction: prediction?.prediction ?? null,
+            brainVerdict: mlBrainPrediction.suggestedAction,
+            wouldHaveChangedDecision: true,
+            wouldHaveChangedTo,
+            actualDecisionApplied: statusBeforeML,
+            reason: mlBrainPrediction.reasons.join('; ') || null,
+          });
+        } else if (mlMode === 'advisory_only') {
+          mlRuntimeEvents.recordAdvisoryEvent({
+            symbol: this.coin,
+            originalDecision: statusBeforeML,
+            mlPrediction: prediction?.prediction ?? null,
+            brainVerdict: mlBrainPrediction.suggestedAction,
+            wouldHaveChangedDecision: true,
+            wouldHaveChangedTo,
+            actualDecisionApplied: statusBeforeML,
+            reason: mlBrainPrediction.reasons.join('; ') || null,
+          });
+        }
       }
     }
 
@@ -322,7 +393,7 @@ export class TraderBrain {
     }
 
     const prediction = this.ml.predict(this.coin);
-    if (this.mode === 'AUTO' && prediction && prediction.prediction === 'SELL' && pnlPercent > 0) {
+    if (mlRuntimeGuard.canTriggerSell() && this.mode === 'AUTO' && prediction && prediction.prediction === 'SELL' && pnlPercent > 0) {
       shouldExit = true;
       reason = 'ml_reversal';
     }

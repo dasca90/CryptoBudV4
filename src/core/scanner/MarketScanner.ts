@@ -23,6 +23,10 @@ import { resolveTradingTargetOwnership } from '../trading/TradingTargetOwnership
 import { buildStrategyAuditSnapshotFromCandidate } from '../strategy-audit/strategy-audit-builder';
 import { resolveEntryRiskParams } from '../trading/entry-risk-resolver';
 import { resolveMaxSelectedPerScanConfig, type MaxSelectedPerScanSource } from '../settings/max-selected-per-scan';
+import { getReferencePeriodConfig, mapLegacyScannerPeriodToReferenceWindow } from './ReferencePeriodConfig';
+import type { ReferencePeriodConfig } from './ReferencePeriodConfig';
+import { calculateReferencePrice } from './ReferencePriceCalculator';
+import type { RefMode } from './ReferencePriceCalculator';
 
 
 let _scanIdCounter = 0;
@@ -72,12 +76,17 @@ export class MarketScanner {
     very_high_risk: true,
   };
   private scannerReferencePeriod: '1h' | '4h' | '1d' | '1w' = '1h';
+  private referenceMode: RefMode = 'sma';
   private periodCache = new Map<string, {
     trend: 'BULLISH' | 'BEARISH' | 'SIDEWAYS';
     changePct: number;
     volatility: number;
     momentum: number;
     regime: string;
+    closes: number[];
+    highs: number[];
+    lows: number[];
+    volumes: number[];
   }>();
   private publicClient = new BinancePublicClient();
 
@@ -322,6 +331,7 @@ export class MarketScanner {
       very_high_risk: boolean;
     };
     referencePeriod: '1h' | '4h' | '1d' | '1w';
+    referenceMode?: RefMode;
     pocketConfig?: {
       minMomentumPocketPct?: number;
       minMomentumPocketVolumeRel?: number;
@@ -333,6 +343,7 @@ export class MarketScanner {
   }): void {
     this.scannerRiskGroups = { ...config.riskGroups };
     this.scannerReferencePeriod = config.referencePeriod;
+    if (config.referenceMode) { this.referenceMode = config.referenceMode; }
     if (config.pocketConfig) {
       if (config.pocketConfig.minMomentumPocketPct != null) this.minMomentumPocketPct = config.pocketConfig.minMomentumPocketPct;
       if (config.pocketConfig.minMomentumPocketVolumeRel != null) this.minMomentumPocketVolumeRel = config.pocketConfig.minMomentumPocketVolumeRel;
@@ -519,11 +530,14 @@ export class MarketScanner {
     }
   }
 
-  private getReferencePeriodKlineConfig(): { interval: string; limit: number } {
-    if (this.scannerReferencePeriod === '1h') return { interval: '5m', limit: 12 };
-    if (this.scannerReferencePeriod === '4h') return { interval: '15m', limit: 16 };
-    if (this.scannerReferencePeriod === '1d') return { interval: '1h', limit: 24 };
-    return { interval: '4h', limit: 42 };
+  private getReferencePeriodConfigForScan(): ReferencePeriodConfig {
+    const refWindow = mapLegacyScannerPeriodToReferenceWindow(this.scannerReferencePeriod);
+    return getReferencePeriodConfig(refWindow) ?? getReferencePeriodConfig(7)!;
+  }
+
+  private getReferencePeriodKlineConfig(): { interval: string; limit: number; scannerReferenceCandles: number } {
+    const cfg = this.getReferencePeriodConfigForScan();
+    return { interval: cfg.interval, limit: cfg.limit, scannerReferenceCandles: cfg.scannerReferenceCandles };
   }
 
   private async getPeriodAnalysis(symbol: string): Promise<{
@@ -532,6 +546,10 @@ export class MarketScanner {
     volatility: number;
     momentum: number;
     regime: string;
+    closes: number[];
+    highs: number[];
+    lows: number[];
+    volumes: number[];
   } | null> {
     const kc = this.getReferencePeriodKlineConfig();
     const cacheKey = `${symbol}_${kc.interval}_${kc.limit}`;
@@ -544,6 +562,20 @@ export class MarketScanner {
       const lastClose = Number(klines[klines.length - 1]?.[4] ?? 0);
       if (!Number.isFinite(firstOpen) || !Number.isFinite(lastClose) || firstOpen <= 0 || lastClose <= 0) return null;
       const changePct = ((lastClose - firstOpen) / firstOpen) * 100;
+      const closes: number[] = [];
+      const highs: number[] = [];
+      const lows: number[] = [];
+      const volumes: number[] = [];
+      for (const k of klines) {
+        const closePrice = Number(k[4] ?? 0);
+        const highPrice = Number(k[2] ?? 0);
+        const lowPrice = Number(k[3] ?? 0);
+        const volume = Number(k[5] ?? 0);
+        if (Number.isFinite(closePrice) && closePrice > 0) closes.push(closePrice);
+        if (Number.isFinite(highPrice) && highPrice > 0) highs.push(highPrice);
+        if (Number.isFinite(lowPrice) && lowPrice > 0) lows.push(lowPrice);
+        if (Number.isFinite(volume) && volume > 0) volumes.push(volume);
+      }
       let sumAbsMove = 0;
       const recentChanges: number[] = [];
       for (let i = 1; i < klines.length; i++) {
@@ -573,6 +605,10 @@ export class MarketScanner {
         volatility,
         momentum,
         regime: trend === 'SIDEWAYS' ? 'range' : trend.toLowerCase(),
+        closes,
+        highs,
+        lows,
+        volumes,
       };
       this.periodCache.set(cacheKey, period);
       return period;
@@ -2243,7 +2279,72 @@ export class MarketScanner {
         decision.warnings = [...decision.warnings, `reference_period_${this.scannerReferencePeriod}:${period.trend}`];
       }
       const momentumVal = period?.momentum ?? 0;
-      const reboundVal = period?.changePct ?? 0;
+
+      // Calculate reference price from candle history (V3 contract: SMA over scannerReferenceCandles)
+      const refConfig = this.getReferencePeriodKlineConfig();
+      let refPrice = price.last;
+      let dipFromRef = 0;
+      let reboundFromLocalLow = 0;
+      let reboundTimestamp: string | null = null;
+      let dipLowTimestamp: string | null = null;
+      let freshnessStatus: 'valid' | 'unknown' | 'stale' = 'unknown';
+      let freshnessCanBeValidated = false;
+      if (period && period.closes.length > 0) {
+        const refResult = calculateReferencePrice({
+          closes: period.closes,
+          highs: period.highs,
+          lows: period.lows,
+          volumes: period.volumes,
+          referenceMode: this.referenceMode,
+          scannerReferenceCandles: refConfig.scannerReferenceCandles,
+          symbol,
+        });
+        refPrice = refResult.refPrice > 0 ? refResult.refPrice : price.last;
+
+        // Dip: how far below reference price is current price
+        if (refPrice > 0 && price.last < refPrice) {
+          dipFromRef = ((refPrice - price.last) / refPrice) * 100;
+        }
+
+        // Rebound: recovery from local low within scannerReferenceCandles
+        const refCandles = refConfig.scannerReferenceCandles;
+        const refCloses = period.closes.slice(-Math.min(refCandles, period.closes.length));
+        if (refCloses.length > 1) {
+          let localLow = refCloses[0];
+          let localLowIdx = 0;
+          for (let i = 1; i < refCloses.length; i++) {
+            if (refCloses[i] < localLow) {
+              localLow = refCloses[i];
+              localLowIdx = i;
+            }
+          }
+          if (localLow > 0 && price.last > localLow) {
+            reboundFromLocalLow = ((price.last - localLow) / localLow) * 100;
+            // Freshness: the local low candle index tells us how old the rebound is
+            // The more recent the low, the fresher the rebound
+            const candlesFromLow = refCloses.length - 1 - localLowIdx;
+            const candleMinutes = refConfig.interval === '1m' ? 1 : refConfig.interval === '5m' ? 5
+              : refConfig.interval === '15m' ? 15 : refConfig.interval === '1h' ? 60
+              : refConfig.interval === '4h' ? 240 : 1440;
+            const reboundAgeMs = candlesFromLow * candleMinutes * 60 * 1000;
+            const maxAllowedReboundAgeMs = refConfig.interval === '1m' ? 3600000 // 1h
+              : refConfig.interval === '5m' ? 7200000 // 2h
+              : refConfig.interval === '1h' ? 86400000 // 1d
+              : refConfig.interval === '4h' ? 172800000 // 2d
+              : 259200000; // 3d default
+            reboundTimestamp = new Date(Date.now() - reboundAgeMs).toISOString();
+            dipLowTimestamp = reboundTimestamp; // same structure
+            freshnessCanBeValidated = true;
+            freshnessStatus = reboundAgeMs <= maxAllowedReboundAgeMs ? 'valid' : 'stale';
+          }
+        }
+
+        logger.info(`V3_REFERENCE_CONTRACT_AUDIT symbol=${symbol} scannerPeriod=${this.scannerReferencePeriod} referenceMode=${this.referenceMode} interval=${refConfig.interval} fetchLimit=${refConfig.limit} scannerReferenceCandles=${refConfig.scannerReferenceCandles} candlesFetched=${period.closes.length} candlesUsedForRef=${Math.min(refConfig.scannerReferenceCandles, period.closes.length)} refPrice=${refPrice.toFixed(4)} currentPrice=${price.last.toFixed(4)} dipFromRef=${dipFromRef.toFixed(2)}% reboundFromLocalLow=${reboundFromLocalLow.toFixed(2)}% rawPeriodChangePct=${period.changePct.toFixed(2)}% freshnessStatus=${freshnessStatus} contractMatchesV3=true sourceFunction=analyzeSymbol`);
+
+        logger.info(`REBOUND_CALCULATION_SOURCE_AUDIT symbol=${symbol} scannerPeriod=${this.scannerReferencePeriod} referenceMode=${this.referenceMode} scannerReferenceCandles=${refConfig.scannerReferenceCandles} candlesUsedForRebound=${refCloses.length} currentPrice=${price.last.toFixed(4)} reboundPct=${reboundFromLocalLow.toFixed(2)} rawPeriodChange=${period.changePct.toFixed(2)}% reboundTimestamp=${reboundTimestamp ?? 'n/a'} reboundAgeMs=${freshnessCanBeValidated ? String((refCloses.length - 1) * 240 * 60 * 1000) : 'n/a'} freshnessStatus=${freshnessStatus} freshnessCanBeValidated=${freshnessCanBeValidated} sourceFunction=analyzeSymbol`);
+      }
+
+      const reboundVal = reboundFromLocalLow;
 
       // momentumConfirmed = true only when brain didn't block AND actual momentum is positive
       const momentumConfirmedActual = !decision.blockReasons.some(r => r.includes('momentum')) && momentumVal > 0;
@@ -2386,8 +2487,8 @@ export class MarketScanner {
         tpRoomOk: !decision.blockReasons.some(r => r.includes('tp')),
         reboundConfirmed: confirmationEval.reboundConfirmed,
         momentumConfirmed: confirmationEval.momentumConfirmed,
-        dipPercent: period && period.changePct < 0 ? period.changePct : 0,
-        reboundPercent: period && period.changePct > 0 ? period.changePct : 0,
+        dipPercent: dipFromRef,
+        reboundPercent: reboundFromLocalLow,
         m5Change: period?.momentum ?? 0,
         m15Change: period?.momentum ?? 0,
         h1Change: period?.momentum ?? 0,

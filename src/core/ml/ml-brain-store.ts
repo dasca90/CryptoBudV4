@@ -1,7 +1,8 @@
-import type { MLBrainModel } from '../types';
+import type { MLBrainModel, MlRuntimeMode } from '../types';
 import { logger } from '../../utils/logger';
 
 const STORAGE_KEY = 'ml_brain';
+const RUNTIME_MODE_KEY = 'ml_runtime_mode';
 
 interface InMemoryStoreLike {
   getItem(key: string): string | null;
@@ -79,4 +80,23 @@ export function setMLStore(newStore: InMemoryStoreLike): void {
 
 export function getUntrainedModel(): MLBrainModel {
   return createUntrainedModel();
+}
+
+export function saveMLRuntimeMode(mode: MlRuntimeMode): void {
+  try {
+    store.setItem(RUNTIME_MODE_KEY, mode);
+    logger.info(`ML_RUNTIME_MODE_SAVED: ${mode}`);
+  } catch (err) {
+    logger.error(`ML_RUNTIME_MODE_SAVE_FAILED: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export function loadMLRuntimeMode(): MlRuntimeMode | null {
+  try {
+    const value = store.getItem(RUNTIME_MODE_KEY);
+    if (!value) return null;
+    return value as MlRuntimeMode;
+  } catch {
+    return null;
+  }
 }

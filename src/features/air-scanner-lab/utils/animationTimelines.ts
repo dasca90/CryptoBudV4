@@ -52,6 +52,17 @@ export function getCurvedBuyPullPosition(start: Vector3Tuple, target: Vector3Tup
   ];
 }
 
+export function getOpenPositionTransferPosition(start: Vector3Tuple, progress: number): Vector3Tuple {
+  const target: Vector3Tuple = [4.65, 3.15, -1.25];
+  const eased = easeInOutCubic(progress);
+  const lift = Math.sin(progress * Math.PI) * 0.95;
+  return [
+    start[0] + (target[0] - start[0]) * eased,
+    start[1] + (target[1] - start[1]) * eased + lift,
+    start[2] + (target[2] - start[2]) * eased,
+  ];
+}
+
 export function getBlockedPushFrame(start: Vector3Tuple, elapsedMs: number): { position: Vector3Tuple; opacity: number } {
   const progress = getBlockedPushProgress(elapsedMs);
   const outwardLength = 2.6 * easeInOutCubic(progress);
