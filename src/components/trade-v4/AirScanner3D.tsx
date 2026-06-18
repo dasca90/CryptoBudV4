@@ -10,6 +10,8 @@ import { getVisualToken, getAllVisualTokens } from "../../lib/air-scanner/scanne
 import { logger } from "../../utils/logger";
 import "./air-scanner.css";
 
+const IS_DEV = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV);
+
 export const AirScanner3D = memo(function AirScanner3D(props: {
   candidates: TradeV4CandidateView[];
   openPositions: TradeV4OpenPositionView[];
@@ -25,6 +27,7 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
   const coinRefs = useRef(new Map<string, HTMLButtonElement>());
   const coinsRef = useRef(new Map<string, AirCoinView>());
   const hiddenRef = useRef(false);
+  const [documentVisible, setDocumentVisible] = useState(() => typeof document === "undefined" ? true : !document.hidden);
   const frameCountRef = useRef(0);
   const lastMotionAuditRef = useRef(0);
   const lastStateRef = useRef(new Map<string, string>());
@@ -57,12 +60,21 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
   useEffect(() => {
     const onVisibility = () => {
       hiddenRef.current = document.hidden;
+      setDocumentVisible(!document.hidden);
       logger.throttled("INFO", document.hidden ? "AIR_SCANNER_PAUSED" : "AIR_SCANNER_RESUMED", "air-scanner-visibility", 3000);
+      if (IS_DEV) {
+        console.log(`AIR_SCANNER_VISIBILITY_AUDIT: component=AirScanner3D visible=${String(!document.hidden)} rafActive=${String(!document.hidden && props.active && !reducedMotion)} listenerCleanup=false devOnly=true`);
+      }
     };
     onVisibility();
     document.addEventListener("visibilitychange", onVisibility);
-    return () => document.removeEventListener("visibilitychange", onVisibility);
-  }, []);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (IS_DEV) {
+        console.log("AIR_SCANNER_VISIBILITY_AUDIT: component=AirScanner3D listenerCleanup=true devOnly=true");
+      }
+    };
+  }, [props.active, reducedMotion]);
 
   const mappedCoins = useMemo(() => mapCandidatesToAirCoins({
     candidates: props.candidates,
@@ -72,6 +84,12 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
     lifecycleBySymbol: lifecycle.lifecycleBySymbol,
     maxVisible: 24,
   }), [props.candidates, props.openPositions, props.selectedSymbol, lifecycle.lifecycleBySymbol]);
+  const hasTransferCoin = mappedCoins.some((coin) => (
+    coin.engineState === "locked_for_buy"
+    || coin.engineState === "execution_submitted"
+    || coin.engineState === "position_opened_hold"
+    || coin.engineState === "pull_to_center"
+  ));
 
   useEffect(() => {
     coinsRef.current = new Map(mappedCoins.map((coin) => [coin.symbol, coin]));
@@ -84,7 +102,7 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
     }
   }, [mappedCoins]);
 
-  useRafLoop(props.active && !reducedMotion, (nowMs) => {
+  useRafLoop(props.active && !reducedMotion && documentVisible, (nowMs) => {
     if (hiddenRef.current) return;
     const start = performance.now();
     coinsRef.current.forEach((coin, symbol) => {
@@ -93,13 +111,39 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
       const node = coinRefs.current.get(symbol);
       if (!node) return;
 
+      const tetherActive = next.engineState === "locked_for_buy" || next.engineState === "execution_submitted";
+      if (tetherActive) {
+        const tetherLength = Math.min(560, Math.hypot(next.x, next.y));
+        const tetherAngle = Math.atan2(-next.y, -next.x) * 180 / Math.PI;
+        node.style.setProperty("--pull-tether-length", `${tetherLength}px`);
+        node.style.setProperty("--pull-tether-angle", `${tetherAngle}deg`);
+      } else {
+        node.style.removeProperty("--pull-tether-length");
+        node.style.removeProperty("--pull-tether-angle");
+      }
+
+      const centerDistance = Math.hypot(next.x, next.y);
+      const suppressCenterCoreDot = (
+        next.engineState === "locked_for_buy"
+        || next.engineState === "execution_submitted"
+        || next.engineState === "position_opened_hold"
+      ) && centerDistance < 42;
+      node.dataset.centerCoreDotSuppressed = suppressCenterCoreDot ? "true" : "false";
+
       const depth = Math.max(0.45, Math.min(1.35, (next.z + 420) / 620));
       const pullProgress = next.engineState === "pull_to_center" ? Math.max(0, Math.min(1, next.pullProgress ?? 0)) : 0;
-      const opacity = Math.max(0.05, Math.min(1, (next.z + 360) / 520) * (1 - pullProgress * 0.9));
-      const scale = Math.max(0.12, depth * (1 - pullProgress * 0.82));
+      const pullFade = Math.max(0, 1 - pullProgress);
+      const opacity = next.engineState === "pull_to_center"
+        ? Math.max(0, Math.min(1, depth) * pullFade)
+        : Math.max(0.05, Math.min(1, (next.z + 360) / 520));
+      const scale = next.engineState === "pull_to_center"
+        ? Math.max(0.22, depth * (1.24 - pullProgress * 0.78))
+        : Math.max(0.12, depth);
       node.style.transform = `translate3d(${next.x}px, ${next.y}px, ${next.z}px) scale(${scale})`;
       node.style.opacity = String(opacity);
-      node.style.filter = `blur(${Math.max(0, 1.2 - depth)}px)`;
+      node.style.filter = next.engineState === "pull_to_center"
+        ? `blur(${Math.max(0, pullProgress * 1.8)}px) saturate(${Math.max(1, 1.35 - pullProgress * 0.35)})`
+        : `blur(${Math.max(0, 1.2 - depth)}px)`;
     });
     const ms = performance.now() - start;
     frameCountRef.current++;
@@ -139,7 +183,7 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
         </div>
       </header>
 
-      <div className="scanner-space">
+      <div className={`scanner-space ${mappedCoins.length > 0 ? "scanner-has-coins" : "scanner-empty"} ${hasTransferCoin ? "scanner-transfer-active" : ""}`}>
         <div className="scanner-grid" />
         <div className="scanner-core">
           <div className="capture-beam" />

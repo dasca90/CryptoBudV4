@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type { MicroScalperSettings } from "../../core/scalper/MicroScalperTypes";
 import { createDefaultMicroScalperSettings } from "../../core/scalper/MicroScalperTypes";
 import { updateScalperSettings, enableScalper, disableScalper } from "../../core/scalper/MicroScalperEngine";
@@ -17,7 +17,7 @@ interface MicroScalperPanelProps {
   openScalpPositions: number;
 }
 
-export function MicroScalperPanel(props: MicroScalperPanelProps) {
+export const MicroScalperPanel = memo(function MicroScalperPanel(props: MicroScalperPanelProps) {
   const [expanded, setExpanded] = useState(false);
   const s = props.settings;
 
@@ -183,7 +183,7 @@ export function MicroScalperPanel(props: MicroScalperPanelProps) {
       )}
     </div>
   );
-}
+});
 
 function Chip(props: { label: string; value: string; color?: string }) {
   return (

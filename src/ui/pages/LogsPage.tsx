@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { logger, type LogEntry } from '../../utils/logger';
 import { formatSystemLocalTime, getRawUtcTooltip } from '../../utils/timeFormatter';
+import { useVirtualWindow } from '../../lib/ui/virtualization';
 
 type FilterLevel = 'ALL' | 'ERROR' | 'WARN' | 'INFO' | 'TRADE';
 type SourceOption = 'ALL' | 'Binance' | 'Scanner' | 'AutoBots' | 'EntryGate' | 'Market Analyzer' | 'Execution' | 'Exit' | 'UI' | 'Other';
@@ -8,6 +9,10 @@ type SourceOption = 'ALL' | 'Binance' | 'Scanner' | 'AutoBots' | 'EntryGate' | '
 const LEVELS: FilterLevel[] = ['ALL', 'ERROR', 'WARN', 'INFO', 'TRADE'];
 const SOURCES: SourceOption[] = ['ALL', 'Binance', 'Scanner', 'AutoBots', 'EntryGate', 'Market Analyzer', 'Execution', 'Exit', 'UI'];
 const QUICK_CATEGORIES = ['SCANNER', 'RISK', 'ML', 'TELEGRAM'];
+const LOGS_PAGE_UPDATE_THROTTLE_MS = 100;
+const LOG_ROW_HEIGHT = 21;
+const LOGS_VIRTUALIZATION_THRESHOLD = 120;
+const IS_DEV = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV);
 
 function countByLevel(logs: LogEntry[]): Record<string, number> {
   const counts: Record<string, number> = { ERROR: 0, WARN: 0, INFO: 0, TRADE: 0 };
@@ -16,7 +21,7 @@ function countByLevel(logs: LogEntry[]): Record<string, number> {
 }
 
 export function LogsPage() {
-  const [logs, setLogs] = useState<LogEntry[]>(logger.getRecentLogs(500));
+  const [logs, setLogs] = useState<LogEntry[]>(logger.getLogs());
   const [levelFilter, setLevelFilter] = useState<FilterLevel>('ALL');
   const [sourceFilter, setSourceFilter] = useState<SourceOption>('ALL');
   const [search, setSearch] = useState('');
@@ -24,51 +29,33 @@ export function LogsPage() {
   const [paused, setPaused] = useState(false);
   const [compactMode, setCompactMode] = useState(true);
   const [showConfirmClear, setShowConfirmClear] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const userScrolledUpRef = useRef(false);
   const lastScrollLogRef = useRef(0);
+  const lastVirtualAuditRef = useRef(0);
   const mountedRef = useRef(false);
 
+  const throttleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const queuedLogCountRef = useRef(0);
   useEffect(() => {
     const unsub = logger.subscribe(() => {
-      if (!paused) setLogs(logger.getRecentLogs(500));
+      if (paused) return;
+      queuedLogCountRef.current += 1;
+      if (throttleTimerRef.current) return;
+      throttleTimerRef.current = setTimeout(() => {
+        const flushedCount = queuedLogCountRef.current;
+        queuedLogCountRef.current = 0;
+        throttleTimerRef.current = null;
+        setLogs(logger.getLogs());
+        if (IS_DEV) {
+          console.log(`LOGS_PAGE_THROTTLE_AUDIT: flushedLogEvents=${flushedCount} throttleMs=${LOGS_PAGE_UPDATE_THROTTLE_MS} logsVisibleCap=none droppedLogs=false reorderedLogs=false`);
+        }
+      }, LOGS_PAGE_UPDATE_THROTTLE_MS);
     });
-    return unsub;
+    return () => {
+      unsub();
+      if (throttleTimerRef.current) clearTimeout(throttleTimerRef.current);
+    };
   }, [paused]);
-
-  useEffect(() => {
-    if (autoScroll && scrollRef.current && !userScrolledUpRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [logs, autoScroll]);
-
-  const handleScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
-    userScrolledUpRef.current = !atBottom;
-
-    const now = Date.now();
-    if (now - lastScrollLogRef.current > 3000) {
-      lastScrollLogRef.current = now;
-      console.log(`LOGS_SCROLL_AUDIT: containerHeight=${el.clientHeight} scrollHeight=${el.scrollHeight} scrollTop=${el.scrollTop} canScroll=${el.scrollHeight > el.clientHeight} autoScrollEnabled=${autoScroll} userScrolledUp=${userScrolledUpRef.current} wheelEventsDetected=${el.scrollTop > 0} overflowY=auto parentOverflow=hidden`);
-    }
-  }, [autoScroll]);
-
-  const jumpBottom = useCallback(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      userScrolledUpRef.current = false;
-      setAutoScroll(true);
-    }
-  }, []);
-
-  const jumpTop = useCallback(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = 0;
-      userScrolledUpRef.current = true;
-    }
-  }, []);
 
   const filtered = useMemo(() => {
     let result = logs;
@@ -115,6 +102,52 @@ export function LogsPage() {
     return { displayLogs: nonBinance, binanceSummary: summary };
   }, [filtered, compactMode]);
 
+  const logsVirtual = useVirtualWindow({
+    total: displayLogs.length,
+    rowHeight: LOG_ROW_HEIGHT,
+    threshold: LOGS_VIRTUALIZATION_THRESHOLD,
+    overscan: 14,
+  });
+  const scrollRef = logsVirtual.scrollRef;
+  const visibleLogs = useMemo(
+    () => displayLogs.slice(logsVirtual.startIndex, logsVirtual.endIndex),
+    [displayLogs, logsVirtual.startIndex, logsVirtual.endIndex],
+  );
+
+  useEffect(() => {
+    if (autoScroll && scrollRef.current && !userScrolledUpRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [logs, autoScroll, scrollRef]);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+    userScrolledUpRef.current = !atBottom;
+
+    const now = Date.now();
+    if (now - lastScrollLogRef.current > 3000) {
+      lastScrollLogRef.current = now;
+      console.log(`LOGS_SCROLL_AUDIT: containerHeight=${el.clientHeight} scrollHeight=${el.scrollHeight} scrollTop=${el.scrollTop} canScroll=${el.scrollHeight > el.clientHeight} autoScrollEnabled=${autoScroll} userScrolledUp=${userScrolledUpRef.current} wheelEventsDetected=${el.scrollTop > 0} overflowY=auto parentOverflow=hidden`);
+    }
+  }, [autoScroll, scrollRef]);
+
+  const jumpBottom = useCallback(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      userScrolledUpRef.current = false;
+      setAutoScroll(true);
+    }
+  }, [scrollRef]);
+
+  const jumpTop = useCallback(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = 0;
+      userScrolledUpRef.current = true;
+    }
+  }, [scrollRef]);
+
   const severityCounts = useMemo(() => countByLevel(logs), [logs]);
 
   const handleClear = useCallback(() => {
@@ -127,13 +160,18 @@ export function LogsPage() {
   }, [logs.length]);
 
   const handleExport = useCallback(() => {
-    const json = logger.export();
+    const json = JSON.stringify(displayLogs.map(entry => ({
+      timestamp: entry.timestamp,
+      level: entry.level,
+      source: entry.source,
+      message: entry.message,
+    })), null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = `logs_${Date.now()}.json`; a.click();
     URL.revokeObjectURL(url);
-  }, []);
+  }, [displayLogs]);
 
   const handleCopyVisible = useCallback(() => {
     const text = displayLogs.map(l =>
@@ -152,6 +190,13 @@ export function LogsPage() {
     const el = scrollRef.current;
     console.log(`LOGS_UI_REGRESSION_AUDIT: renderedComponent=LogsPage toolbarMounted=true clearButtonMounted=true filterButtonsMounted=true searchMounted=true scrollContainerFound=${!!el} autoScrollEnabled=true visibleLogCount=${filtered.length} totalLogCount=${logs.length} severityCounts=${JSON.stringify(severityCounts)} regressionDetected=false sourceFile=src/ui/pages/LogsPage.tsx`);
   }, []);
+
+  useEffect(() => {
+    const now = Date.now();
+    if (now - lastVirtualAuditRef.current < 5000) return;
+    lastVirtualAuditRef.current = now;
+    console.log(`LOGS_VIRTUALIZATION_AUDIT: enabled=${String(logsVirtual.isVirtualized)} renderedRows=${logsVirtual.visibleCount} totalFilteredLogs=${displayLogs.length} totalLogs=${logs.length} copyExportUsesFullFilteredLogs=true droppedLogs=false`);
+  }, [logsVirtual.isVirtualized, logsVirtual.visibleCount, displayLogs.length, logs.length]);
 
   // LOGS_FILTER_CHANGED
   const prevFilterKey = useRef('');
@@ -270,11 +315,11 @@ export function LogsPage() {
               </button>
             ))}
 
-            <button className="btn btn-sm btn-outline" onClick={handleExport} style={{ fontSize: 10 }} title="Export all logs as JSON">
+            <button className="btn btn-sm btn-outline" onClick={handleExport} style={{ fontSize: 10 }} title="Export all filtered logs as JSON">
               Export
             </button>
 
-            <button className="btn btn-sm btn-outline" onClick={handleCopyVisible} style={{ fontSize: 10 }} title="Copy visible logs to clipboard">
+            <button className="btn btn-sm btn-outline" onClick={handleCopyVisible} style={{ fontSize: 10 }} title="Copy all filtered logs to clipboard">
               Copy
             </button>
           </div>
@@ -297,10 +342,12 @@ export function LogsPage() {
           <div
             ref={scrollRef}
             className="log-area"
-            onScroll={handleScroll}
+            onScroll={() => { logsVirtual.onScroll(); handleScroll(); }}
+            data-virtualized={logsVirtual.isVirtualized ? 'true' : 'false'}
           >
-            {displayLogs.slice(-1000).map((l, i) => (
-              <div key={i} className="log-entry" title={`${formatSystemLocalTime(l.timestamp)}\n${getRawUtcTooltip(l.timestamp)}\nSource: ${l.source ?? 'unknown'}`}>
+            {logsVirtual.topSpacerPx > 0 && <div className="virtual-spacer" style={{ height: logsVirtual.topSpacerPx }} />}
+            {visibleLogs.map((l, i) => (
+              <div key={`${l.timestamp}-${logsVirtual.startIndex + i}`} className="log-entry" title={`${formatSystemLocalTime(l.timestamp)}\n${getRawUtcTooltip(l.timestamp)}\nSource: ${l.source ?? 'unknown'}`}>
                 <span className="log-time">{formatSystemLocalTime(l.timestamp)}</span>
                 <span className={`log-level ${l.level}`}>{l.level}</span>
                 {l.source && (
@@ -309,6 +356,7 @@ export function LogsPage() {
                 <span className="log-msg">{l.message}</span>
               </div>
             ))}
+            {logsVirtual.bottomSpacerPx > 0 && <div className="virtual-spacer" style={{ height: logsVirtual.bottomSpacerPx }} />}
           </div>
         )}
       </div>

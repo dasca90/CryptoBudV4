@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { memo, useMemo } from 'react';
 import type { TradeV4CandidateView, TradingParametersView } from './types';
 import { computeMarketGroupSummary, type SuggestedAction, type GroupSummaryRow } from '../../core/scanner/MarketGroupSummary';
 import { getDipperMarketAnalysisV3, type GroupRegimeVerdict, type RegimeVerdict } from '../../core/scanner/MarketAnalyzerV3';
@@ -23,7 +23,7 @@ const ACTION_LABELS: Record<SuggestedAction, string> = {
   REDUCE_RISK: 'REDUCE',
 };
 
-export function LeftControlSidebar(props: {
+export const LeftControlSidebar = memo(function LeftControlSidebar(props: {
   candidates: TradeV4CandidateView[];
   parameters: TradingParametersView;
   scannerRunning: boolean;
@@ -144,7 +144,7 @@ export function LeftControlSidebar(props: {
       })}
     </div>
   );
-}
+});
 
 function GroupHealthCard(props: {
   row: GroupSummaryRow;

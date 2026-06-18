@@ -39,6 +39,11 @@
 
 .trade-v4-shell { height: 100%; }
 
+.virtual-table-spacer td {
+  border-bottom: 0 !important;
+  background: transparent !important;
+}
+
 .trade-v4-grid {
   display: grid;
   grid-template-columns: 64px 260px 1fr 360px;
@@ -55,6 +60,35 @@
   border: 1px solid var(--neon-border);
   border-radius: 12px;
   backdrop-filter: blur(4px);
+}
+
+.graphics-quality-low,
+.graphics-quality-low .panel,
+.graphics-quality-low .panel-shell,
+.graphics-quality-low .scanner-v3,
+.graphics-quality-low .panel-shell-scanner,
+.graphics-quality-low .panel-shell-open,
+.graphics-quality-low .panel-shell-closed {
+  backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+
+.graphics-quality-low .row-hover-glow,
+.graphics-quality-low .v3-pill,
+.graphics-quality-low .status-good,
+.graphics-quality-low .status-bad,
+.graphics-quality-low .status-warn {
+  text-shadow: none !important;
+}
+
+.graphics-quality-low .scanner-space,
+.graphics-quality-low .air-lab-production-embed,
+.graphics-quality-low .scanner-v3 {
+  filter: none !important;
+}
+
+.graphics-quality-low * {
+  animation-duration: 0.001ms;
 }
 
 /* ── Status Badge System ── */
@@ -334,6 +368,60 @@
 
 .data-table tr:hover {
   background: rgba(0,234,255,0.05);
+}
+
+.coin-symbol-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  vertical-align: middle;
+}
+
+.coin-logo {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  color: var(--coin-logo-fg);
+  background: var(--coin-logo-bg);
+  border: 1px solid color-mix(in srgb, var(--coin-logo-ring) 82%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--coin-logo-ring) 38%, transparent), inset 0 0 8px rgba(255,255,255,0.16);
+  font-family: "Consolas", "Courier New", monospace;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.7);
+  overflow: hidden;
+}
+
+.coin-logo-sm {
+  width: 21px;
+  height: 21px;
+  font-size: 6.6px;
+}
+
+.coin-logo-md {
+  width: 28px;
+  height: 28px;
+  font-size: 8px;
+}
+
+.coin-symbol-text {
+  display: inline-grid;
+  gap: 1px;
+  line-height: 1;
+}
+
+.coin-symbol-text strong {
+  color: #42f2f0;
+  font-size: 10px;
+}
+
+.coin-symbol-text em {
+  color: #7b91aa;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 700;
 }
 
 .row-selected-v4 {
@@ -830,6 +918,12 @@
   border-bottom: 1px solid rgba(255,255,255,0.06);
 }
 .scanner-toolbar-actions { display: flex; gap: 4px; }
+.scanner-quality-select {
+  height: 22px;
+  max-width: 92px;
+  padding: 2px 6px;
+  font-size: 9px;
+}
 .scanner-summary-bar {
   display: flex;
   align-items: center;
@@ -872,6 +966,15 @@
 .inspector-v3 {
   min-height: 220px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.inspector-v3 > .panel-body-v4 {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .watch-v3 {
@@ -896,16 +999,124 @@
   min-height: 0;
   height: 100%;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .selected-coin-content {
   margin-top: 8px;
-  height: calc(100% - 26px);
-  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 8px;
   overflow-wrap: anywhere;
   word-break: break-word;
   scrollbar-width: thin;
   scrollbar-color: rgba(110, 162, 236, 0.6) rgba(6, 14, 24, 0.7);
+}
+
+.selected-coin-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.selected-coin-content::-webkit-scrollbar-track {
+  background: rgba(6, 14, 24, 0.65);
+  border-radius: 8px;
+}
+
+.selected-coin-content::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(90, 155, 240, 0.8), rgba(116, 128, 255, 0.72));
+  border-radius: 8px;
+}
+
+.selected-verdict-card {
+  border: 1px solid rgba(88,166,255,0.24);
+  background: rgba(7, 18, 34, 0.86);
+  border-radius: 8px;
+  padding: 10px;
+  margin-top: 10px;
+}
+
+.selected-main-reason {
+  margin-top: 6px;
+  color: #c9d8ee;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.selected-inspector-section {
+  padding: 10px;
+  margin-top: 8px;
+  border-radius: 8px !important;
+}
+
+.selected-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.selected-metric {
+  padding: 8px !important;
+  border-radius: 7px !important;
+}
+
+.selected-metric > div {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.selected-metric strong {
+  display: block;
+  color: #d8e6ff;
+  font-size: 10px;
+  line-height: 1.35;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.selected-readable-list {
+  margin: 8px 0 0 0;
+  padding-left: 16px;
+  color: #d8e6ff;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.selected-readable-list li::marker {
+  color: #58a6ff;
+}
+
+.selected-note {
+  margin-top: 8px;
+  color: #9fb5cc;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.selected-raw-audit {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px !important;
+}
+
+.selected-raw-audit summary {
+  cursor: pointer;
+  color: #9ac7ff;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.selected-raw-audit pre {
+  max-height: 260px;
+  overflow: auto;
+  margin: 8px 0 0 0;
+  color: #9fb5cc;
+  font-size: 9px;
+  white-space: pre-wrap;
 }
 
 .panel-shell-top-candidates {

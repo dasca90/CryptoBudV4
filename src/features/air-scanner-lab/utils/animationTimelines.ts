@@ -79,5 +79,5 @@ export function getBlockedPushFrame(start: Vector3Tuple, elapsedMs: number): { p
 }
 
 export function getQualityParticleMultiplier(quality: AirScannerQuality): number {
-  return quality === 'ultra' ? 1.35 : quality === 'high' ? 1 : quality === 'medium' ? 0.62 : 0.34;
+  return quality === 'high' ? 1 : quality === 'balanced' ? 0.62 : 0.34;
 }

@@ -18,7 +18,7 @@ const states: Array<{ label: string; value: CoinVisualState }> = [
   { label: 'State 05 Open Position', value: 'open_position' },
 ];
 
-const qualities: AirScannerQuality[] = ['low', 'medium', 'high', 'ultra'];
+const qualities: AirScannerQuality[] = ['low', 'balanced', 'high'];
 
 export function StateControlPanel({ visualState, quality, toggles, onStateChange, onQualityChange, onToggleChange, onReset }: StateControlPanelProps) {
   return (

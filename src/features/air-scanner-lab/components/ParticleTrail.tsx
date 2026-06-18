@@ -1,7 +1,7 @@
 import { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { AdditiveBlending, Vector3 } from 'three';
-import type { Group, Vector3Tuple } from 'three';
+import { AdditiveBlending, DynamicDrawUsage, Matrix4, Vector3 } from 'three';
+import type { InstancedMesh, Vector3Tuple } from 'three';
 
 interface ParticleTrailProps {
   position: Vector3Tuple;
@@ -14,9 +14,12 @@ interface ParticleTrailProps {
 }
 
 export function ParticleTrail({ position, color, count, active, spread = 1, radius = 0.036, opacity = 0.68 }: ParticleTrailProps) {
-  const groupRef = useRef<Group>(null);
+  const meshRef = useRef<InstancedMesh>(null);
   const smoothPositionRef = useRef(new Vector3(...position));
   const targetPositionRef = useRef(new Vector3(...position));
+  const matrix = useMemo(() => new Matrix4(), []);
+  const particlePosition = useMemo(() => new Vector3(), []);
+  const particleScale = useMemo(() => new Vector3(1, 1, 1), []);
   const offsets = useMemo(
     () =>
       Array.from({ length: count }, (_, index) => ({
@@ -30,31 +33,31 @@ export function ParticleTrail({ position, color, count, active, spread = 1, radi
   );
 
   useFrame((state) => {
-    if (!groupRef.current) return;
+    if (!meshRef.current || !active || count <= 0) return;
     targetPositionRef.current.set(...position);
     smoothPositionRef.current.lerp(targetPositionRef.current, 0.2);
-    groupRef.current.children.forEach((child, index) => {
+    for (let index = 0; index < offsets.length; index += 1) {
       const offset = offsets[index];
       const shimmer = Math.sin(state.clock.elapsedTime * 4.8 + offset.phase);
-      child.position.set(
+      particlePosition.set(
         smoothPositionRef.current.x + offset.x - Math.sin(state.clock.elapsedTime * 2 + offset.phase) * offset.drift,
         smoothPositionRef.current.y + offset.y - (index % 18) * 0.01 + shimmer * 0.035,
         smoothPositionRef.current.z + offset.z + Math.cos(state.clock.elapsedTime * 1.6 + offset.phase) * offset.drift,
       );
-      child.scale.setScalar(0.75 + shimmer * 0.22);
-    });
+      particleScale.setScalar(Math.max(0.08, 0.75 + shimmer * 0.22));
+      matrix.compose(particlePosition, meshRef.current.quaternion, particleScale);
+      meshRef.current.setMatrixAt(index, matrix);
+    }
+    meshRef.current.instanceMatrix.needsUpdate = true;
+    meshRef.current.instanceMatrix.setUsage(DynamicDrawUsage);
   });
 
   if (!active || count <= 0) return null;
 
   return (
-    <group ref={groupRef}>
-      {offsets.map((offset, index) => (
-        <mesh key={`${offset.phase}-${index}`}>
-          <sphereGeometry args={[radius, 10, 10]} />
-          <meshBasicMaterial color={color} transparent opacity={opacity} blending={AdditiveBlending} depthWrite={false} />
-        </mesh>
-      ))}
-    </group>
+    <instancedMesh ref={meshRef} args={[undefined, undefined, count]} frustumCulled={false}>
+      <sphereGeometry args={[radius, 8, 8]} />
+      <meshBasicMaterial color={color} transparent opacity={opacity} blending={AdditiveBlending} depthWrite={false} />
+    </instancedMesh>
   );
 }

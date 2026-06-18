@@ -452,6 +452,7 @@ export class TraderBrain {
       trailFromPeakPercent: 1.0,
       maxHoldSec: 86400,
       lastPrice: result.price,
+      priceTimestamp: Date.now(),
       unrealizedPnlPercent: 0,
       ownerType: 'trader_brain',
       adapter: this.adapter.name,

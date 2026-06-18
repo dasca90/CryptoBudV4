@@ -1,12 +1,20 @@
-import { useMemo } from 'react';
-import { DoubleSide } from 'three';
+import { useMemo, useRef } from 'react';
+import { useFrame } from '@react-three/fiber';
+import { DoubleSide, type Group } from 'three';
 
 export function HolographicGrid() {
+  const groupRef = useRef<Group>(null);
   const rings = useMemo(() => Array.from({ length: 9 }, (_, index) => 1.1 + index * 0.7), []);
   const spokes = useMemo(() => Array.from({ length: 32 }, (_, index) => (index / 32) * Math.PI * 2), []);
 
+  useFrame((state) => {
+    if (!groupRef.current) return;
+    groupRef.current.rotation.y = state.clock.elapsedTime * 0.018;
+    groupRef.current.position.y = -0.02 + Math.sin(state.clock.elapsedTime * 0.42) * 0.012;
+  });
+
   return (
-    <group position={[0, -0.02, 0]}>
+    <group ref={groupRef} position={[0, -0.02, 0]}>
       <mesh rotation={[-Math.PI / 2, 0, 0]}>
         <circleGeometry args={[6.6, 96]} />
         <meshBasicMaterial color="#041c33" transparent opacity={0.28} side={DoubleSide} />

@@ -12,6 +12,7 @@ import { runTauriRuntimeDiagnostics } from '../../core/persistence/TauriRuntimeD
 import { apiCredentialsStore } from '../../core/persistence/ApiCredentialsStore';
 import { testAppStatePersistenceRoundTrip } from '../../core/persistence/AppStatePersistence';
 import { runResetScope } from '../../core/reset/reset-service';
+import { normalizePerformanceSettings, savePerformanceSettings } from '../../lib/performance/performanceSettings';
 
 interface Props {
   liveState: LiveSafetyState;
@@ -97,7 +98,12 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
   useEffect(() => {
     (async () => {
       const s = await settingsPersistence.loadSettings();
-      setSettings(s);
+      const performanceSettings = normalizePerformanceSettings(s);
+      setSettings({
+        ...s,
+        graphicsQuality: performanceSettings.graphicsQuality,
+        autoPerformanceMode: performanceSettings.autoPerformanceMode === 'on',
+      });
       setBtcAnchor(s.btcAnchorEnabled);
       setEthAnchor(s.ethAnchorEnabled);
 
@@ -129,9 +135,15 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
       ...settings,
       btcAnchorEnabled: btcAnchor,
       ethAnchorEnabled: ethAnchor,
+      graphicsQuality: normalizePerformanceSettings(settings).graphicsQuality,
+      autoPerformanceMode: Boolean(settings.autoPerformanceMode),
       updatedAt: new Date().toISOString(),
     };
     await settingsPersistence.saveSettings(updated);
+    savePerformanceSettings({
+      graphicsQuality: updated.graphicsQuality,
+      autoPerformanceMode: updated.autoPerformanceMode ? 'on' : 'off',
+    });
     setSettings(updated);
     setSettingsSaved(true);
     setTimeout(() => setSettingsSaved(false), 2000);
@@ -241,6 +253,8 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
       telegramNotificationsEnabled: updated.enabled,
       telegramBotTokenConfigured: updated.botToken.trim().length > 0,
       telegramChatIdConfigured: updated.chatId.trim().length > 0,
+      graphicsQuality: normalizePerformanceSettings(settings).graphicsQuality,
+      autoPerformanceMode: Boolean(settings.autoPerformanceMode),
       updatedAt: new Date().toISOString(),
     };
     await settingsPersistence.saveSettings(appUpdated);
@@ -262,6 +276,8 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
       telegramNotificationsEnabled: tgSettings.enabled,
       telegramBotTokenConfigured: tgBotToken.trim().length > 0,
       telegramChatIdConfigured: tgChatId.trim().length > 0,
+      graphicsQuality: normalizePerformanceSettings(settings).graphicsQuality,
+      autoPerformanceMode: Boolean(settings.autoPerformanceMode),
       updatedAt: new Date().toISOString(),
     };
     const tgUpdated: TelegramSettings = {
@@ -272,6 +288,10 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
 
     await settingsPersistence.saveSettings(appUpdated);
     await settingsPersistence.saveTelegramSettings(tgUpdated);
+    savePerformanceSettings({
+      graphicsQuality: appUpdated.graphicsQuality,
+      autoPerformanceMode: appUpdated.autoPerformanceMode ? 'on' : 'off',
+    });
     setSettings(appUpdated);
     setTgSettings(tgUpdated);
     telegramNotifier.updateSettings(tgUpdated);
@@ -437,6 +457,40 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
           last market data update: {pd.lastUpdate ? formatLocalTime(pd.lastUpdate, { format: 'time' }) : 'n/a'}
         </div>
         <button className="btn btn-sm btn-yellow" onClick={handleRefreshPublicData}>Refresh Public Data</button>
+
+        <div className="panel-section-title" style={{ marginTop: 20 }}>Performance</div>
+        <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 8 }}>
+          Visual performance only. Trading decisions, scanner ranking, exits, TP/SL, and reports are unchanged.
+        </div>
+        <div className="settings-row">
+          <label className="settings-label">Graphics Quality</label>
+          <select
+            className="settings-input"
+            value={settings.graphicsQuality}
+            onChange={(event) => setSettings((s) => ({ ...s, graphicsQuality: event.target.value as AppSettings['graphicsQuality'] }))}
+          >
+            <option value="low">Low - best for weak PC</option>
+            <option value="balanced">Balanced - recommended</option>
+            <option value="high">High - full visuals</option>
+          </select>
+        </div>
+        <div className="settings-row">
+          <label className="settings-label">Auto Performance Mode</label>
+          <label className="toggle" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={settings.autoPerformanceMode}
+              onChange={(event) => setSettings((s) => ({ ...s, autoPerformanceMode: event.target.checked }))}
+            />
+            <span style={{ fontSize: 12 }}>{settings.autoPerformanceMode ? 'ON' : 'OFF'}</span>
+          </label>
+        </div>
+        <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="btn btn-sm btn-green" onClick={handleSaveSettings}>
+            Save Performance Settings
+          </button>
+          <span style={{ fontSize: 11, color: '#8b949e' }}>Auto mode only downgrades visuals after sustained low FPS.</span>
+        </div>
 
         {/* ── Section E: Binance Private API ───────────── */}
         <div className="panel-section-title" style={{ marginTop: 20 }}>Binance API (Private)</div>

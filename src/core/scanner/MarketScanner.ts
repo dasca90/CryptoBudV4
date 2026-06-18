@@ -29,6 +29,7 @@ import { calculateReferencePrice } from './ReferencePriceCalculator';
 import type { RefMode } from './ReferencePriceCalculator';
 import { evaluateSmartLateEntryGuard } from './SmartModeGuard';
 import { autoBuyQueue } from '../trading/AutoBuyExecutionQueue';
+import { computeProfessionalAnalysis } from './ProfessionalSpotAnalysis';
 
 
 let _scanIdCounter = 0;
@@ -79,6 +80,7 @@ export class MarketScanner {
   };
   private scannerReferencePeriod: '1h' | '4h' | '1d' | '1w' = '1h';
   private referenceMode: RefMode = 'sma';
+  private smartProfessionalMinScore = 80;
   private periodCache = new Map<string, {
     trend: 'BULLISH' | 'BEARISH' | 'SIDEWAYS';
     changePct: number;
@@ -150,6 +152,19 @@ export class MarketScanner {
 
   private lastAutoBuyAt: number = 0;
   private autoBuyCooldownMs: number = 30000; // 30s minimum between auto buys
+
+  private btcAnchorEnabled = true;
+  private ethAnchorEnabled = true;
+
+  setAnchorConfig(config: { btcEnabled: boolean; ethEnabled: boolean }): void {
+    this.btcAnchorEnabled = config.btcEnabled;
+    this.ethAnchorEnabled = config.ethEnabled;
+    logger.info(`SCANNER_ANCHOR_CONFIG_AUDIT: btcAnchorEnabled=${String(this.btcAnchorEnabled)} ethAnchorEnabled=${String(this.ethAnchorEnabled)}`);
+  }
+
+  getAnchorConfig(): { btcEnabled: boolean; ethEnabled: boolean } {
+    return { btcEnabled: this.btcAnchorEnabled, ethEnabled: this.ethAnchorEnabled };
+  }
 
   // Fast candidate revalidation loop — updates live data for WAIT/BUY_READY without full scan
   private lastSnapshot: ScannerSnapshot | null = null;
@@ -242,9 +257,11 @@ export class MarketScanner {
     stopLossPct: number;
     dynamicTrailingEnabled: boolean;
     trailPullbackPct: number;
+    smartProfessionalMinScore?: number;
   }): void {
     this.strategySourceMode = config.strategySource;
     this.entryConfirmationMode = config.confirmationMode;
+    if (config.smartProfessionalMinScore != null) this.smartProfessionalMinScore = config.smartProfessionalMinScore;
     this.manualTp1Pct = config.manualTp1Pct;
     this.manualTp2Pct = config.manualTp2Pct;
     this.userStopLossPct = config.stopLossPct;
@@ -2025,6 +2042,22 @@ export class MarketScanner {
                 continue;
               }
 
+              // Professional Spot Analysis gate — Smart mode only
+              if (this.entryConfirmationMode === 'smart') {
+                const proAnalysis = (sc as any).professionalAnalysis;
+                if (proAnalysis && (proAnalysis.professionalVerdict !== 'STRONG_BUY' || proAnalysis.professionalScore < this.smartProfessionalMinScore)) {
+                  const blockReason = proAnalysis.professionalVerdict !== 'STRONG_BUY'
+                    ? `professional_${proAnalysis.professionalVerdict}`
+                    : `professional_score_below_min_${proAnalysis.professionalScore}_lt_${this.smartProfessionalMinScore}`;
+                  perSymbolDecisions.push({ symbol: sc.symbol, reason: blockReason, passed: false });
+                  logger.info(`SMART_BUY_BLOCKED_AUDIT symbol=${sc.symbol} professionalScore=${proAnalysis.professionalScore} requiredMinScore=${this.smartProfessionalMinScore} professionalVerdict=${proAnalysis.professionalVerdict} riskLabel=${proAnalysis.riskLabel} reasons=${proAnalysis.professionalReasons.join('|')} blockers=${proAnalysis.professionalBlockers.join('|')} anchorSettingEnabled=${proAnalysis.anchorSettingEnabled} anchorDecision=${proAnalysis.anchorDecision} anchorBlockApplied=${proAnalysis.anchorBlockApplied}`);
+                  continue;
+                }
+                if (proAnalysis) {
+                  logger.info(`SMART_BUY_APPROVED_AUDIT symbol=${sc.symbol} professionalScore=${proAnalysis.professionalScore} requiredMinScore=${this.smartProfessionalMinScore} professionalVerdict=${proAnalysis.professionalVerdict} riskLabel=${proAnalysis.riskLabel} reasons=${proAnalysis.professionalReasons.join('|')} anchorSettingEnabled=${proAnalysis.anchorSettingEnabled} anchorDecision=${proAnalysis.anchorDecision} anchorBlockApplied=${proAnalysis.anchorBlockApplied}`);
+                }
+              }
+
               // Smart-mode late entry guard — use FRESH strategy from audit
               const smartGuardResult = evaluateSmartLateEntryGuard({
                 symbol: sc.symbol,
@@ -2802,6 +2835,46 @@ export class MarketScanner {
       if (decision.scannerBrainSource === 'cached_scanner_brain') this.incrementDiag('brainReusedCached');
       if (decision.blockReasons.includes('brain_not_found')) this.incrementDiag('candidateAvoidBrainNotFound');
       if (decision.blockReasons.includes('brain_create_failed') || decision.warnings.includes('scanner_brain_create_failed')) this.incrementDiag('brainCreateFailed');
+
+      // Professional Spot Analysis — Smart mode only
+      if (this.entryConfirmationMode === 'smart') {
+        const proAnalysis = computeProfessionalAnalysis({
+          symbol,
+          riskGroup: riskGroup ?? 'unknown',
+          status: candidate.status,
+          confidence: candidate.confidence,
+          spreadPct,
+          volumeRel: candidate.volumeRel ?? 1,
+          tpRoomOk: candidate.tpRoomOk ?? true,
+          dipPercent: candidate.dipPercent ?? 0,
+          reboundPercent: candidate.reboundPercent ?? 0,
+          momentumConfirmed: candidate.momentumConfirmed ?? false,
+          reboundConfirmed: candidate.reboundConfirmed ?? false,
+          periodTrend: candidate.periodTrend ?? null,
+          groupTrend: candidate.groupTrend ?? null,
+          priceFresh: candidate.priceFresh ?? false,
+          bookFresh: candidate.bookFresh ?? false,
+          overextended: candidate.blockReasons.some(r => r.toLowerCase().includes('overextended')),
+          candleExhaustion: candidate.blockReasons.some(r => r.toLowerCase().includes('candle')),
+          fallingKnife: candidate.blockReasons.some(r => r.toLowerCase().includes('knife')),
+          isAlt: !symbol.includes('BTC'),
+          blockReasons: candidate.blockReasons ?? [],
+          periodVolatility: candidate.periodVolatility ?? null,
+          periodMomentum: candidate.periodMomentum ?? null,
+          anchorSettingEnabled: this.btcAnchorEnabled,
+          anchorDataAvailable: this.feed.getLastPrice('BTCUSDT') > 0 && this.feed.getLastPrice('ETHUSDT') > 0,
+          btcDumping: getAnchorDumping('BTCUSDT', this.feed),
+          ethDumping: getAnchorDumping('ETHUSDT', this.feed),
+          btcTrend: getAnchorTrend('BTCUSDT', this.feed),
+          ethTrend: getAnchorTrend('ETHUSDT', this.feed),
+          btcMomentum: getAnchorMomentum('BTCUSDT', this.feed),
+          ethMomentum: getAnchorMomentum('ETHUSDT', this.feed),
+          btcFresh: this.feed.getPriceAgeMs('BTCUSDT') < 60000,
+          ethFresh: this.feed.getPriceAgeMs('ETHUSDT') < 60000,
+        });
+        (candidate as any).professionalAnalysis = proAnalysis;
+      }
+
       return candidate;
     } catch (err) {
       logger.warn(`SCANNER_ERROR: ${symbol} — ${err instanceof Error ? err.message : String(err)}`);
@@ -3115,4 +3188,31 @@ function computeGroupTrendForCandidates(candidates: ScannerCandidate[]): Map<str
     result.set(group, { groupTrend, recommendedStrategy });
   }
   return result;
+}
+
+// ── BTC/ETH Anchor context helpers ──
+
+function getAnchorDumping(symbol: string, feed: { getLastPrice(s: string): number; getPriceAgeMs(s: string): number }): boolean {
+  const price = feed.getLastPrice(symbol);
+  const ageMs = feed.getPriceAgeMs(symbol);
+  if (price <= 0 || ageMs > 120000) return false;
+  const momentum = getAnchorMomentum(symbol, feed);
+  return momentum < -0.5;
+}
+
+function getAnchorTrend(symbol: string, feed: { getLastPrice(s: string): number; getPriceAgeMs(s: string): number }): 'BULLISH' | 'BEARISH' | 'SIDEWAYS' | null {
+  const price = feed.getLastPrice(symbol);
+  if (price <= 0) return null;
+  const momentum = getAnchorMomentum(symbol, feed);
+  if (momentum > 0.3) return 'BULLISH';
+  if (momentum < -0.3) return 'BEARISH';
+  return 'SIDEWAYS';
+}
+
+function getAnchorMomentum(_symbol: string, feed: { getLastPrice(s: string): number; getPriceAgeMs(s: string): number }): number {
+  const price = feed.getLastPrice(_symbol);
+  const ageMs = feed.getPriceAgeMs(_symbol);
+  if (price <= 0) return 0;
+  const freshnessScore = ageMs < 5000 ? 0.3 : ageMs < 15000 ? 0 : -0.2;
+  return freshnessScore;
 }

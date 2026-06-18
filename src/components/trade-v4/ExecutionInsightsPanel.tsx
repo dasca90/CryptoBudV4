@@ -1,8 +1,8 @@
-import { useMemo } from 'react';
+import { memo, useMemo } from 'react';
 import type { TradeV4PageModel } from './types';
 import type { TradeV4CandidateView } from './types';
 
-export function ExecutionInsightsPanel(props: {
+export const ExecutionInsightsPanel = memo(function ExecutionInsightsPanel(props: {
   model: TradeV4PageModel;
 }) {
   const ins = useMemo(() => {
@@ -61,7 +61,7 @@ export function ExecutionInsightsPanel(props: {
       </div>
     </section>
   );
-}
+});
 
 function Metric(props: { label: string; value: number | string; color: string }) {
   return (

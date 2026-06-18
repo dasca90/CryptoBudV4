@@ -82,6 +82,8 @@ export class TradingEngine {
   private _maxDrawdownPercent = 0;
   private scannerBrainService: ScannerBrainService;
   private getBanlist: () => string[] = () => createDefaultAppSettings().scannerBanlist;
+  private btcAnchorEnabled = true;
+  private ethAnchorEnabled = true;
   private eventCallbacks: {
     onTradeOpened?: (trade: TradeRecord) => void | Promise<void>;
     onTradeClosed?: (trade: TradeRecord) => void | Promise<void>;
@@ -120,7 +122,10 @@ export class TradingEngine {
     logger.info(`RISK_GROUP_CONFIG_BINDING_AUDIT: configuredGroupKeys=${configuredGroupKeys.join('|')} scannerGroupKeys=${scannerGroupKeys.join('|')} missingConfigKeys=${missingConfigKeys.join('|') || 'none'} unusedConfigKeys=${unusedConfigKeys.join('|') || 'none'} fallbackGroupConfigUsed=${String(fallbackGroupConfigUsed)} invariantOk=${String(invariantOk)}`);
     this.positionManager = new PositionManager();
     this.orderLockManager = new OrderLockManager();
-    this.scannerBrainService = new ScannerBrainService(this.brains, this.adapter, this.ml);
+    this.scannerBrainService = new ScannerBrainService(this.brains, this.adapter, this.ml, {
+      btcEnabled: this.btcAnchorEnabled,
+      ethEnabled: this.ethAnchorEnabled,
+    });
     logger.info(`ACTIVE_RUNTIME_SCANNER_WIRING_AUDIT: source=TradingEngine.constructor scannerInstanceId=${this.autoRuntime.getScanner().getScannerInstanceId()} paperAutoBuyFnPresentBeforeDefault=${String(this.autoRuntime.getScanner().hasPaperAutoBuyFn())} logSinkName=logger.getLogs/logger.export`);
     this.installDefaultPaperAutoBuyHandler();
     logger.info(`ACTIVE_RUNTIME_SCANNER_WIRING_AUDIT: source=TradingEngine.constructor scannerInstanceId=${this.autoRuntime.getScanner().getScannerInstanceId()} paperAutoBuyFnPresentAfterDefault=${String(this.autoRuntime.getScanner().hasPaperAutoBuyFn())} callbackTarget=TradingEngine.executePlannedScannerBuy logSinkName=logger.getLogs/logger.export`);
@@ -519,6 +524,7 @@ export class TradingEngine {
 
   addBrain(config: TraderBrainConfig): TraderBrain {
     const brain = new TraderBrain(config, this.adapter, this.ml);
+    brain.setAnchorSettings(this.btcAnchorEnabled, this.ethAnchorEnabled);
     this.brains.set(config.coin, brain);
 
     this.feed.subscribe(config.coin, (price) => {
@@ -534,6 +540,7 @@ export class TradingEngine {
           this.positionManager.updatePosition(config.coin, {
             currentPrice: price.last,
             lastPrice: price.last,
+            priceTimestamp: price.timestamp,
             unrealizedPnlPercent: unrealizedPnlPct,
           });
           if (changed) {
@@ -592,11 +599,13 @@ export class TradingEngine {
     for (const pos of this.positionManager.getOpenPositions()) {
       const price = this.feed.getLastPrice(pos.coin);
       if (price > 0 && pos.avgEntryPrice > 0) {
+        const priceAgeMs = this.feed.getPriceAgeMs(pos.coin);
         const previousPnlPct = pos.unrealizedPnlPercent;
         const unrealizedPnlPct = ((price - pos.avgEntryPrice) / pos.avgEntryPrice) * 100;
         this.positionManager.updatePosition(pos.coin, {
           currentPrice: price,
           lastPrice: price,
+          priceTimestamp: Date.now() - Math.max(0, priceAgeMs),
           unrealizedPnlPercent: unrealizedPnlPct,
         });
         if (Math.abs(unrealizedPnlPct - previousPnlPct) > 0.001) {
@@ -1595,6 +1604,7 @@ export class TradingEngine {
         trailFromPeakPercent: resolvedRisk.dynamicTrailingEnabled ? resolvedRisk.trailPullback : 0,
         maxHoldSec: 86400,
         lastPrice: result.price,
+        priceTimestamp: Date.now(),
         unrealizedPnlPercent: 0,
         ownerType: buySnapshot.ownerType ?? 'scanner',
         adapter: this.adapter.name,
@@ -2183,12 +2193,16 @@ export class TradingEngine {
     const wasRunning = this.running;
     if (wasRunning) this.stop().then(() => {
       this.adapter = adapter;
-      this.scannerBrainService = new ScannerBrainService(this.brains, adapter, this.ml);
+      this.scannerBrainService = new ScannerBrainService(this.brains, adapter, this.ml, {
+        btcEnabled: this.btcAnchorEnabled,
+        ethEnabled: this.ethAnchorEnabled,
+      });
       for (const [, brain] of this.brains) {
         const config = brain.config;
         const newBrain = new TraderBrain(config, adapter, this.ml);
         newBrain.position = brain.position;
         newBrain.lastTradeTime = brain.lastTradeTime;
+        newBrain.setAnchorSettings(this.btcAnchorEnabled, this.ethAnchorEnabled);
         this.brains.set(config.coin, newBrain);
       }
       if (wasRunning) this.start();
@@ -2199,6 +2213,10 @@ export class TradingEngine {
   getML(): MLPredictor { return this.ml; }
 
   async setAnchorSettingsOnBrains(btcEnabled: boolean, ethEnabled: boolean): Promise<void> {
+    this.btcAnchorEnabled = btcEnabled;
+    this.ethAnchorEnabled = ethEnabled;
+    this.scannerBrainService.setAnchorSettings(btcEnabled, ethEnabled);
+    this.autoRuntime.getScanner().setAnchorConfig({ btcEnabled, ethEnabled });
     for (const [, brain] of this.brains) {
       brain.setAnchorSettings(btcEnabled, ethEnabled);
     }

@@ -206,6 +206,20 @@ export function normalizeV4Dataset(json: Record<string, unknown>): ImportedMLRow
       ? row.outcomeLabels as Record<string, number | string | boolean>
       : extractOutcomeLabels(row);
 
+    const feature = (key: string, fallback?: unknown) => predictionFeatures[key] ?? fallback;
+    const outcome = (key: string, fallback?: unknown) => outcomeLabels[key] ?? fallback;
+    const resolvedExitReason = safeStr(row.exitReason ?? outcome('exitReason'), null) || null;
+    const resolvedRealClosePrice = safeNum(
+      row.realMarketPriceAtClose ?? outcome('realMarketPriceAtClose') ?? row.exitPrice ?? outcome('exitPrice'),
+    );
+    const resolvedExecutionQuality = safeStr(row.executionQuality ?? outcome('executionQuality'), '');
+    const exportedQuality = safeStr(row.dataQuality ?? outcome('dataQuality'), '');
+    const exportedTrainingEligible = safeBool(row.trainingEligible ?? outcome('trainingEligible'), false);
+    const resolvedIsRealClose = safeBool(
+      row.isRealMarketPriceAtClose ?? outcome('isRealMarketPriceAtClose'),
+      (resolvedExecutionQuality === 'CLEAN_REAL_MARKET_PRICE' || (exportedQuality === 'GOOD' && exportedTrainingEligible)) && resolvedRealClosePrice > 0,
+    );
+
     const imr: ImportedMLRow = {
       rowId: generateRowId('v4_dataset'),
       source: 'v4_dataset',
@@ -214,34 +228,34 @@ export function normalizeV4Dataset(json: Record<string, unknown>): ImportedMLRow
       symbol: safeStr(row.symbol),
       mode: safeMode(row.mode, 'AUTO'),
       adapter: safeStr(row.adapter, 'Demo'),
-      riskGroup: safeStr(row.riskGroup ?? null, null) || null,
-      strategy: safeStr(row.strategy || row.selectedStrategy || ''),
-      confidence: safeNum(row.confidence, 0.5),
-      marketRegime: safeStr(row.marketRegime ?? null, null) || null,
-      btcRegime: safeStr(row.btcRegime ?? null, null) || null,
-      spreadPct: safeNum(row.spreadPct, 0),
-      volumeRel: safeNum(row.volumeRel, 1),
-      priceFresh: safeBool(row.priceFresh, true),
-      bookFresh: safeBool(row.bookFresh, true),
-      tpRoomOk: safeBool(row.tpRoomOk, true),
-      reboundConfirmed: safeBool(row.reboundConfirmed, false),
-      momentumConfirmed: safeBool(row.momentumConfirmed, false),
-      dipPercent: safeNum(row.dipPercent, 0),
-      reboundPercent: safeNum(row.reboundPercent, 0),
-      m5Change: safeNum(row.m5Change, 0),
-      m15Change: safeNum(row.m15Change, 0),
-      h1Change: safeNum(row.h1Change, 0),
-      change24h: safeNum(row.change24h, 0),
-      pnlPercent: safeNum(row.pnlPercent),
-      exitReason: safeStr(row.exitReason, null) || null,
-      hitTp1: safeBool(row.hitTp1),
-      hitTp2: safeBool(row.hitTp2),
-      hitStopLoss: safeBool(row.hitStopLoss || row.exitReason === 'STOP_LOSS'),
-      mfePercent: safeNum(row.mfePercent),
-      maePercent: safeNum(row.maePercent),
-      realMarketPriceAtBuy: safeNum(row.realMarketPriceAtBuy, 0),
-      realMarketPriceAtClose: safeNum(row.realMarketPriceAtClose),
-      isRealMarketPriceAtClose: safeBool(row.isRealMarketPriceAtClose, false),
+      riskGroup: safeStr(row.riskGroup ?? feature('riskGroup', null), null) || null,
+      strategy: safeStr(row.strategy || row.selectedStrategy || feature('strategy', '')),
+      confidence: safeNum(row.confidence ?? feature('confidence'), 0.5),
+      marketRegime: safeStr(row.marketRegime ?? feature('marketRegime', null), null) || null,
+      btcRegime: safeStr(row.btcRegime ?? feature('btcRegime', null), null) || null,
+      spreadPct: safeNum(row.spreadPct ?? feature('spreadPct'), 0),
+      volumeRel: safeNum(row.volumeRel ?? feature('volumeRel'), 1),
+      priceFresh: safeBool(row.priceFresh ?? feature('priceFresh'), true),
+      bookFresh: safeBool(row.bookFresh ?? feature('bookFresh'), true),
+      tpRoomOk: safeBool(row.tpRoomOk ?? feature('tpRoomOk'), true),
+      reboundConfirmed: safeBool(row.reboundConfirmed ?? feature('reboundConfirmed'), false),
+      momentumConfirmed: safeBool(row.momentumConfirmed ?? feature('momentumConfirmed'), false),
+      dipPercent: safeNum(row.dipPercent ?? feature('dipPercent'), 0),
+      reboundPercent: safeNum(row.reboundPercent ?? feature('reboundPercent'), 0),
+      m5Change: safeNum(row.m5Change ?? feature('m5Change'), 0),
+      m15Change: safeNum(row.m15Change ?? feature('m15Change'), 0),
+      h1Change: safeNum(row.h1Change ?? feature('h1Change'), 0),
+      change24h: safeNum(row.change24h ?? feature('change24h'), 0),
+      pnlPercent: safeNum(row.pnlPercent ?? outcome('pnlPercent')),
+      exitReason: resolvedExitReason,
+      hitTp1: safeBool(row.hitTp1 ?? outcome('hitTp1')),
+      hitTp2: safeBool(row.hitTp2 ?? outcome('hitTp2')),
+      hitStopLoss: safeBool(row.hitStopLoss ?? outcome('hitStopLoss') ?? resolvedExitReason === 'STOP_LOSS'),
+      mfePercent: safeNum(row.mfePercent ?? outcome('mfePercent')),
+      maePercent: safeNum(row.maePercent ?? outcome('maePercent')),
+      realMarketPriceAtBuy: safeNum(row.realMarketPriceAtBuy ?? feature('realMarketPriceAtBuy'), 0),
+      realMarketPriceAtClose: resolvedRealClosePrice,
+      isRealMarketPriceAtClose: resolvedIsRealClose,
       predictionFeatures,
       outcomeLabels,
       dataQuality: 'MEDIUM',

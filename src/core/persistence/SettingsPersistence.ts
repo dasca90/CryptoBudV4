@@ -3,6 +3,7 @@ import { createDefaultAppSettings, createDefaultApiConfig, createDefaultTelegram
 import { tauriDb, isTauriAvailable } from './TauriBridge';
 import { logger } from '../../utils/logger';
 import { resolveMaxSelectedPerScanConfig } from '../settings/max-selected-per-scan';
+import { normalizeAutoPerformanceMode, normalizePerformanceSettings, savePerformanceSettings } from '../../lib/performance/performanceSettings';
 
 const SETTINGS_KEY = 'app_settings';
 const API_CONFIG_KEY = 'api_config';
@@ -95,10 +96,16 @@ export class SettingsPersistence {
       maxSelectedPerScan,
       maxEntriesPerCycle: maxSelectedPerScan,
       maxSelectedPerScanUserSet: (settings as any).maxSelectedPerScanUserSet === true,
+      graphicsQuality: normalizePerformanceSettings(settings).graphicsQuality,
+      autoPerformanceMode: normalizeAutoPerformanceMode((settings as any).autoPerformanceMode) === 'on',
       updatedAt: new Date().toISOString(),
     };
     logger.info(`USER_SETTINGS_SAVE_REQUESTED: tradingCapital=${(updated as any).autoTradingCapital ?? 1000} capitalPerCoin=${(updated as any).capitalPerCoin ?? updated.capitalPerTrade ?? 100} maxOpenPositions=${updated.maxPositions ?? 10} bannedCoinsCount=${(updated.scannerBanlist ?? []).length} source=persistence storageKey=${SETTINGS_KEY} hydrationComplete=true`);
     await this.setItem(SETTINGS_KEY, JSON.stringify(updated));
+    savePerformanceSettings({
+      graphicsQuality: updated.graphicsQuality,
+      autoPerformanceMode: updated.autoPerformanceMode ? 'on' : 'off',
+    });
     logger.info(`USER_SETTINGS_SAVE_SUCCESS: tradingCapital=${(updated as any).autoTradingCapital ?? 1000} capitalPerCoin=${(updated as any).capitalPerCoin ?? updated.capitalPerTrade ?? 100} maxOpenPositions=${updated.maxPositions ?? 10} bannedCoinsCount=${(updated.scannerBanlist ?? []).length} source=persistence storageKey=${SETTINGS_KEY}`);
     logger.info(`TRADING_SETTINGS_PERSISTENCE_AUDIT: reason=settings_save savedRefPeriod=${updated.scannerReferencePeriod ?? 'n/a'} savedRefMode=${(updated as any).refMode ?? 'n/a'} savedRefWindow=${(updated as any).refWindow ?? 'n/a'} writeSuccess=true sourceUsed=${typeof (typeof window !== 'undefined' ? (window as any).__TAURI_INTERNALS__ : undefined) !== 'undefined' ? 'tauri_sqlite' : 'localStorage'}`);
     if (!this.isDupLog('SETTINGS_SAVED')) logger.info('SETTINGS_SAVED');
@@ -133,7 +140,13 @@ export class SettingsPersistence {
         maxSelectedPerScan,
         maxEntriesPerCycle: maxSelectedPerScan,
         maxSelectedPerScanUserSet: (parsed as any).maxSelectedPerScanUserSet === true,
+        graphicsQuality: normalizePerformanceSettings(parsed).graphicsQuality,
+        autoPerformanceMode: normalizeAutoPerformanceMode((parsed as any).autoPerformanceMode) === 'on',
       };
+      savePerformanceSettings({
+        graphicsQuality: normalized.graphicsQuality,
+        autoPerformanceMode: normalized.autoPerformanceMode ? 'on' : 'off',
+      });
       logger.info(`USER_SETTINGS_STORAGE_FOUND: storageKey=${SETTINGS_KEY} tradingCapital=${(parsed as any).autoTradingCapital ?? 1000} capitalPerCoin=${(parsed as any).capitalPerCoin ?? parsed.capitalPerTrade ?? 100} maxOpenPositions=${parsed.maxPositions ?? 10} bannedCoinsCount=${(parsed.scannerBanlist ?? []).length}`);
       return normalized;
     } catch {

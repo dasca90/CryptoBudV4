@@ -264,6 +264,7 @@ export interface Position {
   trailFromPeakPercent: number;
   maxHoldSec: number;
   lastPrice: number;
+  priceTimestamp?: number;
   unrealizedPnlPercent: number;
   ownerType: string;
   adapter: string;
@@ -1615,6 +1616,7 @@ export type ApiStatus = 'NOT_CONFIGURED' | 'CONFIGURED' | 'TESTING' | 'VALID' | 
 
 export type RiskStyleName = 'conservative' | 'moderate' | 'aggressive';
 export type AllowedGroupsSetting = 'all' | 'blue_chip' | 'no_very_high_risk';
+export type GraphicsQualitySetting = 'low' | 'balanced' | 'high';
 
 export interface TelegramSettings {
   enabled: boolean;
@@ -1711,6 +1713,7 @@ export interface AppSettings {
   maxPriceAgeMs: number;
   strategySource: 'autobots' | 'manual_override';
   entryConfirmationMode: 'strict' | 'smart' | 'aggressive';
+  smartProfessionalMinScore: number;
   stopLossPct: number;
   tp1Pct: number;
   tp2Pct: number;
@@ -1718,6 +1721,8 @@ export interface AppSettings {
   trailPullbackPct: number;
   paperAutoExecutionEnabled: boolean;
   microScalperFeatureEnabled: boolean;
+  graphicsQuality: GraphicsQualitySetting;
+  autoPerformanceMode: boolean;
   manualDipperSetup: ManualDipperSetupSettings;
   updatedAt: string;
 }
@@ -1787,6 +1792,7 @@ export function createDefaultAppSettings(): AppSettings {
     maxPriceAgeMs: 10000,
     strategySource: 'autobots',
     entryConfirmationMode: 'smart',
+    smartProfessionalMinScore: 80,
     stopLossPct: 1.5,
     tp1Pct: 2.0,
     tp2Pct: 4.0,
@@ -1794,6 +1800,8 @@ export function createDefaultAppSettings(): AppSettings {
     trailPullbackPct: 0.25,
     paperAutoExecutionEnabled: false,
     microScalperFeatureEnabled: true,
+    graphicsQuality: 'balanced',
+    autoPerformanceMode: false,
     manualDipperSetup: {
       momentumMinReboundPct: 0.4,
       momentumConfirmationRequired: true,

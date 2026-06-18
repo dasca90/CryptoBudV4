@@ -202,7 +202,10 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
           <option value="LAST_3_WEEKS">3w</option>
         </select>
 
-        <label>Ref Mode</label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'help' }}
+          title="SMA: Simple Moving Average — smoother reference, slower reaction.&#10;EMA: Exponential MA — faster reaction, weights recent prices.&#10;Bollinger: Bands around moving average — detects squeeze/breakout.&#10;VWAP: Volume Weighted Avg Price — fair intraday value reference.">
+          Ref Mode <span style={{ fontSize: 9, color: '#58a6ff' }}>?</span>
+        </label>
         <select value={v.refMode} onChange={(e) => patch("refMode", e.target.value as TradingParametersView["refMode"])}
           title={auto ? 'Ref Mode remains user-controlled for market context' : 'Reference Mode'}>
           <option value="AUTO">Auto</option>

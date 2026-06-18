@@ -118,7 +118,7 @@ export function mapCandidatesToAirCoins(params: {
       const b = seed(candidate.symbol, index);
       return { ...b, x: b.baseX, y: b.baseY, z: b.baseZ, captureProgress: 0 };
     })();
-    const fallbackState = openPosition ? "open" : (selectedSymbol === candidate.symbol && candidate.status === "WAIT" ? "locked" : candidate.engineState);
+    const fallbackState = openPosition ? "open" : (selectedSymbol === candidate.symbol ? "locked" : candidate.engineState);
     const visualLabel = resolveAirCoinStatusLabel(candidate, !!openPosition);
     const rawStatus = candidate.status;
     if (visualLabel !== rawStatus) {

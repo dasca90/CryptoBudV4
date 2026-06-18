@@ -1,10 +1,14 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { TradeV4OpenPositionView } from "./types";
+import { CoinSymbolCell } from "./CoinLogo";
 import { logger } from "../../utils/logger";
 import { formatLocalTime } from "../../utils/timeFormatter";
+import { useVirtualWindow } from "../../lib/ui/virtualization";
 
-const PAGE_SIZE = 15;
+const PAGE_SIZE = 10;
+const POSITION_VIRTUALIZATION_THRESHOLD = 25;
+const OPEN_POSITION_ROW_HEIGHT = 36;
 const trendTone = (v?: string) => {
   const t = String(v ?? "").toLowerCase();
   if (t.includes("bull") || t.includes("up")) return "pill-green";
@@ -21,6 +25,13 @@ const strategyTone = (v?: string) => {
   return "pill-gray";
 };
 const freshnessTone = (v?: string) => (v === "fresh" ? "pill-green" : v === "stale" ? "pill-yellow" : v === "pending" ? "pill-gray" : v === "fallback" ? "pill-orange" : "pill-red");
+const compactFreshnessLabel = (p: TradeV4OpenPositionView) => {
+  if (p.priceQuality === "fresh") return "Fresh";
+  if (p.priceQuality === "stale") return "Stale";
+  if (p.priceQuality === "fallback") return "Fallback";
+  if (p.priceQuality === "unavailable") return "No price";
+  return "Pending";
+};
 const stateTone = (p: TradeV4OpenPositionView) => {
   if (p.pnlUsd > 0) return { cls: 'pill-green', label: 'Running' };
   if (p.pnlUsd < 0) return { cls: 'pill-red', label: 'Loss' };
@@ -30,6 +41,7 @@ export const V3_OPEN_POSITION_COLUMNS = [
   "Symbol",
   "State",
   "Strategy",
+  "Trend",
   "Qty",
   "Entry Value",
   "Dip",
@@ -69,16 +81,52 @@ const V4_OPEN_DETAILED_COLUMNS = [
   "Diag",
 ] as const;
 
+export type OpenPositionOwnerFilter = 'all' | 'manual' | 'auto';
+export type OpenPositionResultFilter = 'all' | 'profit' | 'loss' | 'flat';
+export type OpenPositionPriceFilter = 'all' | 'fresh' | 'stale' | 'pending' | 'unavailable' | 'fallback';
+export type OpenPositionSortBy = 'age' | 'pnl_pct' | 'pnl_usd' | 'symbol';
+export type OpenPositionSortDir = 'asc' | 'desc';
+
+export function getVisibleOpenPositions(params: {
+  positions: TradeV4OpenPositionView[];
+  ownerFilter: OpenPositionOwnerFilter;
+  resultFilter: OpenPositionResultFilter;
+  priceFilter: OpenPositionPriceFilter;
+  sortBy: OpenPositionSortBy;
+  sortDir: OpenPositionSortDir;
+}): TradeV4OpenPositionView[] {
+  const { positions, ownerFilter, resultFilter, priceFilter, sortBy, sortDir } = params;
+  return positions.filter((p) => {
+    if (ownerFilter === 'all') return true;
+    if (ownerFilter === 'manual') return String(p.ownerType ?? '').toLowerCase().includes('manual');
+    return !String(p.ownerType ?? '').toLowerCase().includes('manual');
+  }).filter((p) => {
+    if (resultFilter === 'profit') return p.pnlUsd > 0;
+    if (resultFilter === 'loss') return p.pnlUsd < 0;
+    if (resultFilter === 'flat') return Math.abs(p.pnlUsd) < 0.0001;
+    return true;
+  }).filter((p) => (priceFilter === 'all' ? true : p.priceQuality === priceFilter))
+    .sort((a, b) => {
+      const sign = sortDir === 'asc' ? 1 : -1;
+      if (sortBy === 'pnl_pct') return (a.pnlPct - b.pnlPct) * sign;
+      if (sortBy === 'pnl_usd') return (a.pnlUsd - b.pnlUsd) * sign;
+      if (sortBy === 'symbol') return a.symbol.localeCompare(b.symbol) * sign;
+      const as = Number.parseInt(String(a.ageLabel).replace(/[^\d]/g, ''), 10) || 0;
+      const bs = Number.parseInt(String(b.ageLabel).replace(/[^\d]/g, ''), 10) || 0;
+      return (as - bs) * sign;
+    });
+}
+
 export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { positions: TradeV4OpenPositionView[]; restoring?: boolean }) {
   const [page, setPage] = useState(1);
   const [detailed, setDetailed] = useState(false);
-  const [ownerFilter, setOwnerFilter] = useState<'all' | 'manual' | 'auto'>('all');
+  const [ownerFilter, setOwnerFilter] = useState<OpenPositionOwnerFilter>('all');
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
-  const [sortBy, setSortBy] = useState<'age' | 'pnl_pct' | 'pnl_usd' | 'symbol'>('age');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [resultFilter, setResultFilter] = useState<'all' | 'profit' | 'loss' | 'flat'>('all');
-  const [priceFilter, setPriceFilter] = useState<'all' | 'fresh' | 'stale' | 'pending' | 'unavailable' | 'fallback'>('all');
+  const [sortBy, setSortBy] = useState<OpenPositionSortBy>('age');
+  const [sortDir, setSortDir] = useState<OpenPositionSortDir>('desc');
+  const [resultFilter, setResultFilter] = useState<OpenPositionResultFilter>('all');
+  const [priceFilter, setPriceFilter] = useState<OpenPositionPriceFilter>('all');
   const [diagRow, setDiagRow] = useState<TradeV4OpenPositionView | null>(null);
   const [tooltipState, setTooltipState] = useState<{ position: TradeV4OpenPositionView; x: number; y: number; align: 'right' | 'left'; flipY: boolean } | null>(null);
   const handleRowEnter = useCallback((p: TradeV4OpenPositionView, e: React.MouseEvent<HTMLTableRowElement>) => {
@@ -105,32 +153,37 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
   }, []);
   const handleRowLeave = useCallback(() => setTooltipState(null), []);
   const cycleFilter = () => setOwnerFilter((f) => (f === 'all' ? 'manual' : f === 'manual' ? 'auto' : 'all'));
-  const filteredPositions = props.positions.filter((p) => {
-    if (ownerFilter === 'all') return true;
-    if (ownerFilter === 'manual') return String(p.ownerType ?? '').toLowerCase().includes('manual');
-    return !String(p.ownerType ?? '').toLowerCase().includes('manual');
-  }).filter((p) => {
-    if (resultFilter === 'profit') return p.pnlUsd > 0;
-    if (resultFilter === 'loss') return p.pnlUsd < 0;
-    if (resultFilter === 'flat') return Math.abs(p.pnlUsd) < 0.0001;
-    return true;
-  }).filter((p) => (priceFilter === 'all' ? true : p.priceQuality === priceFilter))
-    .sort((a, b) => {
-      const sign = sortDir === 'asc' ? 1 : -1;
-      if (sortBy === 'pnl_pct') return (a.pnlPct - b.pnlPct) * sign;
-      if (sortBy === 'pnl_usd') return (a.pnlUsd - b.pnlUsd) * sign;
-      if (sortBy === 'symbol') return a.symbol.localeCompare(b.symbol) * sign;
-      const as = Number.parseInt(String(a.ageLabel).replace(/[^\d]/g, ''), 10) || 0;
-      const bs = Number.parseInt(String(b.ageLabel).replace(/[^\d]/g, ''), 10) || 0;
-      return (as - bs) * sign;
-    });
+  const filteredPositions = useMemo(() => getVisibleOpenPositions({
+    positions: props.positions,
+    ownerFilter,
+    resultFilter,
+    priceFilter,
+    sortBy,
+    sortDir,
+  }), [props.positions, ownerFilter, resultFilter, priceFilter, sortBy, sortDir]);
   const totalPages = Math.max(1, Math.ceil(filteredPositions.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
+  const virtualWindow = useVirtualWindow({
+    total: filteredPositions.length,
+    rowHeight: OPEN_POSITION_ROW_HEIGHT,
+    threshold: POSITION_VIRTUALIZATION_THRESHOLD,
+    overscan: 6,
+  });
   const rows = useMemo(() => {
+    if (virtualWindow.isVirtualized) {
+      return filteredPositions.slice(virtualWindow.startIndex, virtualWindow.endIndex);
+    }
     const start = (safePage - 1) * PAGE_SIZE;
     return filteredPositions.slice(start, start + PAGE_SIZE);
-  }, [filteredPositions, safePage]);
-  useMemo(() => {
+  }, [filteredPositions, safePage, virtualWindow.isVirtualized, virtualWindow.startIndex, virtualWindow.endIndex]);
+  const virtualAuditRef = useRef(0);
+  useEffect(() => {
+    const now = Date.now();
+    if (now - virtualAuditRef.current < 5000) return;
+    virtualAuditRef.current = now;
+    logger.info(`VIRTUALIZED_TABLE_RENDER_AUDIT: table=open_positions enabled=${String(virtualWindow.isVirtualized)} visibleRows=${rows.length} totalRows=${filteredPositions.length} threshold=${POSITION_VIRTUALIZATION_THRESHOLD} pnlDisplayPreserved=true freshnessBadgePreserved=true`);
+  }, [virtualWindow.isVirtualized, rows.length, filteredPositions.length]);
+  useEffect(() => {
     let emittedCount = 0;
     let suppressedCount = 0;
     const MAX_UI_AUDIT_PER_CYCLE = 3;
@@ -150,17 +203,15 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
     if (suppressedCount > 0) {
       logger.info(`UI_AUDIT_RATE_LIMIT_AUDIT: auditName=OPEN_POSITION_UI_CELL_AUDIT emittedCount=${emittedCount} suppressedCount=${suppressedCount} reason=rate_limit_per_render_cycle`);
     }
-    return null;
   }, [rows]);
 
-  useMemo(() => {
+  useEffect(() => {
     const panel = document.querySelector('[data-testid="open-positions-workspace"]');
     const panelWidth = panel?.clientWidth ?? 0;
     const table = panel?.querySelector('table') as HTMLElement | null;
     const tableWidth = table?.scrollWidth ?? 0;
     const horizontalScrollRequired = tableWidth > panelWidth && panelWidth > 0;
     logger.info(`OPEN_POSITIONS_TABLE_COLUMNS_AUDIT: visibleColumns=${V3_OPEN_POSITION_COLUMNS.join('|')} hiddenColumns=none trendColumnVisible=false pnlColumnsVisible=true unrealizedColumnVisible=true riskColumnVisible=true horizontalScrollRequired=${String(horizontalScrollRequired)} tableWidth=${tableWidth} availablePanelWidth=${panelWidth} rowCount=${rows.length} pageSize=${PAGE_SIZE}`);
-    return null;
   }, [rows]);
 
   return (
@@ -197,7 +248,7 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
         <div className="panel-body-v4" style={{ fontSize: 10, color: '#8b949e', textAlign: 'center', padding: '12px 0' }}>{props.restoring ? 'Restoring open positions...' : 'No open positions.'}</div>
       ) : (
         <>
-          <div className="panel-body-v4 panel-scroll-v4 table-scroll-both">
+          <div className="panel-body-v4 panel-scroll-v4 table-scroll-both" ref={virtualWindow.scrollRef} onScroll={virtualWindow.onScroll} data-virtualized={virtualWindow.isVirtualized ? 'true' : 'false'}>
             <div className="v3-scrollbar-strip" aria-hidden="true"><span /></div>
             <table className="data-table data-table-wide-open" style={{ fontSize: 10 }}>
               <thead>
@@ -207,14 +258,26 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                 </tr>
               </thead>
               <tbody>
+                {virtualWindow.isVirtualized && virtualWindow.topSpacerPx > 0 && (
+                  <tr className="virtual-table-spacer"><td colSpan={V3_OPEN_POSITION_COLUMNS.length + (detailed ? V4_OPEN_DETAILED_COLUMNS.length : 0)} style={{ height: virtualWindow.topSpacerPx, padding: 0 }} /></tr>
+                )}
                 {rows.map((p) => (
-                  <tr key={p.id} className={`row-hover-glow ${selectedRowId === p.id ? 'row-selected-v4' : ''}`} onClick={() => setSelectedRowId(p.id)} onMouseEnter={(e) => handleRowEnter(p, e)} onMouseLeave={handleRowLeave}>
+                  <tr
+                    key={p.id}
+                    className={`row-hover-glow ${selectedRowId === p.id ? 'row-selected-v4' : ''}`}
+                    data-open-position-symbol={p.symbol}
+                    data-testid={`open-position-row-${p.symbol}`}
+                    onClick={() => setSelectedRowId(p.id)}
+                    onMouseEnter={(e) => handleRowEnter(p, e)}
+                    onMouseLeave={handleRowLeave}
+                  >
                     <td style={{ fontWeight: 600 }}>
-                      {p.symbol}
+                      <CoinSymbolCell symbol={p.symbol} />
                       {!p.hasSnapshot && <div className="status-warn" style={{ fontSize: 9 }}>LEGACY / MISSING SNAPSHOT</div>}
                     </td>
                     <td><span className={`v3-pill ${stateTone(p).cls}`}>{stateTone(p).label}</span></td>
                     <td><span className={`v3-pill ${strategyTone(p.strategy)}`}>{p.strategy}</span>{p.strategy === 'dip_and_rebound' && p.reboundPct != null && p.reboundPct <= 0 && <span className="status-bad" style={{fontSize:8,marginLeft:4}}>INVALID D&R</span>}</td>
+                    <td><span className={`v3-pill ${trendTone(p.groupTrend ?? p.marketRegimeAtEntry)}`}>{p.groupTrend ?? p.marketRegimeAtEntry ?? 'n/a'}</span></td>
                     <td>{p.quantity != null ? Number(p.quantity).toFixed(4) : 'n/a'}</td>
                     <td>{p.usedCapitalUsd != null ? `$${p.usedCapitalUsd.toFixed(2)}` : 'n/a'}</td>
                     <td>{p.dipPct != null ? (p.dipPct === 0 && p.strategy === 'dip_and_rebound' ? '--' : (p.dipPct > 0 && p.dipPct < 0.005 ? '<0.01%' : `${Math.abs(p.dipPct).toFixed(2)}%`)) : '--'}</td>
@@ -228,6 +291,13 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                     <td className={p.pnlPct >= 0 ? "status-good" : "status-bad"}>
                       <span className="pnl-tooltip-wrap">
                         {p.pnlPct.toFixed(2)}%
+                        <span
+                          className={`v3-pill ${freshnessTone(p.priceQuality)}`}
+                          style={{ marginLeft: 4, fontSize: 8 }}
+                          title={`${p.priceFreshnessStatus ?? p.livePriceSource ?? p.priceQuality} · age ${p.livePriceAgeMs ?? p.pnlBreakdown?.priceAgeMs ?? 'n/a'}ms · ${p.priceFreshnessReason ?? 'n/a'}`}
+                        >
+                          {compactFreshnessLabel(p)}
+                        </span>
                         <span className="pnl-tooltip-card">
                           <b>Open PnL</b><br />
                           Entry: {(p.pnlBreakdown?.entryPrice ?? 0).toFixed(6)}<br />
@@ -242,8 +312,11 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                           Net PnL %: {(p.pnlBreakdown?.netPnlPct ?? 0).toFixed(6)}<br />
                           Formula: {p.pnlBreakdown?.formulaUsed}<br />
                           Price age: {p.pnlBreakdown?.priceAgeMs}ms<br />
+                          Stale threshold: {p.pnlBreakdown?.staleThresholdMs}ms<br />
                           Price freshness: {p.pnlBreakdown?.priceFreshness}<br />
+                          Fresh status: {p.pnlBreakdown?.priceFreshnessStatus}<br />
                           Fallback used: {String(p.pnlBreakdown?.fallbackUsed)}<br />
+                          {p.pnlBreakdown?.priceFreshness === 'stale' && <span className="status-warn">PNL BASED ON STALE PRICE</span>}
                           {p.pnlBreakdown?.priceFreshness === 'fallback' && <span className="status-warn">FALLBACK PRICE USED</span>}
                           {p.pnlBreakdown?.priceFreshness === 'unavailable' && <span className="status-bad">PNL UNAVAILABLE — LIVE PRICE MISSING</span>}
                         </span>
@@ -260,7 +333,7 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                     <td className="status-bad">{p.slPct != null ? `${p.slPct.toFixed(2)}%` : 'n/a'}</td>
                     <td>{p.entryPrice.toFixed(4)}</td>
                     <td>{typeof p.refPrice === 'number' ? p.refPrice.toFixed(4) : (p.marketRegimeAtEntry ?? p.groupTrend ?? 'n/a')}</td>
-                    <td>{p.livePrice > 0 ? p.livePrice.toFixed(4) : <span className={`v3-pill ${freshnessTone(p.priceQuality)}`}>{p.priceQuality === 'pending' ? 'PRICE PENDING' : 'PRICE UNAVAILABLE'}</span>}</td>
+                    <td>{p.livePrice > 0 ? <span title={`${p.priceFreshnessStatus ?? p.livePriceSource ?? p.priceQuality} · age ${p.livePriceAgeMs ?? 'n/a'}ms`}>{p.livePrice.toFixed(4)}</span> : <span className={`v3-pill ${freshnessTone(p.priceQuality)}`}>{p.priceQuality === 'pending' ? 'PRICE PENDING' : 'PRICE UNAVAILABLE'}</span>}</td>
                     <td style={{ fontSize: 9 }}>{p.slPct != null ? `$${(p.entryPrice * (1 - (p.slPct / 100))).toFixed(6)}` : 'n/a'}</td>
                     <td><span className="v3-pill pill-gray">{p.exitStatus === 'sl_risk' ? 'DEFEND' : 'HOLD'}</span></td>
                     <td><span className={`v3-pill ${String(p.ownerType ?? '').toLowerCase().includes('manual') ? 'pill-gray' : 'pill-cyan'}`}>{p.sourceLabel ?? p.ownerType ?? 'n/a'}</span></td>
@@ -285,14 +358,17 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                     {detailed && <td><button className="btn btn-sm btn-default" onClick={(e) => { e.stopPropagation(); setDiagRow(p); }}>Inspect</button></td>}
                   </tr>
                 ))}
+                {virtualWindow.isVirtualized && virtualWindow.bottomSpacerPx > 0 && (
+                  <tr className="virtual-table-spacer"><td colSpan={V3_OPEN_POSITION_COLUMNS.length + (detailed ? V4_OPEN_DETAILED_COLUMNS.length : 0)} style={{ height: virtualWindow.bottomSpacerPx, padding: 0 }} /></tr>
+                )}
               </tbody>
             </table>
           </div>
-          <div className="pager-row">
+          {!virtualWindow.isVirtualized ? <div className="pager-row">
             <button className="btn btn-sm btn-outline" disabled={safePage <= 1} onClick={() => setPage(v => Math.max(1, v - 1))}>Prev</button>
             <span>Page {safePage} / {totalPages}</span>
             <button className="btn btn-sm btn-outline" disabled={safePage >= totalPages} onClick={() => setPage(v => Math.min(totalPages, v + 1))}>Next</button>
-          </div>
+          </div> : <div className="pager-row"><span>Virtual rows {virtualWindow.startIndex + 1}-{virtualWindow.endIndex} / {filteredPositions.length}</span></div>}
         </>
       )}
       {diagRow && (

@@ -1,8 +1,9 @@
-﻿import { getTitleSymbol } from "../../lib/ui/uiSymbolMapper";
+﻿import { memo } from "react";
+import { getTitleSymbol } from "../../lib/ui/uiSymbolMapper";
 import { logger } from "../../utils/logger";
 import { getExecutionModeDisplay } from "../../lib/execution/executionDisplay";
 
-export function TopStatusBar(props: {
+export const TopStatusBar = memo(function TopStatusBar(props: {
   scannerRunning: boolean;
   engineOnline: boolean;
   mode: "PAPER" | "LIVE_LOCKED";
@@ -55,7 +56,7 @@ export function TopStatusBar(props: {
       </button>
     </header>
   );
-}
+});
 
 function Status(props: { label: string; value: string; good?: boolean }) {
   return (

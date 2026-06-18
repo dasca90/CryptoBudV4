@@ -8,6 +8,7 @@ import { Journal } from '../core/persistence/Journal';
 import { createMLLabel } from '../core/ml/ml-labeler';
 import { buildMLFeatures } from '../core/ml/ml-feature-builder';
 import { evaluateTradeMLQuality, evaluateCloseQuality } from '../core/ml/ml-data-quality';
+import { importMLJson } from '../core/ml/ml-importer';
 import type {
   TradeRecord, CloseSnapshot, BuySnapshot, MLLabel,
   MLFeatureVector, MLQualityResult, EntryGateOutput, TraderBrainDecision,
@@ -296,6 +297,13 @@ async function main() {
   assertEqual(counts.trainingEligible, 2, 'J5: trainingEligible = 2');
   assertEqual(counts.advisoryOnly, 1, 'J6: advisoryOnly = 1');
   assertEqual(counts.excluded, 1, 'J7: excluded = 1');
+
+  const trainingExport = JSON.parse(await journal.exportTrainingRows());
+  const importedTraining = importMLJson(trainingExport);
+  assertEqual(importedTraining.totalRows, 2, 'J8: training export contains 2 rows');
+  assertEqual(importedTraining.goodRows, 2, 'J9: Journal training export imports back as 2 GOOD rows');
+  assertEqual(importedTraining.badRows, 0, 'J10: Journal training export imports back with 0 BAD rows');
+  assertEqual(importedTraining.rows.filter(r => r.trainingEligible).length, 2, 'J11: imported training rows remain eligible');
 
   // ── Additional: ML label tests ──
   console.log('\n── K: ML label edge cases ──\n');

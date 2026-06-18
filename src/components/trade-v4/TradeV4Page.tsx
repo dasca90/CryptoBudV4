@@ -1,5 +1,12 @@
 ﻿import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import type { TradeV4PageModel, TradingParametersView } from "./types";
+import { lazy, Suspense } from "react";
+import {
+  DEFAULT_GRAPHICS_QUALITY,
+  normalizeGraphicsQuality,
+  type AirScannerQuality,
+  type ScreenPoint,
+} from "../../features/air-scanner-lab/state/airScannerVisualState";
 import { TopStatusBar } from "./TopStatusBar";
 import { SideNavigation } from "./SideNavigation";
 import { LeftControlSidebar } from "./LeftControlSidebar";
@@ -17,7 +24,19 @@ import { RecentExecutionsCard } from "./RecentExecutionsCard";
 import { MicroScalperPanel } from "./MicroScalperPanel";
 import { getTabSymbol } from "../../lib/ui/uiSymbolMapper";
 import { logger } from "../../utils/logger";
+import { is3DScannerLabPreviewEnabled } from "../../features/air-scanner-lab/featureFlag";
+import { loadPerformanceSettings, savePerformanceSettings, type AutoPerformanceMode } from "../../lib/performance/performanceSettings";
+import { useAdaptivePerformanceController } from "../../lib/performance/useAdaptivePerformanceController";
 import "./trade-v4.css";
+
+const IS_DEV = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV);
+
+const AirScannerProductionPreview = lazy(() => import("../../features/air-scanner-lab/AirScannerProductionPreview").then((module) => ({
+  default: module.AirScannerProductionPreview,
+})));
+const ProductionOpenPositionTransferOverlay = lazy(() => import("../../features/air-scanner-lab/ProductionOpenPositionTransferOverlay").then((module) => ({
+  default: module.ProductionOpenPositionTransferOverlay,
+})));
 
 export function TradeV4Page(props: {
   model: TradeV4PageModel;
@@ -41,10 +60,78 @@ export function TradeV4Page(props: {
     const saved = localStorage.getItem('trade-v4-scanner-mode');
     return saved === 'normal' || saved === 'hidden' ? saved : 'compact';
   });
+  const [graphicsQuality, setGraphicsQuality] = useState<AirScannerQuality>(() => {
+    if (typeof window === 'undefined') return DEFAULT_GRAPHICS_QUALITY;
+    return loadPerformanceSettings().graphicsQuality;
+  });
+  const [autoPerformanceMode, setAutoPerformanceMode] = useState<AutoPerformanceMode>(() => {
+    if (typeof window === 'undefined') return 'off';
+    return loadPerformanceSettings().autoPerformanceMode;
+  });
+  const [use3DScannerLabPreview] = useState(() => is3DScannerLabPreviewEnabled());
+  const [labTransferSource, setLabTransferSource] = useState<ScreenPoint | null>(null);
+  const activeBuyTransfer = props.model.paperAutoResult?.stage === 'PositionOpened' || props.model.paperAutoResult?.positionCreated === true;
   const selectedSymbol = props.model.selectedSymbol ?? localSelected;
+  const renderAuditRef = useRef({ count: 0, startedAt: performance.now(), lastLoggedAt: 0 });
+  const performanceHealthAuditRef = useRef(0);
+  if (IS_DEV) {
+    renderAuditRef.current.count += 1;
+  }
+
+  useEffect(() => {
+    if (!IS_DEV) return;
+    const now = performance.now();
+    const elapsed = now - renderAuditRef.current.startedAt;
+    if (now - renderAuditRef.current.lastLoggedAt < 5000 || elapsed <= 0) return;
+    renderAuditRef.current.lastLoggedAt = now;
+    const rendersPerMinute = Math.round((renderAuditRef.current.count / elapsed) * 60000);
+    console.log(`UI_RENDER_FREQUENCY_AUDIT: component=TradeV4Page renderCount=${renderAuditRef.current.count} elapsedMs=${elapsed.toFixed(0)} rendersPerMinute=${rendersPerMinute} devOnly=true`);
+  });
+
   useEffect(() => {
     localStorage.setItem('trade-v4-scanner-mode', scannerMode);
   }, [scannerMode]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    savePerformanceSettings({ graphicsQuality, autoPerformanceMode });
+    if (IS_DEV) {
+      console.info(`PERFORMANCE_MODE_STATE_AUDIT: graphicsQuality=${graphicsQuality} autoPerformanceMode=${autoPerformanceMode} source=TradeV4Page persisted=true`);
+    }
+  }, [graphicsQuality, autoPerformanceMode]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onPerformanceSettingsChanged = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      const next = detail ?? loadPerformanceSettings();
+      setGraphicsQuality(normalizeGraphicsQuality(next.graphicsQuality));
+      setAutoPerformanceMode(next.autoPerformanceMode === 'on' ? 'on' : 'off');
+    };
+    window.addEventListener('cryptobud:performance-settings-changed', onPerformanceSettingsChanged);
+    return () => window.removeEventListener('cryptobud:performance-settings-changed', onPerformanceSettingsChanged);
+  }, []);
+
+  const handleAutoDowngrade = useCallback((quality: AirScannerQuality) => {
+    setGraphicsQuality(quality);
+  }, []);
+
+  useAdaptivePerformanceController({
+    graphicsQuality,
+    autoPerformanceMode,
+    activeBuyTransfer,
+    onDowngrade: handleAutoDowngrade,
+  });
+
+  useEffect(() => {
+    const now = Date.now();
+    if (now - performanceHealthAuditRef.current < 10_000) return;
+    performanceHealthAuditRef.current = now;
+    const staleOpenPositionPriceCount = props.model.openPositions.filter((p) => p.priceQuality === 'stale').length;
+    const fallbackOpenPositionPriceCount = props.model.openPositions.filter((p) => p.priceQuality === 'fallback').length;
+    const unavailableOpenPositionPriceCount = props.model.openPositions.filter((p) => p.priceQuality === 'unavailable').length;
+    logger.info(`UI_PERFORMANCE_HEALTH_AUDIT: graphicsQuality=${graphicsQuality} autoPerformanceMode=${autoPerformanceMode} openVisibleRows=${Math.min(props.model.openPositions.length, 25)} openTotalRows=${props.model.openPositions.length} closedVisibleRows=${Math.min(props.model.closedPositions.length, 25)} closedTotalRows=${props.model.closedPositions.length} staleOpenPositionPriceCount=${staleOpenPositionPriceCount} fallbackOpenPositionPriceCount=${fallbackOpenPositionPriceCount} unavailableOpenPositionPriceCount=${unavailableOpenPositionPriceCount}`);
+  }, [graphicsQuality, autoPerformanceMode, props.model.openPositions, props.model.closedPositions]);
 
   // ── Layout version reset ──
   useEffect(() => {
@@ -57,8 +144,8 @@ export function TradeV4Page(props: {
     }
   }, []);
 
-  // ── Layout rebalance + anchor state audit ──
   useEffect(() => {
+    if (!IS_DEV) return;
     const t = setTimeout(() => {
       const m = (s: string) => {
         const el = document.querySelector(s);
@@ -97,23 +184,10 @@ export function TradeV4Page(props: {
     ro.observe(el); return () => ro.disconnect();
   }, []);
 
-  useEffect(() => {
-    const id = setInterval(() => {
-      const openWs = document.querySelector('[data-testid="open-positions-workspace"]');
-      const closedWs = document.querySelector('[data-testid="closed-positions-workspace"]');
-      const openTable = openWs?.querySelector('.table-scroll-both') as HTMLElement | null;
-      const closedTable = closedWs?.querySelector('.table-scroll-both') as HTMLElement | null;
-      const openPanel = openWs?.querySelector('.v3-positions-window') as HTMLElement | null;
-      const closedPanel = closedWs?.querySelector('.v3-positions-window') as HTMLElement | null;
-      logger.info(`POSITIONS_PANEL_LAYOUT_AUDIT: viewportHeight=${window.innerHeight} openPanelHeight=${openPanel?.offsetHeight ?? 0} closedPanelHeight=${closedPanel?.offsetHeight ?? 0} openTableScrollHeight=${openTable?.scrollHeight ?? 0} openTableClientHeight=${openTable?.clientHeight ?? 0} closedTableScrollHeight=${closedTable?.scrollHeight ?? 0} closedTableClientHeight=${closedTable?.clientHeight ?? 0} openCanScrollVertical=${String((openTable?.scrollHeight ?? 0) > (openTable?.clientHeight ?? 0))} closedCanScrollVertical=${String((closedTable?.scrollHeight ?? 0) > (closedTable?.clientHeight ?? 0))}`);
-    }, 30000);
-    return () => clearInterval(id);
-  }, []);
-
   const selectSymbol = useCallback((s: string) => { setLocalSelected(s); props.onSelectSymbol(s); }, [props.onSelectSymbol]);
 
   return (
-    <div className="trade-v4-grid-v3">
+    <div className={`trade-v4-grid-v3 graphics-quality-${graphicsQuality}`}>
       <TopStatusBar
         scannerRunning={props.model.scannerRunning} engineOnline={props.model.engineOnline}
         mode={props.model.mode} capital={props.model.capital} usedCapital={props.model.usedCapital}
@@ -205,6 +279,7 @@ export function TradeV4Page(props: {
                 ref={scannerRef}
                 className={`scanner-v3 panel panel-shell panel-shell-scanner scanner-mode-${scannerMode}`}
                 data-testid="air-scanner-3d-panel"
+                data-air-scanner-renderer={use3DScannerLabPreview ? 'lab-read-only' : 'legacy'}
                 style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
               >
               <div className="scanner-toolbar">
@@ -213,6 +288,17 @@ export function TradeV4Page(props: {
                   <button className={`btn btn-sm ${scannerMode === 'compact' ? 'btn-primary' : 'btn-default'}`} onClick={() => setScannerMode('compact')}>Compact</button>
                   <button className={`btn btn-sm ${scannerMode === 'normal' ? 'btn-primary' : 'btn-default'}`} onClick={() => setScannerMode('normal')}>Normal</button>
                   <button className={`btn btn-sm ${scannerMode === 'hidden' ? 'btn-primary' : 'btn-default'}`} onClick={() => setScannerMode('hidden')}>Hidden</button>
+                  <select
+                    className="panel-filter-dropdown scanner-quality-select"
+                    value={graphicsQuality}
+                    onChange={(event) => setGraphicsQuality(normalizeGraphicsQuality(event.target.value))}
+                    title="3D graphics quality. Affects only visuals, never trading logic."
+                    aria-label="3D graphics quality"
+                  >
+                    <option value="low">Low</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="high">High</option>
+                  </select>
                 </div>
               </div>
               {scannerMode === 'hidden' && (
@@ -226,14 +312,20 @@ export function TradeV4Page(props: {
                 </div>
               )}
               <div style={{ display: scannerMode === 'hidden' ? 'none' : 'block', height: scannerMode === 'hidden' ? 0 : '100%', overflow: 'hidden' }}>
-                <AirScanner3D
-                  candidates={props.model.candidates} openPositions={props.model.openPositions}
-                  closedPositions={props.model.closedPositions}
-                  executionPlan={props.model.executionPlan}
-                  paperAutoResult={props.model.paperAutoResult}
-                  selectedSymbol={selectedSymbol} onSelectSymbol={selectSymbol}
-                  active={props.model.scannerRunning} emptyUniverseReason={props.model.emptyUniverseReason}
-                />
+                {use3DScannerLabPreview ? (
+                  <Suspense fallback={<div className="scanner-summary-bar">Loading 3D scanner preview...</div>}>
+                    <AirScannerProductionPreview model={props.model} quality={graphicsQuality} onSelectSymbol={selectSymbol} onTransferSourceUpdate={setLabTransferSource} />
+                  </Suspense>
+                ) : (
+                  <AirScanner3D
+                    candidates={props.model.candidates} openPositions={props.model.openPositions}
+                    closedPositions={props.model.closedPositions}
+                    executionPlan={props.model.executionPlan}
+                    paperAutoResult={props.model.paperAutoResult}
+                    selectedSymbol={selectedSymbol} onSelectSymbol={selectSymbol}
+                    active={props.model.scannerRunning} emptyUniverseReason={props.model.emptyUniverseReason}
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -248,6 +340,18 @@ export function TradeV4Page(props: {
                 paperAutoEnabled={props.model.paperAutoEnabled}
                 manualStrategy={props.parameters.strategySource === 'manual_override' && props.parameters.strategy !== 'smart' ? props.parameters.strategy : null}
                 marketGroupSummary={null}
+                scannerTelemetry={use3DScannerLabPreview ? {
+                  active: props.model.scannerRunning,
+                  label: props.model.scannerRunning ? 'Scanner Verification' : 'Scanner Idle',
+                  checks: [
+                    { label: 'Market structure', complete: props.model.scannerRunning },
+                    { label: 'Liquidity depth', complete: props.model.scannerRunning },
+                    { label: 'Volume momentum', complete: props.model.scannerRunning },
+                    { label: 'Spread analysis', complete: false },
+                    { label: 'Orderbook health', complete: false },
+                    { label: 'Risk assessment', complete: false },
+                  ],
+                } : null}
                 executionPlan={props.model.executionPlan ?? null}
               />
             </div>
@@ -268,6 +372,15 @@ export function TradeV4Page(props: {
             <div className="open-v4" data-testid="open-positions-workspace" style={{ flex: '1 1 0', minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
               <OpenPositionsPanel positions={props.model.openPositions} restoring={props.model.restoringOpenPositions} />
             </div>
+            {use3DScannerLabPreview && (
+              <Suspense fallback={null}>
+                <ProductionOpenPositionTransferOverlay
+                  active={activeBuyTransfer}
+                  source={labTransferSource}
+                  symbol={props.model.paperAutoResult?.symbol ?? selectedSymbol}
+                />
+              </Suspense>
+            )}
 
             {/* Bottom-Right: Closed Positions */}
             <div className="closed-v4" data-testid="closed-positions-workspace" style={{ flex: '1 1 0', minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>

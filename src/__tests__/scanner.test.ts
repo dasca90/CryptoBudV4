@@ -342,10 +342,15 @@ async function main() {
   const mlK = new MLPredictor();
   const manualBrainsK = new Map<string, TraderBrain>();
   const brainServiceK = new ScannerBrainService(manualBrainsK, adapterK, mlK);
+  brainServiceK.setAnchorSettings(false, true);
   const tmpK = brainServiceK.getOrCreateBrainForSymbol('MOVRUSDT', 'AUTO');
   assert(tmpK.source === 'scanner_temp_brain', 'Creates scanner temp brain for valid symbol');
+  assert(tmpK.brain.btcAnchorEnabled === false && tmpK.brain.ethAnchorEnabled === true, 'Applies anchor settings to scanner temp brain');
   const cachedK = brainServiceK.getOrCreateBrainForSymbol('MOVRUSDT', 'AUTO');
   assert(cachedK.source === 'cached_scanner_brain', 'Reuses cached scanner brain');
+  assert(cachedK.brain.btcAnchorEnabled === false && cachedK.brain.ethAnchorEnabled === true, 'Keeps anchor settings on cached scanner brain');
+  brainServiceK.setAnchorSettings(true, false);
+  assert(cachedK.brain.btcAnchorEnabled === true && cachedK.brain.ethAnchorEnabled === false, 'Updates cached scanner brain anchor settings');
   const manualBrain = new TraderBrain({
     coin: 'BTCUSDT', mode: 'AUTO', enabled: true, maxPositionSize: 0.02, stopLossPercent: 1.5, takeProfitPercent: 4,
     maxLeverage: 1, cooldownSeconds: 10, mlEnabled: true, minConfidence: 0.5,
@@ -353,6 +358,7 @@ async function main() {
   manualBrainsK.set('BTCUSDT', manualBrain);
   const manK = brainServiceK.getOrCreateBrainForSymbol('BTCUSDT', 'AUTO');
   assert(manK.source === 'manual_brain', 'Reuses manual brain when present');
+  assert(manK.brain.btcAnchorEnabled === true && manK.brain.ethAnchorEnabled === false, 'Applies current anchor settings to reused manual brain');
   let invalidFailed = false;
   try { brainServiceK.getOrCreateBrainForSymbol('@@@', 'AUTO'); } catch { invalidFailed = true; }
   assert(invalidFailed, 'Invalid symbol throws brain create failure');

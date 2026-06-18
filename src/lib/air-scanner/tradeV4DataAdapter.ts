@@ -6,6 +6,7 @@ import { computeAutoTp } from "../../core/scanner/AutoTpCalculator";
 import { buildStrategyAuditSnapshotFromCandidate } from "../../core/strategy-audit/strategy-audit-builder";
 import { logStrategyAudit } from "../../core/strategy-audit/strategy-audit-logger";
 import { getExecutionAdapterDisplay, getExecutionModeDisplay } from "../execution/executionDisplay";
+import { getStalePriceAgeMs } from "../../core/market-data/market-data-quality";
 
 function toDataQuality(v?: string): "GOOD" | "MEDIUM" | "BAD" | "UNKNOWN" {
   if (v === "GOOD" || v === "MEDIUM" || v === "BAD") return v;
@@ -169,25 +170,113 @@ function strategySetupFromPosition(position: Position, bs: any): {
   };
 }
 
-function resolveLivePriceState(position: Position): {
+export type PriceFreshnessStatus =
+  | "LIVE PRICE FRESH"
+  | "LIVE PRICE STALE"
+  | "CACHE PRICE STALE"
+  | "SNAPSHOT FALLBACK"
+  | "PRICE UNAVAILABLE";
+
+export interface ResolvedLivePriceState {
   livePrice: number;
   priceQuality: TradeV4OpenPositionView["priceQuality"];
-  livePriceSource: string;
-} {
-  if (position.currentPrice > 0 && position.lastPrice > 0) {
-    return { livePrice: position.currentPrice, priceQuality: "fresh", livePriceSource: "LIVE PRICE FRESH" };
+  livePriceSource: PriceFreshnessStatus;
+  priceTimestamp: number | null;
+  nowTimestamp: number;
+  priceAgeMs: number;
+  staleThresholdMs: number;
+  isFresh: boolean;
+  cacheSource: string;
+  fallbackUsed: boolean;
+  reason: string;
+}
+
+export function resolveLivePriceState(position: Position, nowTimestamp = Date.now(), staleThresholdMs = getStalePriceAgeMs()): ResolvedLivePriceState {
+  const hasCurrent = Number.isFinite(position.currentPrice) && position.currentPrice > 0;
+  const hasLast = Number.isFinite(position.lastPrice) && position.lastPrice > 0;
+  const priceTimestamp = typeof position.priceTimestamp === 'number' && Number.isFinite(position.priceTimestamp)
+    ? position.priceTimestamp
+    : null;
+  const priceAgeMs = priceTimestamp == null ? Number.POSITIVE_INFINITY : Math.max(0, nowTimestamp - priceTimestamp);
+  const isFresh = hasCurrent && priceTimestamp != null && priceAgeMs <= staleThresholdMs;
+
+  if (isFresh) {
+    return {
+      livePrice: position.currentPrice,
+      priceQuality: "fresh",
+      livePriceSource: "LIVE PRICE FRESH",
+      priceTimestamp,
+      nowTimestamp,
+      priceAgeMs,
+      staleThresholdMs,
+      isFresh: true,
+      cacheSource: "position.currentPrice",
+      fallbackUsed: false,
+      reason: "position_price_timestamp_within_threshold",
+    };
   }
-  if (position.currentPrice > 0) {
-    return { livePrice: position.currentPrice, priceQuality: "fallback", livePriceSource: "FALLBACK PRICE" };
+
+  if (hasCurrent && priceTimestamp != null) {
+    return {
+      livePrice: position.currentPrice,
+      priceQuality: "stale",
+      livePriceSource: "LIVE PRICE STALE",
+      priceTimestamp,
+      nowTimestamp,
+      priceAgeMs,
+      staleThresholdMs,
+      isFresh: false,
+      cacheSource: "position.currentPrice",
+      fallbackUsed: false,
+      reason: "position_price_timestamp_exceeds_threshold",
+    };
   }
-  if (position.lastPrice > 0) {
-    return { livePrice: position.lastPrice, priceQuality: "stale", livePriceSource: "LIVE PRICE STALE" };
+
+  if (hasCurrent) {
+    return {
+      livePrice: position.currentPrice,
+      priceQuality: "stale",
+      livePriceSource: "CACHE PRICE STALE",
+      priceTimestamp,
+      nowTimestamp,
+      priceAgeMs,
+      staleThresholdMs,
+      isFresh: false,
+      cacheSource: "position.currentPrice_legacy_no_timestamp",
+      fallbackUsed: true,
+      reason: "position_price_timestamp_missing",
+    };
   }
-  const ageMs = Date.now() - position.openedAt;
-  if (ageMs < 120000) {
-    return { livePrice: 0, priceQuality: "pending", livePriceSource: "PRICE PENDING" };
+
+  if (hasLast) {
+    return {
+      livePrice: position.lastPrice,
+      priceQuality: "fallback",
+      livePriceSource: "SNAPSHOT FALLBACK",
+      priceTimestamp,
+      nowTimestamp,
+      priceAgeMs,
+      staleThresholdMs,
+      isFresh: false,
+      cacheSource: "position.lastPrice",
+      fallbackUsed: true,
+      reason: "current_price_missing_using_last_snapshot_price",
+    };
   }
-  return { livePrice: 0, priceQuality: "unavailable", livePriceSource: "PRICE UNAVAILABLE" };
+
+  return {
+    livePrice: 0,
+    priceQuality: "unavailable",
+    livePriceSource: "PRICE UNAVAILABLE",
+    priceTimestamp,
+    nowTimestamp,
+    priceAgeMs,
+    staleThresholdMs,
+    isFresh: false,
+    cacheSource: "none",
+    fallbackUsed: true,
+    reason: "no_current_or_snapshot_price_available",
+  };
 }
 
 function splitSymbol(symbol: string): { baseAsset: string; quoteAsset: string } {
@@ -298,7 +387,7 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
   const strategyAudit = buildStrategyAuditSnapshotFromCandidate(candidate);
   logStrategyAudit(strategyAudit);
   const visualState: TradeV4CandidateView["engineState"] =
-    candidate.status === "BUY" ? (orderLockActive ? "capturing" : "approved")
+    candidate.status === "BUY" ? (orderLockActive ? "capturing" : "detected")
       : candidate.status === "BLOCK" ? "rejected"
         : candidate.status === "AVOID" ? "floating"
           : candidate.entryGateDecision?.decision === "ALLOW" ? "locked" : "detected";
@@ -363,6 +452,17 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
       ?? strategyAudit.blockReasons[0]
       ?? (strategyAudit.finalExecutable ? null : 'finalExecutable_false'),
     gateAudit: candidate.gateAudit,
+    professionalScore: (candidate as any).professionalAnalysis?.professionalScore,
+    professionalVerdict: (candidate as any).professionalAnalysis?.professionalVerdict,
+    professionalReasons: (candidate as any).professionalAnalysis?.professionalReasons,
+    professionalBlockers: (candidate as any).professionalAnalysis?.professionalBlockers,
+    professionalRiskLabel: (candidate as any).professionalAnalysis?.riskLabel,
+    anchorSettingEnabled: (candidate as any).professionalAnalysis?.anchorSettingEnabled,
+    anchorDataAvailable: (candidate as any).professionalAnalysis?.anchorDataAvailable,
+    btcFresh: (candidate as any).professionalAnalysis?.btcFresh,
+    ethFresh: (candidate as any).professionalAnalysis?.ethFresh,
+    anchorDecision: (candidate as any).professionalAnalysis?.anchorDecision,
+    anchorBlockApplied: (candidate as any).professionalAnalysis?.anchorBlockApplied,
   };
 }
 
@@ -411,11 +511,15 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
   const feesEstimated = Math.abs(grossPnlUsd) * 0.001;
   const netPnlUsd = grossPnlUsd - feesEstimated;
   const netPnlPct = usedCapital > 0 ? (netPnlUsd / usedCapital) * 100 : 0;
-  const priceAgeMs = Math.max(0, Date.now() - position.openedAt);
+  const priceAgeMs = Number.isFinite(liveState.priceAgeMs) ? liveState.priceAgeMs : Number.MAX_SAFE_INTEGER;
   const formulaUsed = 'PnL $ = (Live Price - Entry Price) × Qty; PnL % = ((Live Price - Entry Price) / Entry Price) × 100';
-  const fallbackUsed = liveState.priceQuality !== 'fresh';
-  const reasonIfPriceUnavailable = liveState.livePrice <= 0 ? liveState.livePriceSource : 'none';
-  logger.info(`OPEN_POSITION_PNL_CALC_AUDIT: symbol=${position.coin} positionId=${position.tradeId ?? `${position.coin}-${position.openedAt}`} entryPrice=${position.avgEntryPrice} livePrice=${liveState.livePrice} livePriceSource=${liveState.livePriceSource} qty=${position.quantity} usedCapital=${usedCapital.toFixed(6)} grossPnlUsd=${grossPnlUsd.toFixed(6)} grossPnlPct=${grossPnlPct.toFixed(6)} feesEstimated=${feesEstimated.toFixed(6)} netPnlUsd=${netPnlUsd.toFixed(6)} netPnlPct=${netPnlPct.toFixed(6)} formulaUsed=pnlUsd=(livePrice-entryPrice)*qty;pnlPct=((livePrice-entryPrice)/entryPrice)*100 priceAgeMs=${Math.max(0, Date.now() - position.openedAt)} fallbackUsed=${String(liveState.priceQuality !== 'fresh')} reasonIfPriceUnavailable=${liveState.livePrice <= 0 ? liveState.livePriceSource : 'none'}`);
+  const fallbackUsed = liveState.fallbackUsed;
+  const reasonIfPriceUnavailable = liveState.livePrice <= 0 ? liveState.reason : 'none';
+  logger.info(`PRICE_FRESHNESS_SOURCE_AUDIT: symbol=${position.coin} livePrice=${liveState.livePrice} livePriceSource=${liveState.livePriceSource} priceTimestamp=${liveState.priceTimestamp ?? 'none'} nowTimestamp=${liveState.nowTimestamp} priceAgeMs=${priceAgeMs} staleThresholdMs=${liveState.staleThresholdMs} isFresh=${String(liveState.isFresh)} cacheSource=${liveState.cacheSource} fallbackUsed=${String(liveState.fallbackUsed)} reason=${liveState.reason}`);
+  if (!liveState.isFresh && liveState.livePrice > 0) {
+    logger.warn(`STALE_OPEN_POSITION_PRICE_WARNING: symbol=${position.coin} livePriceSource=${liveState.livePriceSource} priceAgeMs=${priceAgeMs} staleThresholdMs=${liveState.staleThresholdMs} cacheSource=${liveState.cacheSource} reason=${liveState.reason}`);
+  }
+  logger.info(`OPEN_POSITION_PNL_CALC_AUDIT: symbol=${position.coin} positionId=${position.tradeId ?? `${position.coin}-${position.openedAt}`} entryPrice=${position.avgEntryPrice} livePrice=${liveState.livePrice} livePriceSource=${liveState.livePriceSource} qty=${position.quantity} usedCapital=${usedCapital.toFixed(6)} grossPnlUsd=${grossPnlUsd.toFixed(6)} grossPnlPct=${grossPnlPct.toFixed(6)} feesEstimated=${feesEstimated.toFixed(6)} netPnlUsd=${netPnlUsd.toFixed(6)} netPnlPct=${netPnlPct.toFixed(6)} formulaUsed=pnlUsd=(livePrice-entryPrice)*qty;pnlPct=((livePrice-entryPrice)/entryPrice)*100 priceAgeMs=${priceAgeMs} fallbackUsed=${String(fallbackUsed)} reasonIfPriceUnavailable=${reasonIfPriceUnavailable}`);
 
   const marketRegimeAtEntry = bs?.marketRegime ?? null;
   const marketTrendAtEntry = bs?.groupTrend ?? bs?.groupRegime ?? null;
@@ -595,7 +699,12 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
     entryPriceSource: bs?.entryPriceSource ?? null,
     entryPriceAgeMs: Number.isFinite(bs?.entryPriceAgeMs) ? bs?.entryPriceAgeMs : null,
     livePriceSource: liveState.livePriceSource,
-    livePriceAgeMs: null,
+    livePriceAgeMs: priceAgeMs,
+    priceFreshnessStatus: liveState.livePriceSource,
+    isPriceFresh: liveState.isFresh,
+    priceTimestamp: liveState.priceTimestamp,
+    priceStaleThresholdMs: liveState.staleThresholdMs,
+    priceFreshnessReason: liveState.reason,
     spreadPct: Number.isFinite(bs?.spreadPct) ? bs?.spreadPct : null,
     quantity: position.quantity,
     usedCapitalUsd: position.quantity * position.avgEntryPrice,
@@ -648,6 +757,11 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
       netPnlPct,
       formulaUsed,
       priceAgeMs,
+      priceTimestamp: liveState.priceTimestamp,
+      staleThresholdMs: liveState.staleThresholdMs,
+      isFresh: liveState.isFresh,
+      cacheSource: liveState.cacheSource,
+      priceFreshnessStatus: liveState.livePriceSource,
       priceFreshness: liveState.priceQuality,
       fallbackUsed,
       reasonIfPriceUnavailable,
@@ -669,6 +783,7 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
         snapshotAudit.snapshotStatus !== 'VALID_SNAPSHOT' ? snapshotAudit.snapshotStatus : '',
         liveState.priceQuality === 'unavailable' ? 'PNL_UNAVAILABLE_LIVE_PRICE_MISSING' : '',
         liveState.priceQuality === 'fallback' ? 'FALLBACK_PRICE_USED' : '',
+        liveState.priceQuality === 'stale' ? 'PNL_BASED_ON_STALE_PRICE' : '',
       ].filter(Boolean),
     },
   };
@@ -943,6 +1058,7 @@ export function buildTradeV4PageModel(input: {
   }
 
   const openPositions = input.positions.map(mapPositionToOpenPositionView);
+  const recentLogs = logger.getRecentLogs(2000);
   const storeOpenPositionsCount = input.storeOpenPositionsCount ?? openPositions.length;
   const positionManagerOpenCount = input.positionManagerOpenCount ?? openPositions.length;
   const headerPositionsCount = input.headerPositionsCount ?? openPositions.length;
@@ -1017,6 +1133,7 @@ export function buildTradeV4PageModel(input: {
   const withLivePrice = openPositions.filter((p) => p.livePrice > 0);
   const pendingPrice = openPositions.filter((p) => p.priceQuality === 'pending');
   const unavailablePrice = openPositions.filter((p) => p.priceQuality === 'unavailable');
+  const staleOpenPositionPrice = openPositions.filter((p) => p.priceQuality === 'stale' || p.priceQuality === 'fallback' || p.priceQuality === 'unavailable');
   const displayAuditSig = `${openPositions.length}|${missingSnapshot.length}|${withTpSl}|${missingTpSl.length}|${withDipReboundCount}|${withLivePrice.length}|${pendingPrice.length}|${unavailablePrice.length}|${missingSnapshot.map((p) => p.symbol).join('|')}|${missingTpSl.map((p) => p.symbol).join('|')}|${unavailablePrice.map((p) => p.symbol).join('|')}`;
   if (displayAuditSig !== _lastOpenDisplayAuditSig || now - _lastOpenDisplayAuditAt >= 15000) {
     _lastOpenDisplayAuditSig = displayAuditSig;
@@ -1029,6 +1146,19 @@ export function buildTradeV4PageModel(input: {
     return acc;
   }, {});
   logger.info(`POSITION_SNAPSHOT_STATUS_AUDIT: openCount=${openPositions.length} VALID_SNAPSHOT=${statusCounts.VALID_SNAPSHOT ?? 0} LEGACY_MISSING_SNAPSHOT=${statusCounts.LEGACY_MISSING_SNAPSHOT ?? 0} BUG_MISSING_SNAPSHOT_NEW_POSITION=${statusCounts.BUG_MISSING_SNAPSHOT_NEW_POSITION ?? 0} PARTIAL_SNAPSHOT=${statusCounts.PARTIAL_SNAPSHOT ?? 0}`);
+  const runtimeHealth: NonNullable<TradeV4PageModel["runtimeHealth"]> = {
+    dbOk: !recentLogs.some((log) => /database health check failed|PERSISTENCE_LOAD_TRADES_FAILED|POSITION_PERSISTENCE_WRITE_AUDIT.*writeSuccess=false/i.test(log.message)),
+    scannerRunning: input.scannerRunning,
+    binanceRequestFailCount: recentLogs.filter((log) => /BINANCE|PUBLIC_DATA|MarketDataFeed/i.test(log.message) && /fail|error|offline/i.test(log.message)).length,
+    stalePriceCount: openPositions.filter((p) => p.priceQuality === 'stale' || p.priceQuality === 'fallback').length,
+    staleOpenPositionPriceCount: staleOpenPositionPrice.length,
+    missingSnapshotCount: missingSnapshot.length,
+    persistenceErrorCount: recentLogs.filter((log) => /PERSISTENCE|POSITION_PERSISTENCE|storage|localStorage|database/i.test(log.message) && /fail|error|writeSuccess=false/i.test(log.message)).length,
+    telegramFailureCount: recentLogs.filter((log) => /TELEGRAM/i.test(log.message) && /FAIL|ERROR|NOT_CONFIGURED/i.test(log.message)).length,
+    fallbackPriceCount: openPositions.filter((p) => p.priceQuality === 'fallback').length,
+    unavailablePriceCount: unavailablePrice.length,
+  };
+  logger.info(`RUNTIME_HEALTH_SUMMARY_AUDIT: dbOk=${String(runtimeHealth.dbOk)} scannerRunning=${String(runtimeHealth.scannerRunning)} binanceRequestFailCount=${runtimeHealth.binanceRequestFailCount} stalePriceCount=${runtimeHealth.stalePriceCount} staleOpenPositionPriceCount=${runtimeHealth.staleOpenPositionPriceCount} missingSnapshotCount=${runtimeHealth.missingSnapshotCount} persistenceErrorCount=${runtimeHealth.persistenceErrorCount} telegramFailureCount=${runtimeHealth.telegramFailureCount}`);
 
   const snap = input.scannerSnapshot;
   if (snap && snap.scanId !== _lastLoggedScanId) {
@@ -1100,6 +1230,7 @@ export function buildTradeV4PageModel(input: {
     usedCapital: input.usedCapital,
     pnlToday: input.pnlToday,
     dataQuality: input.dataQuality,
+    runtimeHealth,
     publicDataReady: input.publicDataReady ?? false,
     publicDataRefreshing: input.publicDataRefreshing ?? false,
     lastScanAt,

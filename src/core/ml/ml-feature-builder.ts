@@ -4,6 +4,12 @@ export function buildMLFeatures(trade: TradeRecord): MLFeatureVector {
   const buy = trade.buySnapshot;
   const close = trade.closeSnapshot;
   const label = trade.mlLabel;
+  const realMarketPriceAtClose = close?.realMarketPriceAtClose && close.realMarketPriceAtClose > 0
+    ? close.realMarketPriceAtClose
+    : close?.exitPrice ?? trade.exitPrice ?? 0;
+  const isRealMarketPriceAtClose = close?.isRealMarketPrice
+    ?? (close?.executionQuality === 'CLEAN_REAL_MARKET_PRICE'
+      || (trade.mlQuality?.dataQuality === 'GOOD' && realMarketPriceAtClose > 0));
 
   const predictionFeatures: Record<string, number | string | boolean> = {
     symbol: trade.coin,
@@ -28,6 +34,7 @@ export function buildMLFeatures(trade: TradeRecord): MLFeatureVector {
     m15Change: 0,
     h1Change: 0,
     change24h: 0,
+    realMarketPriceAtBuy: buy?.realMarketPriceAtBuy ?? trade.entryPrice,
     mlBadEntryRiskAtEntry: buy?.traderBrainDecision?.blockReasons?.some(r => r.includes('risk') || r.includes('bad_entry')) ? 1 : 0,
     mlWinProbabilityAtEntry: buy?.confidence ?? 0,
     entryGateDecision: buy?.entryGateDecision?.decision ?? 'UNKNOWN',
@@ -37,13 +44,22 @@ export function buildMLFeatures(trade: TradeRecord): MLFeatureVector {
   const outcomeLabels: Record<string, number | string | boolean> = {
     durationMs: close?.durationMs ?? 0,
     pnlPercent: trade.pnlPercent ?? 0,
+    exitReason: close?.exitReason ?? 'UNKNOWN',
+    exitPrice: close?.exitPrice ?? trade.exitPrice ?? 0,
+    realMarketPriceAtClose,
+    isRealMarketPriceAtClose,
+    executionQuality: close?.executionQuality ?? 'UNKNOWN',
+    closePriceSource: close?.closePriceSource ?? 'unknown',
+    closePriceStatus: close?.closePriceStatus ?? 'unknown',
     hitTp1: label?.hitTp1 ?? false,
     hitTp2: label?.hitTp2 ?? false,
     hitStopLoss: label?.hitStopLoss ?? false,
     mfePercent: close?.mfePercent ?? 0,
     maePercent: close?.maePercent ?? 0,
     dataQuality: trade.mlQuality?.dataQuality ?? 'BAD',
+    mlUse: trade.mlQuality?.mlUse ?? 'excluded',
     trainingEligible: trade.trainingEligible ?? false,
+    trainingWeight: trade.mlQuality?.trainingWeight ?? 0,
     targetWinLoss: label?.trainingTarget ?? 'UNKNOWN',
     targetGoodEntry: label?.goodEntry === true ? 1 : 0,
   };

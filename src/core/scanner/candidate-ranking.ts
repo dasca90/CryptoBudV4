@@ -13,7 +13,16 @@ export function rankCandidates(candidates: ScannerCandidate[]): RankedCandidate[
     rank: 0,
   }));
 
-  scored.sort((a, b) => b.rankScore - a.rankScore);
+  // In Smart mode, professionalScore is the primary sort (higher is better)
+  // Fallback to rankScore for non-Smart modes or when pro analysis is absent
+  scored.sort((a, b) => {
+    const proA = (a as any).professionalAnalysis?.professionalScore;
+    const proB = (b as any).professionalAnalysis?.professionalScore;
+    if (proA != null && proB != null) { return proB - proA; }
+    if (proA != null) return -1;
+    if (proB != null) return 1;
+    return b.rankScore - a.rankScore;
+  });
 
   return scored.map((c, i) => ({ ...c, rank: i + 1 }));
 }

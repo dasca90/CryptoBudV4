@@ -1,8 +1,13 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { TradeV4ClosedPositionView } from "./types";
+import { CoinSymbolCell } from "./CoinLogo";
 import { formatLocalTime } from "../../utils/timeFormatter";
+import { useVirtualWindow } from "../../lib/ui/virtualization";
+import { logger } from "../../utils/logger";
 
-const PAGE_SIZE = 15;
+const PAGE_SIZE = 10;
+const POSITION_VIRTUALIZATION_THRESHOLD = 25;
+const CLOSED_POSITION_ROW_HEIGHT = 36;
 const closeReasonTone = (v?: string) => {
   const s = String(v ?? '').toUpperCase();
   if (s.includes('TP')) return 'pill-green';
@@ -77,10 +82,26 @@ export const ClosedPositionsPanel = memo(function ClosedPositionsPanel(props: { 
     });
   const totalPages = Math.max(1, Math.ceil(filteredPositions.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
+  const virtualWindow = useVirtualWindow({
+    total: filteredPositions.length,
+    rowHeight: CLOSED_POSITION_ROW_HEIGHT,
+    threshold: POSITION_VIRTUALIZATION_THRESHOLD,
+    overscan: 6,
+  });
   const rows = useMemo(() => {
+    if (virtualWindow.isVirtualized) {
+      return filteredPositions.slice(virtualWindow.startIndex, virtualWindow.endIndex);
+    }
     const start = (safePage - 1) * PAGE_SIZE;
     return filteredPositions.slice(start, start + PAGE_SIZE);
-  }, [filteredPositions, safePage]);
+  }, [filteredPositions, safePage, virtualWindow.isVirtualized, virtualWindow.startIndex, virtualWindow.endIndex]);
+  const virtualAuditRef = useRef(0);
+  useEffect(() => {
+    const now = Date.now();
+    if (now - virtualAuditRef.current < 5000) return;
+    virtualAuditRef.current = now;
+    logger.info(`VIRTUALIZED_TABLE_RENDER_AUDIT: table=closed_positions enabled=${String(virtualWindow.isVirtualized)} visibleRows=${rows.length} totalRows=${filteredPositions.length} threshold=${POSITION_VIRTUALIZATION_THRESHOLD} fullDatasetPreserved=true orderPreserved=true`);
+  }, [virtualWindow.isVirtualized, rows.length, filteredPositions.length]);
   const realizedTotal = filteredPositions.reduce((sum, r) => sum + (r.pnlUsd ?? 0), 0);
   const wins = filteredPositions.filter((r) => (r.pnlUsd ?? 0) > 0).length;
   const winRate = filteredPositions.length > 0 ? (wins / filteredPositions.length) * 100 : 0;
@@ -121,7 +142,7 @@ export const ClosedPositionsPanel = memo(function ClosedPositionsPanel(props: { 
         <div className="panel-body-v4" style={{ fontSize: 10, color: '#8b949e', textAlign: 'center', padding: '12px 0' }}>{props.restoring ? 'Restoring closed trades...' : 'No closed trades yet.'}</div>
       ) : (
         <>
-          <div className="panel-body-v4 panel-scroll-v4 table-scroll-both">
+          <div className="panel-body-v4 panel-scroll-v4 table-scroll-both" ref={virtualWindow.scrollRef} onScroll={virtualWindow.onScroll} data-virtualized={virtualWindow.isVirtualized ? 'true' : 'false'}>
             <div className="v3-scrollbar-strip" aria-hidden="true"><span /></div>
             <table className="data-table data-table-wide-closed" style={{ fontSize: 10 }}>
               <thead>
@@ -131,10 +152,13 @@ export const ClosedPositionsPanel = memo(function ClosedPositionsPanel(props: { 
                 </tr>
               </thead>
               <tbody>
+                {virtualWindow.isVirtualized && virtualWindow.topSpacerPx > 0 && (
+                  <tr className="virtual-table-spacer"><td colSpan={V3_CLOSED_POSITION_COLUMNS.length + (detailed ? V4_CLOSED_DETAILED_COLUMNS.length : 0)} style={{ height: virtualWindow.topSpacerPx, padding: 0 }} /></tr>
+                )}
                 {rows.map((p) => (
                   <tr key={p.id} className={`row-hover-glow ${selectedRowId === p.id ? 'row-selected-v4' : ''}`} onClick={() => setSelectedRowId(p.id)}>
                     <td style={{ fontWeight: 600 }}>
-                      {p.symbol}
+                      <CoinSymbolCell symbol={p.symbol} />
                       {!p.hasSnapshot && <div className="status-warn" style={{ fontSize: 9 }}>LEGACY / MISSING SNAPSHOT</div>}
                     </td>
                     <td><span className={`v3-pill ${String(p.ownerType ?? '').toLowerCase().includes('manual') ? 'pill-gray' : 'pill-cyan'}`}>{p.sourceLabel ?? p.ownerType ?? 'n/a'}</span></td>
@@ -169,14 +193,17 @@ export const ClosedPositionsPanel = memo(function ClosedPositionsPanel(props: { 
                     {detailed && <td>{p.tp1Pct ?? 'n/a'} / {p.tp2Pct ?? 'n/a'} / {p.slPct ?? 'n/a'}</td>}
                   </tr>
                 ))}
+                {virtualWindow.isVirtualized && virtualWindow.bottomSpacerPx > 0 && (
+                  <tr className="virtual-table-spacer"><td colSpan={V3_CLOSED_POSITION_COLUMNS.length + (detailed ? V4_CLOSED_DETAILED_COLUMNS.length : 0)} style={{ height: virtualWindow.bottomSpacerPx, padding: 0 }} /></tr>
+                )}
               </tbody>
             </table>
           </div>
-          <div className="pager-row">
+          {!virtualWindow.isVirtualized ? <div className="pager-row">
             <button className="btn btn-sm btn-outline" disabled={safePage <= 1} onClick={() => setPage(v => Math.max(1, v - 1))}>Prev</button>
             <span>Page {safePage} / {totalPages}</span>
             <button className="btn btn-sm btn-outline" disabled={safePage >= totalPages} onClick={() => setPage(v => Math.min(totalPages, v + 1))}>Next</button>
-          </div>
+          </div> : <div className="pager-row"><span>Virtual rows {virtualWindow.startIndex + 1}-{virtualWindow.endIndex} / {filteredPositions.length}</span></div>}
         </>
       )}
     </section>

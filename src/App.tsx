@@ -228,6 +228,7 @@ export default function App() {
               if (resolvedPrice > 0) {
                 p.currentPrice = resolvedPrice;
                 p.lastPrice = resolvedPrice;
+                p.priceTimestamp = warm.timestamp;
                 logger.info(`LIVE_PRICE_RESOLVED_FOR_RESTORED_POSITION: symbol=${p.coin} source=live_ticker_cache price=${resolvedPrice} ageMs=${Math.max(0, Date.now() - warm.timestamp)} scannerRunning=${store.state.scannerRunning} cacheAvailable=true`);
                 logger.info(`RESTORED_POSITION_PRICE_WARMUP_SUCCESS: symbol=${p.coin} source=live_ticker_cache price=${resolvedPrice} ageMs=${Math.max(0, Date.now() - warm.timestamp)} reason=warmup_price_available scannerRunning=${store.state.scannerRunning} cacheAvailable=true`);
               } else {

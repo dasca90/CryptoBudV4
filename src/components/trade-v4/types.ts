@@ -89,6 +89,17 @@ export type TradeV4CandidateView = {
     buyAllowed: boolean;
     setupMissing: string[];
   };
+  professionalScore?: number;
+  professionalVerdict?: string;
+  professionalReasons?: string[];
+  professionalBlockers?: string[];
+  professionalRiskLabel?: string;
+  anchorSettingEnabled?: boolean;
+  anchorDataAvailable?: boolean;
+  btcFresh?: boolean;
+  ethFresh?: boolean;
+  anchorDecision?: 'ALIGNED' | 'ADVISORY_WARNING' | 'BLOCKED' | 'UNAVAILABLE';
+  anchorBlockApplied?: boolean;
 };
 
 export type TradeV4OpenPositionView = {
@@ -134,6 +145,11 @@ export type TradeV4OpenPositionView = {
   entryPriceAgeMs?: number | null;
   livePriceSource?: string | null;
   livePriceAgeMs?: number | null;
+  priceFreshnessStatus?: "LIVE PRICE FRESH" | "LIVE PRICE STALE" | "CACHE PRICE STALE" | "SNAPSHOT FALLBACK" | "PRICE UNAVAILABLE";
+  isPriceFresh?: boolean;
+  priceTimestamp?: number | null;
+  priceStaleThresholdMs?: number;
+  priceFreshnessReason?: string;
   spreadPct?: number | null;
   quantity?: number;
   usedCapitalUsd?: number;
@@ -193,6 +209,11 @@ export type TradeV4OpenPositionView = {
     netPnlPct: number;
     formulaUsed: string;
     priceAgeMs: number;
+    priceTimestamp?: number | null;
+    staleThresholdMs?: number;
+    isFresh?: boolean;
+    cacheSource?: string;
+    priceFreshnessStatus?: "LIVE PRICE FRESH" | "LIVE PRICE STALE" | "CACHE PRICE STALE" | "SNAPSHOT FALLBACK" | "PRICE UNAVAILABLE";
     priceFreshness: "fresh" | "stale" | "fallback" | "pending" | "unavailable";
     fallbackUsed: boolean;
     reasonIfPriceUnavailable: string;
@@ -432,6 +453,18 @@ export interface TradeV4PageModel {
   usedCapital: number;
   pnlToday: number;
   dataQuality: "GOOD" | "MEDIUM" | "BAD" | "UNKNOWN";
+  runtimeHealth?: {
+    dbOk: boolean;
+    scannerRunning: boolean;
+    binanceRequestFailCount: number;
+    stalePriceCount: number;
+    staleOpenPositionPriceCount: number;
+    missingSnapshotCount: number;
+    persistenceErrorCount: number;
+    telegramFailureCount: number;
+    fallbackPriceCount: number;
+    unavailablePriceCount: number;
+  };
   publicDataReady: boolean;
   publicDataRefreshing: boolean;
   referencePeriod?: "1h" | "4h" | "1d" | "1w";

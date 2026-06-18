@@ -47,7 +47,7 @@ export type ScannerCoinLifecycleReduceResult = {
 };
 
 const DEFAULT_HOLD_MS = 30_000;
-const DEFAULT_PULL_MS = 2_000;
+const DEFAULT_PULL_MS = 850;
 
 function setEntry(
   next: Map<string, ScannerCoinLifecycleEntry>,
@@ -144,7 +144,7 @@ export function reduceScannerCoinLifecycle(
           enteredAtMs: input.nowMs,
           holdUntilMs: input.nowMs + holdMs,
           linkedPositionId: openPosition.id,
-          lastReason: "real_open_position_detected",
+          lastReason: "real_open_position_detected_magenta_hold",
         });
       }
       continue;

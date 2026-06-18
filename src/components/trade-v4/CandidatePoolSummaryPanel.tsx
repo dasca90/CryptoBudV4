@@ -10,6 +10,11 @@ export function CandidatePoolSummaryPanel(props: {
   paperAutoEnabled?: boolean;
   manualStrategy?: string | null;
   marketGroupSummary?: React.ReactNode;
+  scannerTelemetry?: {
+    active: boolean;
+    label: string;
+    checks: Array<{ label: string; complete: boolean }>;
+  } | null;
   executionPlan?: {
     selectedCandidates?: Array<{ symbol: string }>;
     skippedCandidates?: Array<{ symbol: string; reason: string }>;
@@ -157,7 +162,35 @@ export function CandidatePoolSummaryPanel(props: {
 
         <div style={{ width: 1, background: 'rgba(255,255,255,0.06)', flexShrink: 0 }} />
 
-        <div style={{ flex: '0 0 auto', minWidth: 200, overflow: 'hidden auto' }}>
+        <div style={{ flex: '0 0 auto', minWidth: 200, overflow: 'hidden auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {props.scannerTelemetry && (
+            <div
+              data-testid="candidate-pool-scanner-telemetry"
+              style={{
+                border: '1px solid rgba(0,234,255,0.18)',
+                background: 'linear-gradient(180deg, rgba(0,234,255,0.08), rgba(0,0,0,0.12))',
+                borderRadius: 4,
+                padding: '6px 8px',
+                color: '#b8d7ff',
+                boxShadow: '0 0 18px rgba(0,234,255,0.06) inset',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 5 }}>
+                <strong style={{ color: '#d8e6ff', fontSize: 10 }}>{props.scannerTelemetry.label}</strong>
+                <span style={{ color: props.scannerTelemetry.active ? '#00eaff' : '#8b949e', fontSize: 8, fontWeight: 700 }}>
+                  {props.scannerTelemetry.active ? 'ACTIVE' : 'IDLE'}
+                </span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '3px 8px', fontSize: 8, lineHeight: '12px' }}>
+                {props.scannerTelemetry.checks.map((check) => (
+                  <span key={check.label} style={{ display: 'contents' }}>
+                    <span style={{ color: '#8b949e', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{check.label}</span>
+                    <b style={{ color: check.complete ? '#3fb950' : '#00eaff', fontSize: 9 }}>{check.complete ? 'OK' : 'SCAN'}</b>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           {props.marketGroupSummary}
         </div>
       </div>

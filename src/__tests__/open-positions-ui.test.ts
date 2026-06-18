@@ -244,7 +244,7 @@ function main() {
 
   const panelPath = path.resolve(process.cwd(), 'src/components/trade-v4/OpenPositionsPanel.tsx');
   const panelSource = readFileSync(panelPath, 'utf8');
-  ok(JSON.stringify(V3_OPEN_POSITION_COLUMNS) === JSON.stringify(['Symbol','State','Strategy','Qty','Entry Value','Entry','Ref','Last','Dip','Rebound','Trend','PnL%','Unrealized','TP1 (%)','TP2 (%)','Stop (%)','Stop Trigger','Decision','Owner','Opened At','Hold']), '15 V3 open default column order exactly');
+  ok(JSON.stringify(V3_OPEN_POSITION_COLUMNS) === JSON.stringify(['Symbol','State','Strategy','Trend','Qty','Entry Value','Dip','Rebound','PnL%','Unrealized','Risk','TP1 (%)','TP2 (%)','Stop (%)','Entry','Ref','Last','Stop Trigger','Decision','Owner','Opened At','Hold']), '15 V3 open default column order exactly');
   ok(panelSource.includes('V4_OPEN_DETAILED_COLUMNS') && panelSource.includes('"Setup Result"') && panelSource.includes('"Why"') && panelSource.includes('"Rebound/Req"'), '15a setup/debug columns exist only in detailed column group');
   const defaultColumnBlock = panelSource.slice(panelSource.indexOf('export const V3_OPEN_POSITION_COLUMNS'), panelSource.indexOf('const V4_OPEN_DETAILED_COLUMNS'));
   ok(!defaultColumnBlock.includes('Setup Result') && !defaultColumnBlock.includes('Why') && !defaultColumnBlock.includes('Rebound/Req') && !defaultColumnBlock.includes('Mom'), '15b default V3 open columns do not include debug/setup junk');

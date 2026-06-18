@@ -3,7 +3,7 @@ import { AirScannerCanvas } from './AirScannerCanvas';
 import { ScannerHUD } from './components/ScannerHUD';
 import { StateControlPanel } from './components/StateControlPanel';
 import { confirmedUniPosition, mockOpenPositions } from './state/mockScannerFeed';
-import { DEFAULT_TOGGLES, type AirScannerQuality, type AnimationDebugState, type CoinVisualState, type MockScannerCoin, type ScannerToggles, type ScreenPoint } from './state/airScannerVisualState';
+import { DEFAULT_GRAPHICS_QUALITY, DEFAULT_TOGGLES, GRAPHICS_QUALITY_STORAGE_KEY, normalizeGraphicsQuality, type AirScannerQuality, type AnimationDebugState, type CoinVisualState, type MockScannerCoin, type ScannerToggles, type ScreenPoint } from './state/airScannerVisualState';
 import './air-scanner-lab.css';
 
 const emptyDebug: AnimationDebugState = {
@@ -18,7 +18,10 @@ const demoSequence: CoinVisualState[] = ['scanning', 'wait', 'buy_pull_to_core',
 
 export function AirScannerLabPage() {
   const [visualState, setVisualState] = useState<CoinVisualState>('scanning');
-  const [quality, setQuality] = useState<AirScannerQuality>('high');
+  const [quality, setQuality] = useState<AirScannerQuality>(() => {
+    if (typeof window === 'undefined') return DEFAULT_GRAPHICS_QUALITY;
+    return normalizeGraphicsQuality(window.localStorage.getItem(GRAPHICS_QUALITY_STORAGE_KEY));
+  });
   const [toggles, setToggles] = useState<ScannerToggles>(DEFAULT_TOGGLES);
   const [debug, setDebug] = useState<AnimationDebugState>(emptyDebug);
   const [lifecycleId, setLifecycleId] = useState(1);
@@ -43,6 +46,10 @@ export function AirScannerLabPage() {
     }, visualState === 'buy_pull_to_core' ? 21_000 : 5_500);
     return () => window.clearInterval(id);
   }, [toggles.autoDemoLoop, visualState]);
+
+  useEffect(() => {
+    window.localStorage.setItem(GRAPHICS_QUALITY_STORAGE_KEY, quality);
+  }, [quality]);
 
   const handleStateChange = (state: CoinVisualState) => {
     setVisualState(state);

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { getRecentVisualExecutionEvents, subscribeVisualExecutionEvents } from "../../lib/air-scanner/executionVisualEventBus";
 import { formatSystemLocalTime } from "../../utils/timeFormatter";
 import { logger } from "../../utils/logger";
@@ -25,7 +25,7 @@ function eventToRow(event: any): MiniLogRow | null {
   return null;
 }
 
-export function RecentExecutionsCard() {
+export const RecentExecutionsCard = memo(function RecentExecutionsCard() {
   const [events, setEvents] = useState(getRecentVisualExecutionEvents());
 
   useEffect(() => {
@@ -66,4 +66,4 @@ export function RecentExecutionsCard() {
       )}
     </div>
   );
-}
+});

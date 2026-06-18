@@ -180,6 +180,87 @@
   filter: url("#air-lab-transfer-glow");
 }
 
+.air-lab-production-embed {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 18%, rgba(0, 141, 255, 0.18), transparent 35%),
+    #020711;
+}
+
+.air-lab-production-embed .air-lab-title {
+  top: 12px;
+  left: 14px;
+  z-index: 5;
+}
+
+.air-lab-production-embed .air-lab-selected-card {
+  left: 14px;
+  bottom: 14px;
+  width: 170px;
+}
+
+.air-lab-production-transfer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  width: 100vw;
+  height: 100vh;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.air-lab-production-transfer-glow,
+.air-lab-production-transfer-core {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: url("#air-lab-production-transfer-glow");
+}
+
+.air-lab-production-transfer-glow {
+  stroke: rgba(57, 255, 221, 0.16);
+  stroke-width: 15;
+  stroke-dasharray: 1400;
+  stroke-dashoffset: 1400;
+  animation: airLabTransferDraw 1.6s cubic-bezier(0.2, 0.8, 0.2, 1) forwards, airLabTransferFade 30s ease forwards;
+}
+
+.air-lab-production-transfer-core {
+  stroke: url("#air-lab-production-transfer-gradient");
+  stroke-width: 3;
+  stroke-dasharray: 1400;
+  stroke-dashoffset: 1400;
+  animation: airLabTransferDraw 1.15s cubic-bezier(0.2, 0.8, 0.2, 1) forwards, airLabTransferFade 30s ease forwards;
+}
+
+.air-lab-production-transfer-particle {
+  fill: rgba(214, 255, 248, var(--orb-opacity));
+  stroke: rgba(69, 255, 213, 0.56);
+  stroke-width: 0.35;
+  filter: url("#air-lab-production-transfer-glow");
+  opacity: 0;
+}
+
+.air-lab-production-transfer-target-lock,
+.air-lab-production-transfer-target-fallback {
+  fill: rgba(35, 255, 186, 0.24);
+  stroke: rgba(53, 255, 214, 0.92);
+  stroke-width: 1.4;
+  filter: url("#air-lab-production-transfer-glow");
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: airLabTransferPulse 0.92s ease-in-out infinite, airLabTransferFade 30s ease forwards;
+}
+
+.air-lab-production-transfer-target-fallback {
+  fill: rgba(255, 184, 62, 0.24);
+  stroke: rgba(255, 210, 96, 0.88);
+}
+
 .air-lab-transfer-path-glow {
   stroke: rgba(44, 255, 216, 0.18);
   stroke-width: 12;
@@ -586,6 +667,18 @@
   }
   100% {
     opacity: 0;
+  }
+}
+
+@keyframes airLabTransferPulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.22);
   }
 }
 

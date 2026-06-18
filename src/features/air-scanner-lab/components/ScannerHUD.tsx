@@ -11,7 +11,11 @@ interface ScannerHUDProps {
   openPositionConfirmed: boolean;
   transferSource: ScreenPoint | null;
   transferLifecycleId: number;
+  transferSymbol?: string;
   selectedCoin: MockScannerCoin | null;
+  showOpenPositions?: boolean;
+  showDebug?: boolean;
+  showScanCard?: boolean;
 }
 
 interface TransferBeamState {
@@ -47,10 +51,12 @@ function OpenPositionTransferOverlay({
   lifecycleId,
   stageRef,
   rowRefs,
+  transferSymbol,
 }: {
   source: ScreenPoint | null;
   openPositionConfirmed: boolean;
   lifecycleId: number;
+  transferSymbol: string;
   stageRef: RefObject<HTMLDivElement>;
   rowRefs: MutableRefObject<Record<string, HTMLDivElement | null>>;
 }) {
@@ -66,10 +72,10 @@ function OpenPositionTransferOverlay({
     if (completedLifecyclesRef.current.has(lifecycleId)) return;
 
     const stage = stageRef.current;
-    const row = rowRefs.current.UNIUSDT;
+    const row = rowRefs.current[transferSymbol];
     const decision = shouldStartOpenPositionTransfer({
-      symbol: 'UNIUSDT',
-      expectedSymbol: 'UNIUSDT',
+      symbol: transferSymbol,
+      expectedSymbol: transferSymbol,
       openPositionConfirmed,
       rowFound: Boolean(row),
       targetPanelMounted: Boolean(stage),
@@ -105,7 +111,7 @@ function OpenPositionTransferOverlay({
 
     setBeam(nextBeam);
     console.info('OPEN_POSITION_TRANSFER_AUDIT', createOpenPositionTransferAudit({
-      symbol: 'UNIUSDT',
+      symbol: transferSymbol,
       rowFound: true,
       rowHighlighted: true,
       beamStartedAt: startedAt,
@@ -113,7 +119,7 @@ function OpenPositionTransferOverlay({
 
     const completeId = window.setTimeout(() => {
       console.info('OPEN_POSITION_TRANSFER_AUDIT', createOpenPositionTransferAudit({
-        symbol: 'UNIUSDT',
+        symbol: transferSymbol,
         rowFound: true,
         rowHighlighted: true,
         beamStartedAt: startedAt,
@@ -123,7 +129,7 @@ function OpenPositionTransferOverlay({
     }, TRANSFER_VISUAL_DURATION_MS);
 
     return () => window.clearTimeout(completeId);
-  }, [source, openPositionConfirmed, lifecycleId, rowRefs, stageRef]);
+  }, [source, openPositionConfirmed, lifecycleId, rowRefs, stageRef, transferSymbol]);
 
   if (!beam) return null;
 
@@ -177,22 +183,25 @@ function OpenPositionTransferOverlay({
   );
 }
 
-export function ScannerHUD({ visualState, debug, openPositions, openPositionConfirmed, transferSource, transferLifecycleId, selectedCoin }: ScannerHUDProps) {
+export function ScannerHUD({ visualState, debug, openPositions, openPositionConfirmed, transferSource, transferLifecycleId, transferSymbol = 'UNIUSDT', selectedCoin, showOpenPositions = true, showDebug = true, showScanCard = true }: ScannerHUDProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const showScanPanel = visualState === 'scanning';
+  const showScanPanel = showScanCard && visualState === 'scanning';
   const showWaitPanel = visualState === 'wait';
   const showBlockedPanel = visualState === 'blocked_push_out';
 
   return (
     <div ref={stageRef} className="air-lab-hud" aria-label="Scanner visual telemetry">
-      <OpenPositionTransferOverlay
-        source={transferSource}
-        openPositionConfirmed={openPositionConfirmed}
-        lifecycleId={transferLifecycleId}
-        stageRef={stageRef}
-        rowRefs={rowRefs}
-      />
+      {showOpenPositions && (
+        <OpenPositionTransferOverlay
+          source={transferSource}
+          openPositionConfirmed={openPositionConfirmed}
+          lifecycleId={transferLifecycleId}
+          transferSymbol={transferSymbol}
+          stageRef={stageRef}
+          rowRefs={rowRefs}
+        />
+      )}
       <div className="air-lab-title">
         <span>3D Air Scanner Lab</span>
         <strong>{getVisualStateLabel(visualState)}</strong>
@@ -246,7 +255,7 @@ export function ScannerHUD({ visualState, debug, openPositions, openPositionConf
         </section>
       )}
 
-      <section className="air-lab-positions">
+      {showOpenPositions && <section className="air-lab-positions">
         <header>
           <b>Open Positions</b>
           <span>{openPositions.length}/50</span>
@@ -282,16 +291,16 @@ export function ScannerHUD({ visualState, debug, openPositions, openPositionConf
             {row.highlighted && <i className="air-lab-ecg-line" aria-hidden="true" />}
           </div>
         ))}
-      </section>
+      </section>}
 
-      <section className="air-lab-debug">
+      {showDebug && <section className="air-lab-debug">
         <header>Visual Debug</header>
         <span>FPS <b>{debug.fpsEstimate}</b></span>
         <span>Particles <b>{debug.activeParticles}</b></span>
         <span>Lightning <b>{debug.activeLightningEffects}</b></span>
         <span>Animations <b>{debug.activeAnimations}</b></span>
         <span>Coins <b>{debug.renderedCoins}</b></span>
-      </section>
+      </section>}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-﻿import { memo, useEffect, useRef, useState } from "react";
+﻿import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { TradeV4CandidateView, TradeV4PageModel } from "./types";
 import { getTrendTone } from "../../lib/ui/trendColorHelper";
 import { logger } from "../../utils/logger";
@@ -81,6 +81,13 @@ function mapExecutionSkipReason(reason: string): string {
   return 'EXECUTION_NOT_TRIGGERED';
 }
 
+export function getVisibleTopCandidates(candidates: TradeV4CandidateView[], sourceFilter: SourceFilter): TradeV4CandidateView[] {
+  const filtered = sourceFilter === 'All'
+    ? candidates
+    : candidates.filter(c => c.source === sourceFilter.toLowerCase());
+  return filtered.slice(0, 15);
+}
+
 export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
   candidates: TradeV4CandidateView[];
   selectedSymbol?: string | null;
@@ -141,18 +148,18 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
   const lastScrollLeftRef = useRef(0);
   const [tableScrollWidth, setTableScrollWidth] = useState(0);
 
-  const filtered = sourceFilter === 'All'
+  const filtered = useMemo(() => sourceFilter === 'All'
     ? props.candidates
-    : props.candidates.filter(c => c.source === sourceFilter.toLowerCase());
+    : props.candidates.filter(c => c.source === sourceFilter.toLowerCase()), [props.candidates, sourceFilter]);
 
-  const top = filtered.slice(0, 15);
+  const top = useMemo(() => getVisibleTopCandidates(props.candidates, sourceFilter), [props.candidates, sourceFilter]);
   const hasBuy = filtered.some(c => c.status === 'BUY');
 
   const poolLabel = !hasBuy && props.noBuyDisplay
     ? `Watch Pool (${props.noBuyDisplay.watchPoolSize} non-BUY)`
     : 'Top Candidates';
 
-  const compactGridCols = 'minmax(56px,1fr) minmax(54px,.9fr) minmax(68px,1fr) minmax(44px,.7fr) minmax(44px,.65fr) minmax(44px,.65fr) minmax(44px,.65fr) minmax(56px,.8fr) minmax(94px,1.1fr)';
+  const compactGridCols = 'minmax(56px,1fr) minmax(54px,.9fr) minmax(68px,1fr) minmax(44px,.7fr) minmax(44px,.65fr) minmax(44px,.65fr) minmax(44px,.65fr) minmax(48px,.7fr) minmax(48px,.7fr) minmax(94px,1.1fr)';
   const detailedGridCols = '82px 94px 120px 90px 136px 68px 74px 90px 70px 74px 74px 76px 90px minmax(220px,1fr)';
   const gridCols = viewMode === 'compact' ? compactGridCols : detailedGridCols;
 
@@ -327,6 +334,43 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
         </div>
       )}
 
+      {(() => {
+        const anchorCandidate = filtered.find(c => c.anchorDecision != null);
+        if (!anchorCandidate) return null;
+        const ad = anchorCandidate.anchorDecision;
+        const settingOn = anchorCandidate.anchorSettingEnabled;
+        const blocked = anchorCandidate.anchorBlockApplied;
+        const label = !settingOn ? 'OFF / Advisory' :
+          ad === 'ALIGNED' ? 'ALIGNED' :
+          ad === 'BLOCKED' ? 'BLOCKED' :
+          ad === 'UNAVAILABLE' ? 'UNAVAILABLE' : ad ?? '?';
+        const color = !settingOn ? '#8b949e' :
+          ad === 'ALIGNED' ? '#3fb950' :
+          ad === 'BLOCKED' ? '#f85149' :
+          ad === 'UNAVAILABLE' ? '#d29922' :
+          '#8b949e';
+        const blockerReason = anchorCandidate.professionalBlockers?.find(b =>
+          b.includes('ANCHOR')
+        );
+        return (
+          <div style={{ display: 'flex', gap: 8, padding: '2px 6px', fontSize: 8, background: 'rgba(255,255,255,0.02)', borderBottom: '1px solid rgba(255,255,255,0.02)', flexShrink: 0, alignItems: 'center' }}>
+            <span style={{ color: '#8b949e' }}>Anchor:</span>
+            <span style={{ color, fontWeight: 600 }}>{label}</span>
+            {settingOn && blocked && blockerReason && (
+              <span style={{ color: '#f85149', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {blockerReason}
+              </span>
+            )}
+            {settingOn && !blocked && ad === 'ALIGNED' && (
+              <span style={{ color: '#3fb950' }}>BTC/ETH aligned</span>
+            )}
+            {!settingOn && (
+              <span style={{ color: '#8b949e' }}>Advisory only — no hard block</span>
+            )}
+          </div>
+        );
+      })()}
+
       {!hasBuy && filtered.length === 0 ? (
         <div className="empty-state-small">{props.noBuyDisplay ? 'No top candidates after filters.' : 'Scanner waiting for cycle.'}</div>
       ) : (
@@ -349,6 +393,12 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
                   </>
                 )}
                 <span style={{ fontSize: 7, color: '#484f58', fontWeight: 600, whiteSpace: 'nowrap' }}>Status</span>
+                {viewMode === 'compact' && (
+                  <>
+                    <span style={{ fontSize: 7, color: '#bc8cff', fontWeight: 600, whiteSpace: 'nowrap' }}>Pro</span>
+                    <span style={{ fontSize: 7, color: '#bc8cff', fontWeight: 600, whiteSpace: 'nowrap' }}>Verdict</span>
+                  </>
+                )}
                 <span style={{ fontSize: 7, color: '#484f58', fontWeight: 600, whiteSpace: 'nowrap' }}>Why</span>
                 {viewMode === 'detailed' && (
                   <>
@@ -377,8 +427,8 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
                 const executionSkipped = !!props.executionPlan?.skippedCandidates?.some((s) => s.symbol === c.symbol);
                 const executionSkipReason = props.executionPlan?.skippedCandidates?.find((s) => s.symbol === c.symbol)?.reason ?? '';
                 const isNotExecutable = c.finalExecutable === false || c.buyAllowed === false;
-                const displayStatus = isNotExecutable ? (c.status === 'BUY' ? 'WAIT' : c.status) : c.status;
-                const statusColor = displayStatus === 'BUY' ? '#2ea043' : displayStatus === 'WAIT' ? '#d29922' : displayStatus === 'BLOCK' ? '#f85149' : '#8b949e';
+                const displayStatus = c.status;
+                const statusColor = c.status === 'BUY' ? '#2ea043' : c.status === 'WAIT' ? '#d29922' : c.status === 'BLOCK' ? '#f85149' : '#8b949e';
                 const baseWhy = resolveWhyNoBuy(c);
                 const effectiveSkipReason = executionSkipReason && executionSkipReason !== 'none'
                   ? executionSkipReason
@@ -391,6 +441,7 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
                     ? skipMapped
                     : baseWhy.label);
                 const whyColor = isBlockedBuyCandidate ? '#f85149' : whyLabel.startsWith('BLOCKED') ? '#f85149' : whyLabel === 'BUY_READY' ? '#2ea043' : whyLabel.startsWith('WAITING_') ? '#d29922' : whyLabel === 'EXECUTION_NOT_TRIGGERED' ? '#d29922' : '#f85149';
+                const reasonText = primaryBlocker !== 'none' ? primaryBlocker : c.mainReason || whyLabel;
 
                 return (
                   <div key={c.candidateId} className={`top-cand-row ${props.selectedSymbol === c.symbol ? 'selected' : ''}`} onClick={() => props.onSelectSymbol(c.symbol)}>
@@ -407,7 +458,20 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
                         </>
                       )}
                       <span style={{ color: statusColor, fontWeight: 700, fontSize: 9 }}>{displayStatus}</span>
-                      <span style={{ color: whyColor, fontSize: 8, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{whyLabel}</span>
+                      {viewMode === 'compact' && (
+                        <>
+                          <span style={{ color: (c.professionalScore ?? 0) >= 80 ? '#2ea043' : (c.professionalScore ?? 0) >= 50 ? '#d29922' : '#f85149', fontFamily: '"JetBrains Mono", monospace', fontSize: 8, fontWeight: 700 }}>
+                            {c.professionalScore != null ? c.professionalScore : 'n/a'}
+                          </span>
+                          <span style={{ color: c.professionalVerdict === 'STRONG_BUY' ? '#2ea043' : c.professionalVerdict === 'WAIT' ? '#d29922' : '#f85149', fontSize: 7, fontWeight: 600 }}>
+                            {c.professionalVerdict ?? 'n/a'}
+                          </span>
+                        </>
+                      )}
+                      <span style={{ color: whyColor, fontSize: 8, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {whyLabel}
+                        <small style={{ display: 'block', marginTop: 1, color: '#64748b', fontSize: 7, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>Reason: {reasonText}</small>
+                      </span>
                       {viewMode === 'detailed' && (
                         <>
                           <span style={{ color: '#8b949e', fontFamily: '"JetBrains Mono", monospace', fontSize: 9 }}>{c.score ?? 'n/a'}</span>

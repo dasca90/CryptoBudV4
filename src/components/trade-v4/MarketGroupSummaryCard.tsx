@@ -1,4 +1,4 @@
-import { useMemo, useEffect } from 'react';
+import { memo, useMemo, useEffect } from 'react';
 import type { TradingParametersView } from './types';
 import type { TradeV4CandidateView } from './types';
 import { computeMarketGroupSummary, type GroupSummaryRow } from '../../core/scanner/MarketGroupSummary';
@@ -20,7 +20,7 @@ const GROUP_LABELS: Record<string, string> = {
   high_risk: 'High Risk', very_high_risk: 'Very High Risk',
 };
 
-export function MarketGroupSummaryCard(props: {
+export const MarketGroupSummaryCard = memo(function MarketGroupSummaryCard(props: {
   candidates: TradeV4CandidateView[];
   parameters: TradingParametersView;
 }) {
@@ -93,7 +93,7 @@ export function MarketGroupSummaryCard(props: {
       </table>
     </section>
   );
-}
+});
 
 function GroupRow({ row }: { row: { group: string; groupLabel: string; enabled: boolean; trend: string; strategy: string; totalCandidates: number; buyCount: number; waitCount: number; blockCount: number; avgConfidence: number } }) {
   if (!row.enabled) {

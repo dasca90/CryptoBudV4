@@ -1,11 +1,11 @@
-import { useEffect, useMemo } from "react";
+import { memo, useEffect, useMemo } from "react";
 import { getTitleSymbol } from "../../lib/ui/uiSymbolMapper";
 import { getTrendClassName, getTrendGlow } from "../../lib/ui/trendColorHelper";
 import { getExecutionAdapterDisplay, getExecutionStageDisplay, sanitizeExecutionDisplayText } from "../../lib/execution/executionDisplay";
 import { formatLocalTime } from "../../utils/timeFormatter";
 import { logger } from "../../utils/logger";
 
-export function ControlTowerPanel(props: {
+export const ControlTowerPanel = memo(function ControlTowerPanel(props: {
   scannerRunning: boolean;
   candidateCount: number;
   engineReviewCount: number;
@@ -165,7 +165,7 @@ export function ControlTowerPanel(props: {
       </Card>
     </div>
   );
-}
+});
 
 function Card(props: { title: string; status?: string; children: React.ReactNode }) {
   const statusClass = props.status === 'SCANNING' ? 'status-good' : props.status === 'STOPPED' ? 'status-bad' : 'status-muted';

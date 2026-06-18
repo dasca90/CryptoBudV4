@@ -69,7 +69,7 @@ export function MLLabPage({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const interval = setInterval(() => forceUpdate(n => n + 1), 3000);
+    const interval = setInterval(() => forceUpdate(n => n + 1), 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -103,6 +103,42 @@ export function MLLabPage({
 
   const handleImport = async () => {
     fileInputRef.current?.click();
+  };
+
+  const handleLoadJournalTraining = async () => {
+    setImporting(true);
+    setError(null);
+    setImportResult(null);
+
+    try {
+      const text = await journal.exportTrainingRows();
+      const json = JSON.parse(text);
+      const result = importMLJson(json);
+
+      if (result.errors.length > 0 && result.rows.length === 0) {
+        setError(result.errors.join(', '));
+        return;
+      }
+
+      onImportedRowsUpdate(result.rows);
+      setImportResult(
+        'Loaded from Journal: ' + result.totalRows + ' rows, ' +
+        result.goodRows + ' GOOD, ' +
+        result.mediumRows + ' MEDIUM, ' +
+        result.badRows + ' BAD',
+      );
+      logger.info(`ML_DIRECT_JOURNAL_TRAINING_ROWS_LOADED rows=${result.totalRows} good=${result.goodRows} medium=${result.mediumRows} bad=${result.badRows} accepted=${result.acceptedRows} rejected=${result.rejectedRows}`);
+
+      if (result.warnings.length > 0) {
+        setError(result.warnings.join(', '));
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError('Load from Journal failed: ' + msg);
+      logger.error('ML_DIRECT_JOURNAL_LOAD_FAILED: ' + msg);
+    } finally {
+      setImporting(false);
+    }
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -140,7 +176,7 @@ export function MLLabPage({
     }
   };
 
-  const eligibleForTraining = importedRows.filter(r => r.dataQuality === 'GOOD').length;
+  const eligibleForTraining = importedRows.filter(r => r.trainingEligible && r.dataQuality === 'GOOD').length;
   const canTrain = eligibleForTraining > 0 && !training;
 
   const handleTrain = () => {
@@ -338,6 +374,9 @@ export function MLLabPage({
         <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           <button className="btn btn-sm" onClick={handleImport} disabled={importing}>
             {importing ? 'Importing...' : 'Import JSON'}
+          </button>
+          <button className="btn btn-sm btn-green" onClick={handleLoadJournalTraining} disabled={importing}>
+            Load Journal Training
           </button>
           <button className="btn btn-sm btn-outline" onClick={onExportML}>Export Dataset</button>
           <button className="btn btn-sm btn-outline" onClick={onExportTraining}>Export Training</button>

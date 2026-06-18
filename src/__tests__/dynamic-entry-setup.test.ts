@@ -59,6 +59,25 @@ ok(safeFallbackSnap.dynamicSetupContext?.requiredDipPctMin === 0.6 && safeFallba
 ok(safeFallbackSnap.dynamicSetupContext?.primaryBlocker === 'spread_slippage_too_high', '3h stronger spread blocker beats breakout blocker');
 ok(safeFallbackSnap.finalExecutable === false, '3i finalExecutable=false still blocks BUY');
 
+const invalidDipWithReboundOk = {
+  ...cand('dip_and_rebound', 'sideways', -0.2, 0.5),
+  symbol: 'INVALID_DIP_REBOUND_OK',
+  selectedStrategy: 'wait',
+  autoStrategyDecision: {
+    groupTrend: 'sideways',
+    strategySource: 'AutoBots',
+    strategySourceDetail: 'per_coin_selector',
+    groupRecommendedStrategy: 'dip_and_rebound',
+    effectiveStrategy: 'dip_and_rebound',
+    perCoinSelectedStrategy: 'dip_and_rebound',
+  },
+  traderBrainDecision: { ruleDecisionTrace: { unifiedSignal: { reasonCode: 'WAITING', definition: { buyRule: 'wait' } } } },
+} as any;
+const invalidDipSnap = buildStrategyAuditSnapshotFromCandidate(invalidDipWithReboundOk);
+ok(invalidDipSnap.strategySelected === 'balanced', '3j invalid dip/rebound with rebound OK falls back to balanced');
+ok(invalidDipSnap.strategySelected !== 'momentum', '3k invalid dip/rebound does not auto-downgrade to momentum');
+ok(invalidDipSnap.finalEntryRule === 'BALANCED_READY', '3l balanced fallback gets balanced entry rule');
+
 const drSide = buildStrategyAuditSnapshotFromCandidate(cand('dip_and_rebound', 'sideways', -0.9, 0.45));
 ok(drSide.dynamicSetupContext?.marketRegimeBucket === 'sideways_range', '4 DR sideways uses sideways_range bucket');
 ok(drSide.setupMetrics.some((m) => m.key === 'requiredDipPct' && m.requiredValue === 0.8), '5 DR sideways min dip is 0.8');

@@ -12,12 +12,28 @@ export interface ScannerBrainLookupResult {
 
 export class ScannerBrainService {
   private tempBrains: Map<string, TraderBrain> = new Map();
+  private btcAnchorEnabled = true;
+  private ethAnchorEnabled = true;
 
   constructor(
     private readonly manualBrains: Map<string, TraderBrain>,
     private readonly adapter: ExchangeAdapter,
     private readonly ml: MLPredictor,
-  ) {}
+    anchorSettings?: { btcEnabled: boolean; ethEnabled: boolean },
+  ) {
+    if (anchorSettings) {
+      this.btcAnchorEnabled = anchorSettings.btcEnabled;
+      this.ethAnchorEnabled = anchorSettings.ethEnabled;
+    }
+  }
+
+  setAnchorSettings(btcEnabled: boolean, ethEnabled: boolean): void {
+    this.btcAnchorEnabled = btcEnabled;
+    this.ethAnchorEnabled = ethEnabled;
+    for (const [, brain] of this.tempBrains) {
+      brain.setAnchorSettings(btcEnabled, ethEnabled);
+    }
+  }
 
   getOrCreateBrainForSymbol(symbol: string, mode: TradingMode = 'AUTO'): ScannerBrainLookupResult {
     const normalized = symbol.toUpperCase().trim();
@@ -27,11 +43,13 @@ export class ScannerBrainService {
 
     const manual = this.manualBrains.get(normalized);
     if (manual) {
+      manual.setAnchorSettings(this.btcAnchorEnabled, this.ethAnchorEnabled);
       return { brain: manual, source: 'manual_brain' };
     }
 
     const cached = this.tempBrains.get(normalized);
     if (cached) {
+      cached.setAnchorSettings(this.btcAnchorEnabled, this.ethAnchorEnabled);
       return { brain: cached, source: 'cached_scanner_brain' };
     }
 
@@ -48,6 +66,7 @@ export class ScannerBrainService {
       minConfidence: 0.5,
     };
     const brain = new TraderBrain(cfg, this.adapter, this.ml);
+    brain.setAnchorSettings(this.btcAnchorEnabled, this.ethAnchorEnabled);
     this.tempBrains.set(normalized, brain);
     return { brain, source: 'scanner_temp_brain' };
   }
@@ -56,4 +75,3 @@ export class ScannerBrainService {
     return /^[A-Z0-9]{4,20}$/.test(symbol);
   }
 }
-

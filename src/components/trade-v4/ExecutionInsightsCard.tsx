@@ -1,7 +1,8 @@
+import { memo } from "react";
 import type { TradeV4NoBuyDisplay } from "./types";
 import type { TradeV4CandidateView } from "./types";
 
-export function ExecutionInsightsCard(props: {
+export const ExecutionInsightsCard = memo(function ExecutionInsightsCard(props: {
   noBuyDisplay?: TradeV4NoBuyDisplay | null;
   candidates?: TradeV4CandidateView[];
   executionPlan?: {
@@ -105,4 +106,4 @@ export function ExecutionInsightsCard(props: {
       </div>
     </section>
   );
-}
+});

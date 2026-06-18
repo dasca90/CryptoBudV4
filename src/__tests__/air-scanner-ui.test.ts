@@ -14,15 +14,20 @@ const paramsSrc = readFileSync('src/components/trade-v4/TradingParametersCard.ts
 const scannerSrc = readFileSync('src/components/trade-v4/AirScanner3D.tsx', 'utf8');
 const mapperSrc = readFileSync('src/lib/ui/uiSymbolMapper.ts', 'utf8');
 const candidateSrc = readFileSync('src/components/trade-v4/CandidateTable.tsx', 'utf8');
+const candidatePoolSrc = readFileSync('src/components/trade-v4/CandidatePoolSummaryPanel.tsx', 'utf8');
 const cssSrc = readFileSync('src/components/trade-v4/trade-v4.css', 'utf8');
+const airScannerCssSrc = readFileSync('src/components/trade-v4/air-scanner.css', 'utf8');
 const selectedSrc = readFileSync('src/components/trade-v4/SelectedCoinInspector.tsx', 'utf8');
 const airCoinSrc = readFileSync('src/components/trade-v4/AirCoin.tsx', 'utf8');
 const adapterSrc = readFileSync('src/lib/air-scanner/tradeV4DataAdapter.ts', 'utf8');
+const coinLogoSrc = readFileSync('src/components/trade-v4/CoinLogo.tsx', 'utf8');
+const labCoinOrbSrc = readFileSync('src/features/air-scanner-lab/components/CoinOrb.tsx', 'utf8');
 
 ok((tradeV4Src.includes('trade-v4-right') || tradeV4Src.includes('right-column')) && tradeV4Src.includes('<SelectedCoinInspector'), 'A Selected Coin remains in right column');
 ok(tradeV4Src.includes('<TopCandidatesPanel') && tradeV4Src.indexOf('<TopCandidatesPanel') > tradeV4Src.indexOf('<SelectedCoinInspector'), 'B Top Candidates renders under Selected Coin in right column');
 ok(tradeV4Src.includes('<CandidatePoolSummaryPanel'), 'B2 CandidatePoolSummaryPanel renders in center');
 ok(tradeV4Src.includes('<AirScanner3D') && tradeV4Src.indexOf('<CandidatePoolSummaryPanel') > tradeV4Src.indexOf('<AirScanner3D'), 'B3 Scanner is above Candidate Pool in center');
+ok(tradeV4Src.includes('scannerTelemetry={use3DScannerLabPreview') && candidatePoolSrc.includes('candidate-pool-scanner-telemetry'), 'B4 scanner telemetry card is moved into Candidate Pool for the 3D preview');
 ok(openSrc.includes('PAGE_SIZE = 10') && openSrc.includes('Page {safePage} / {totalPages}'), 'C Open Positions paginates at 10 rows');
 ok(closedSrc.includes('PAGE_SIZE = 10') && closedSrc.includes('Page {safePage} / {totalPages}'), 'D Closed Positions paginates at 10 rows');
 ok(openSrc.includes('Prev') && openSrc.includes('Next') && closedSrc.includes('Prev') && closedSrc.includes('Next'), 'E pagination prev/next works');
@@ -34,6 +39,10 @@ ok(tradePageSrc.includes('airParams') && tradePageSrc.includes('onChangeParamete
 ok(topSrc.includes('onSelectSymbol') && !topSrc.includes('onManualBuy') && !topSrc.includes('execute'), 'H candidate click selects symbol only');
 ok(!paramsSrc.includes('onManualBuy') && !paramsSrc.includes('execute') && !paramsSrc.includes('submitOrder'), 'I no direct trade execution from parameter card');
 ok(!mapperSrc.includes('"?"'), 'M no random question-mark icon fallbacks in symbol mapper');
+ok(mapperSrc.includes('getCoinLogoMeta') && mapperSrc.includes('COIN_LOGOS'), 'M2 coin logo metadata resolver exists');
+ok(coinLogoSrc.includes('CoinLogo') && coinLogoSrc.includes('CoinSymbolCell') && coinLogoSrc.includes('getCoinLogoMeta'), 'M3 reusable CoinLogo and CoinSymbolCell components exist');
+ok(openSrc.includes('CoinSymbolCell') && closedSrc.includes('CoinSymbolCell'), 'M4 Open and Closed Positions render coin logos in Symbol cells');
+ok(labCoinOrbSrc.includes('getCoinLogoMeta') && labCoinOrbSrc.includes('coinLogo.mark'), 'M5 3D scanner orb label uses same coin logo metadata');
 ok(selectedSrc.includes('No coin selected'), 'N Selected Coin shows "No coin selected" fallback');
 ok(candidateSrc.includes('toFixed(2)') && candidateSrc.includes('toFixed(1)') && candidateSrc.includes('n/a'), 'O candidate numeric formatting and n/a fallback present');
 ok(cssSrc.includes('table-scroll-x') && cssSrc.includes('reason-cell') && cssSrc.includes('text-overflow: ellipsis'), 'P table has overflow-x and reason truncation styles');
@@ -50,7 +59,11 @@ ok(tradeV4Src.includes('data-testid="market-groups-workspace"') && tradeV4Src.in
 ok(cssSrc.includes('.center-bottom-v4') && cssSrc.includes('grid-template-columns: minmax(320px, 38%) minmax(520px, 62%)'), 'Q11 center bottom is strict 2-column grid (pool | closed)');
 ok(cssSrc.includes('.trade-v4-right') && cssSrc.includes('grid-template-rows:'), 'Q12 right rail uses explicit vertical stack grid');
 ok(!scannerSrc.includes('DEPTH 1000m'), 'Q13 scanner depth text removed');
-ok(scannerSrc.includes('position_open_hold') && scannerSrc.includes('legend-item'), 'Q14 scanner legend labels are clean and explicit');
+ok(scannerSrc.includes('position_opened_hold') && scannerSrc.includes('legend-item'), 'Q14 scanner legend uses canonical position-open state and explicit labels');
+ok(scannerSrc.includes('scanner-has-coins') && scannerSrc.includes('scanner-empty'), 'Q14b scanner core pulse state follows rendered coin count');
+ok(airScannerCssSrc.includes('core-scan-ping 10s') && airScannerCssSrc.includes('beam-scan-ping 10s'), 'Q14c scanner idle pulse runs once every 10 seconds');
+ok(airScannerCssSrc.includes('.scanner-has-coins .capture-beam') && airScannerCssSrc.includes('opacity: 0.08'), 'Q14d scanner pulse quiets after coins appear');
+ok(!airScannerCssSrc.includes('core-breathe 6s ease-in-out infinite'), 'Q14e scanner core no longer breathes continuously');
 ok(openSrc.includes('v3-pill') && openSrc.includes('trendTone') && openSrc.includes('strategyTone'), 'Q15 open positions use V3-style colored badges');
 ok(openSrc.includes('Strategy') && openSrc.includes('Trend') && openSrc.includes('V3_OPEN_POSITION_COLUMNS'), 'Q16 open positions render V3 strategy + trend columns');
 ok(closedSrc.includes('closeReasonTone') && closedSrc.includes('v3-pill'), 'Q17 closed positions use V3-style close reason badges');

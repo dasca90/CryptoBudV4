@@ -32,7 +32,7 @@ ok(topCandidatesSrc.includes('buyReadyCount') && topCandidatesSrc.includes('sele
 
 // 7. Builder's resolution block produces executable snapshot fields
 ok(builderSrc.includes('finalExecutable && strategySelected.toLowerCase() === \'wait\''), 'builder resolves stale wait when executable');
-ok(builderSrc.includes('isWait = false'), 'builder sets isWait=false after resolution');
+ok(builderSrc.includes("isWait = strategySelected.toLowerCase() === 'wait'"), 'builder recalculates isWait after resolution');
 
 // 8. Precondition check in TradingEngine already blocks wait/WAITING_FOR_SETUP (safety net)
 ok(engineSrc.includes("preEffectiveStrategy.toLowerCase() === 'unknown' || preEffectiveStrategy === 'wait'"), 'TradingEngine precondition blocks wait strategy');

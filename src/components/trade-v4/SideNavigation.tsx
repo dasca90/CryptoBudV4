@@ -1,4 +1,5 @@
-﻿import { getTabSymbol, type NavTabKey } from "../../lib/ui/uiSymbolMapper";
+﻿import { memo } from "react";
+import { getTabSymbol, type NavTabKey } from "../../lib/ui/uiSymbolMapper";
 
 const items: { key: NavTabKey; label: string; tooltip: string }[] = [
   { key: "Overview", label: "OVR", tooltip: "Overview — System status" },
@@ -9,7 +10,7 @@ const items: { key: NavTabKey; label: string; tooltip: string }[] = [
   { key: "Settings", label: "SET", tooltip: "Settings — Switch to Settings tab" },
 ];
 
-export function SideNavigation() {
+export const SideNavigation = memo(function SideNavigation() {
   return (
     <nav className="side-nav panel">
       {items.map((item, index) => (
@@ -37,4 +38,4 @@ export function SideNavigation() {
       ))}
     </nav>
   );
-}
+});
