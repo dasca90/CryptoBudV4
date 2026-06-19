@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "tsc --noEmit",
-    "test": "npx tsx src/__tests__/open-positions-survive-restart.test.ts && npx tsx src/__tests__/paper-live-parity.ts && npx tsx src/__tests__/trader-brain.test.ts && npx tsx src/__tests__/exit-engine.test.ts && npx tsx src/__tests__/journal-ml.test.ts && npx tsx src/__tests__/ui-state.test.ts && npx tsx src/__tests__/persistence.test.ts && npx tsx src/__tests__/scanner.test.ts",
+    "test": "npx tsx src/__tests__/open-positions-survive-restart.test.ts && npx tsx src/__tests__/paper-live-parity.ts && npx tsx src/__tests__/trader-brain.test.ts && npx tsx src/__tests__/exit-engine.test.ts && npx tsx src/__tests__/journal-ml.test.ts && npx tsx src/__tests__/ui-state.test.ts && npx tsx src/__tests__/persistence.test.ts && npx tsx src/__tests__/scanner.test.ts && npx tsx src/__tests__/execution-decision.test.ts",
     "test:paper-live-parity": "npx tsx src/__tests__/paper-live-parity.ts",
     "test:demo-live-parity": "npx tsx src/__tests__/paper-live-parity.ts",
     "test:demo-live-display": "npx tsx src/__tests__/demo-live-display.test.ts",

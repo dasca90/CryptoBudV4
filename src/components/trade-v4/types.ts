@@ -100,6 +100,33 @@ export type TradeV4CandidateView = {
   ethFresh?: boolean;
   anchorDecision?: 'ALIGNED' | 'ADVISORY_WARNING' | 'BLOCKED' | 'UNAVAILABLE';
   anchorBlockApplied?: boolean;
+  executionDecision?: {
+    selectedForExecution: boolean;
+    finalNoBuyReason: string;
+    finalDecision: string;
+    submitAttempted: boolean;
+    adapterCalled: boolean;
+    adapterAccepted: boolean;
+    adapterResult: string;
+    orderFilled: boolean;
+    positionCreated: boolean;
+    journalPersisted: boolean;
+    telegramSent: boolean;
+    reasonPriorityTrace: Array<{ reason: string; passed: boolean; detail: string }>;
+    invariantOk: boolean;
+    finalExecutable: boolean;
+    buyAllowed: boolean;
+    priceFresh: boolean;
+    bookFresh: boolean;
+    spreadOk: boolean;
+    tpRoomOk: boolean;
+    capitalOk: boolean;
+    maxOpenPositionsOk: boolean;
+    duplicateOpenPosition: boolean;
+    runtimeExecutionEnabled: boolean;
+    setupResult: string;
+    finalExecutionStrategy: string;
+  };
 };
 
 export type TradeV4OpenPositionView = {
@@ -130,6 +157,14 @@ export type TradeV4OpenPositionView = {
   ageLabel: string;
   status: "open" | "watching" | "closing";
   strategy: string;
+  marketBestFit?: string | null;
+  groupRecommendedStrategy?: string | null;
+  finalExecutionStrategy?: string | null;
+  strategyAtEntry?: string | null;
+  strategyDecisionReason?: string | null;
+  overrideApplied?: boolean;
+  overrideReason?: string | null;
+  strategyMismatchWarning?: string | null;
   riskGroup: string;
   groupTrend: string;
   exitStatus: "monitoring" | "tp_armed" | "trailing_active" | "sl_risk" | "closing" | "closed";
@@ -150,6 +185,9 @@ export type TradeV4OpenPositionView = {
   priceTimestamp?: number | null;
   priceStaleThresholdMs?: number;
   priceFreshnessReason?: string;
+  exitPriceUnavailable?: boolean;
+  exitPriceUnavailableAt?: number | null;
+  exitPriceUnavailableReason?: string | null;
   spreadPct?: number | null;
   quantity?: number;
   usedCapitalUsd?: number;
@@ -307,6 +345,7 @@ export type TradeV4ClosedPositionView = {
 export type TradingParametersView = {
   strategySource: 'autobots' | 'manual_override';
   entryConfirmationMode: 'strict' | 'smart' | 'aggressive';
+  scannerDiagnosticsLevel: 'normal' | 'verbose' | 'debug';
   strategy: string;
   stopLossPct: number;
   tp1Pct: number;
@@ -546,6 +585,7 @@ export interface TradeV4PageModel {
       reason: string;
       gate: string;
       isRetryable: boolean;
+      finalNoBuyReason?: string;
     }>;
     noBuyReasons: string[];
     executionPoolSize: number;

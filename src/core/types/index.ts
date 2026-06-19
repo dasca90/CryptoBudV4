@@ -152,6 +152,7 @@ export type ClosePriceSource =
   | 'book_ticker'
   | 'rest_ticker'
   | 'live_ticker_cache'
+  | 'position_last_known'
   | 'trigger_fallback'
   | 'unavailable';
 
@@ -159,8 +160,18 @@ export type ClosePriceStatus =
   | 'fresh_book_ticker'
   | 'fresh_rest_ticker'
   | 'cached_live_price'
+  | 'fresh_position_last_known'
   | 'trigger_fallback'
   | 'unavailable';
+
+export interface ClosePriceSourceDiagnostic {
+  source: 'book_ticker' | 'rest_ticker' | 'live_ticker_cache' | 'position.lastKnownPrice' | 'entrySnapshot fallback';
+  available: boolean;
+  price: number;
+  ageMs: number | null;
+  fresh: boolean;
+  error?: string;
+}
 
 export interface ClosePriceResolution {
   symbol: string;
@@ -176,6 +187,9 @@ export interface ClosePriceResolution {
   isRealMarketPrice: boolean;
   attemptedSources: string[];
   errors: string[];
+  sourceDiagnostics?: ClosePriceSourceDiagnostic[];
+  staleThresholdMs?: number;
+  unavailableReason?: string;
 }
 
 export interface DynamicTrailInput {
@@ -265,6 +279,9 @@ export interface Position {
   maxHoldSec: number;
   lastPrice: number;
   priceTimestamp?: number;
+  exitPriceUnavailable?: boolean;
+  exitPriceUnavailableAt?: number;
+  exitPriceUnavailableReason?: string;
   unrealizedPnlPercent: number;
   ownerType: string;
   adapter: string;
@@ -721,6 +738,11 @@ export interface AutobotsInput {
   calibratedConfidence: number;
   dipPercent: number;
   reboundPercent: number;
+  reboundFreshnessStatus?: 'valid' | 'unknown' | 'stale';
+  reboundTimestamp?: string | null;
+  dipLowTimestamp?: string | null;
+  reboundAgeMs?: number | null;
+  maxAllowedReboundAgeMs?: number | null;
   m5Change: number;
   m15Change: number;
   h1Change: number;
@@ -996,6 +1018,11 @@ export interface ScannerCandidate {
   momentumConfirmed: boolean;
   dipPercent: number;
   reboundPercent: number;
+  reboundFreshnessStatus?: 'valid' | 'unknown' | 'stale';
+  reboundTimestamp?: string | null;
+  dipLowTimestamp?: string | null;
+  reboundAgeMs?: number | null;
+  maxAllowedReboundAgeMs?: number | null;
   m5Change: number;
   m15Change: number;
   h1Change: number;
@@ -1021,6 +1048,13 @@ export interface ScannerCandidate {
   autoStrategyDecision?: AutoStrategyDecision;
   effectiveStrategy?: string;
   groupRecommendedStrategy?: string;
+  marketBestFit?: string | null;
+  autoBotsPerCoinStrategy?: string | null;
+  finalExecutionStrategy?: string | null;
+  strategyAtEntry?: string | null;
+  strategyDecisionReason?: string | null;
+  overrideApplied?: boolean;
+  overrideReason?: string | null;
   entryPlan?: {
     side: OrderSide;
     price: number;
@@ -1231,6 +1265,13 @@ export interface PlannedCandidate {
   strategyReason?: string;
   groupTrend: string;
   groupRecommendedStrategy: string;
+  marketBestFit?: string | null;
+  autoBotsPerCoinStrategy?: string | null;
+  finalExecutionStrategy?: string | null;
+  strategyAtEntry?: string | null;
+  strategyDecisionReason?: string | null;
+  overrideApplied?: boolean;
+  overrideReason?: string | null;
   confidence: number;
   score: number;
   plannedAction: PlannedAction;
@@ -1272,6 +1313,16 @@ export interface ScannerAutoEntryConfigSnapshot {
   strategySource: string;
   strategySourceDetail?: string | null;
   strategyReason?: string | null;
+  marketBestFit?: string | null;
+  groupRecommendedStrategy?: string | null;
+  autoBotsPerCoinStrategy?: string | null;
+  finalExecutionStrategy?: string | null;
+  strategyAtEntry?: string | null;
+  strategyDecisionReason?: string | null;
+  overrideApplied?: boolean;
+  overrideReason?: string | null;
+  mismatchAllowed?: boolean;
+  mismatchReason?: string | null;
   entryPrice: number;
   quantity: number;
   capitalAllocated: number;
@@ -1295,12 +1346,15 @@ export interface SkippedCandidate {
   reason: string;
   gate: string;
   isRetryable: boolean;
+  finalNoBuyReason?: string;
 }
 
 export interface ExecutionPlan {
   canExecute: boolean;
   selectedCandidates: PlannedCandidate[];
   skippedCandidates: SkippedCandidate[];
+  canonicalExecutableSet?: Record<string, unknown>;
+  decisions?: import('../scanner/executionDecision').ExecutionDecision[];
   noBuyReasons: string[];
   plannerInputCount?: number;
   plannerInputWithEntryPlan?: number;
@@ -1713,6 +1767,7 @@ export interface AppSettings {
   maxPriceAgeMs: number;
   strategySource: 'autobots' | 'manual_override';
   entryConfirmationMode: 'strict' | 'smart' | 'aggressive';
+  scannerDiagnosticsLevel: 'normal' | 'verbose' | 'debug';
   smartProfessionalMinScore: number;
   stopLossPct: number;
   tp1Pct: number;
@@ -1792,13 +1847,14 @@ export function createDefaultAppSettings(): AppSettings {
     maxPriceAgeMs: 10000,
     strategySource: 'autobots',
     entryConfirmationMode: 'smart',
+    scannerDiagnosticsLevel: 'normal',
     smartProfessionalMinScore: 80,
     stopLossPct: 1.5,
     tp1Pct: 2.0,
     tp2Pct: 4.0,
     dynamicTrailingEnabled: false,
     trailPullbackPct: 0.25,
-    paperAutoExecutionEnabled: false,
+    paperAutoExecutionEnabled: true,
     microScalperFeatureEnabled: true,
     graphicsQuality: 'balanced',
     autoPerformanceMode: false,

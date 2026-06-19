@@ -383,9 +383,9 @@ function resolveTopCandidateTrend(candidate: ScannerCandidate): { displayedTrend
   return { displayedTrend: 'UNKNOWN', sourceUsed: 'none', fallbackUsed: true, fallbackReason: 'all_trend_sources_missing' };
 }
 
-export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, orderLockActive = false): TradeV4CandidateView {
+export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, orderLockActive = false, auditDetail: 'summary' | 'full' = 'full', decisionsBySymbol?: ReadonlyMap<string, import('../../core/scanner/executionDecision').ExecutionDecision>): TradeV4CandidateView {
   const strategyAudit = buildStrategyAuditSnapshotFromCandidate(candidate);
-  logStrategyAudit(strategyAudit);
+  logStrategyAudit(strategyAudit, { detailLevel: auditDetail });
   const visualState: TradeV4CandidateView["engineState"] =
     candidate.status === "BUY" ? (orderLockActive ? "capturing" : "detected")
       : candidate.status === "BLOCK" ? "rejected"
@@ -463,6 +463,36 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
     ethFresh: (candidate as any).professionalAnalysis?.ethFresh,
     anchorDecision: (candidate as any).professionalAnalysis?.anchorDecision,
     anchorBlockApplied: (candidate as any).professionalAnalysis?.anchorBlockApplied,
+    executionDecision: decisionsBySymbol?.get(candidate.symbol) ? (() => {
+      const d = decisionsBySymbol.get(candidate.symbol)!;
+      return {
+        selectedForExecution: d.selectedForExecution,
+        finalNoBuyReason: d.finalNoBuyReason,
+        finalDecision: d.finalDecision,
+        submitAttempted: d.submitAttempted,
+        adapterCalled: d.adapterCalled,
+        adapterAccepted: d.adapterAccepted,
+        adapterResult: d.adapterResult,
+        orderFilled: d.orderFilled,
+        positionCreated: d.positionCreated,
+        journalPersisted: d.journalPersisted,
+        telegramSent: d.telegramSent,
+        reasonPriorityTrace: d.reasonPriorityTrace,
+        invariantOk: d.invariantOk,
+        finalExecutable: d.finalExecutable,
+        buyAllowed: d.buyAllowed,
+        priceFresh: d.priceFresh,
+        bookFresh: d.bookFresh,
+        spreadOk: d.spreadOk,
+        tpRoomOk: d.tpRoomOk,
+        capitalOk: d.capitalOk,
+        maxOpenPositionsOk: d.maxOpenPositionsOk,
+        duplicateOpenPosition: d.duplicateOpenPosition,
+        runtimeExecutionEnabled: d.runtimeExecutionEnabled,
+        setupResult: d.setupResult,
+        finalExecutionStrategy: d.finalExecutionStrategy,
+      };
+    })() : undefined,
   };
 }
 
@@ -525,21 +555,36 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
   const marketTrendAtEntry = bs?.groupTrend ?? bs?.groupRegime ?? null;
   const rawSelectedStrategy = bs?.selectedStrategy ?? null;
   const entryConfigSnapshotStrategy = (bs as any)?.entryConfigSnapshot?.selectedStrategy ?? null;
+  const savedStrategyAtEntry = (entryConfig as any)?.strategyAtEntry ?? (bs as any)?.entryConfigSnapshot?.strategyAtEntry ?? null;
   const isValidExecutableStrategy = (s: string | null): boolean => !!s && !/^(?:wait|unknown|avoid|)$/i.test(s);
-  const strategy = rawSelectedStrategy && isValidExecutableStrategy(rawSelectedStrategy)
-    ? rawSelectedStrategy
+  const strategy = savedStrategyAtEntry && isValidExecutableStrategy(String(savedStrategyAtEntry))
+    ? String(savedStrategyAtEntry)
     : entryConfigSnapshotStrategy && isValidExecutableStrategy(entryConfigSnapshotStrategy)
       ? entryConfigSnapshotStrategy
-      : rawSelectedStrategy
-        ? (rawSelectedStrategy.toLowerCase() === 'wait' ? 'unknown_legacy' : rawSelectedStrategy)
-        : (position.ownerType ? 'LEGACY UNKNOWN' : 'UNKNOWN');
+      : rawSelectedStrategy && isValidExecutableStrategy(rawSelectedStrategy)
+        ? rawSelectedStrategy
+        : rawSelectedStrategy
+          ? (rawSelectedStrategy.toLowerCase() === 'wait' ? 'unknown_legacy' : rawSelectedStrategy)
+          : (position.ownerType ? 'LEGACY UNKNOWN' : 'UNKNOWN');
   const candidateSelectedStrategySource = ((bs as any)?.traderBrainDecision?.ruleDecisionTrace as any)?.unifiedSignal?.reasonCode ?? null;
   const displayedStrategy = strategy;
+  const marketBestFit = String((entryConfig as any)?.marketBestFit ?? (setup.rawSnapshot as any)?.marketRecommendedStrategy ?? (bs as any)?.marketBestFit ?? 'n/a');
+  const groupRecommendedStrategy = String((entryConfig as any)?.groupRecommendedStrategy ?? (setup.rawSnapshot as any)?.groupRecommendedStrategy ?? bs?.groupRecommendedStrategy ?? 'n/a');
+  const finalExecutionStrategy = String((entryConfig as any)?.finalExecutionStrategy ?? entryConfigSnapshotStrategy ?? displayedStrategy);
+  const strategyAtEntry = String(savedStrategyAtEntry ?? rawSelectedStrategy ?? displayedStrategy);
+  const strategyDecisionReason = String((entryConfig as any)?.strategyDecisionReason ?? (setup.rawSnapshot as any)?.strategyDecisionReason ?? (bs as any)?.entryReason ?? 'n/a');
+  const overrideApplied = Boolean((entryConfig as any)?.overrideApplied ?? (setup.rawSnapshot as any)?.overrideApplied ?? false);
+  const overrideReason = ((entryConfig as any)?.overrideReason ?? (setup.rawSnapshot as any)?.overrideReason ?? null) as string | null;
+  const strategyMismatchWarning = (overrideApplied && !overrideReason) ? 'Strategy mismatch — missing reason' : null;
   const validExecutedStrategy = displayedStrategy !== 'wait' && displayedStrategy !== 'LEGACY UNKNOWN' && displayedStrategy !== 'unknown_legacy' && displayedStrategy !== 'UNKNOWN';
   const entryRuleAtEntry = String((bs as any)?.settingsSnapshot?.entryRule ?? (bs as any)?.entryConfigSnapshot?.finalEntryRule ?? bs?.selectedPlaybook ?? '').trim();
-  const sourceOfDisplayedStrategy = rawSelectedStrategy
-    ? 'buySnapshot.selectedStrategy'
-    : position.ownerType
+  const sourceOfDisplayedStrategy = savedStrategyAtEntry
+    ? 'entryConfigSnapshot.strategyAtEntry'
+    : entryConfigSnapshotStrategy
+      ? 'entryConfigSnapshot.selectedStrategy'
+      : rawSelectedStrategy
+        ? 'buySnapshot.selectedStrategy'
+        : position.ownerType
       ? 'position_ownerType_fallback_legacy'
       : 'fallback_UNKNOWN';
   const auditpid = position.tradeId ?? `${position.coin}-${position.openedAt}`;
@@ -685,6 +730,14 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
     ageLabel,
     status: "open",
     strategy,
+    marketBestFit,
+    groupRecommendedStrategy,
+    finalExecutionStrategy,
+    strategyAtEntry,
+    strategyDecisionReason,
+    overrideApplied,
+    overrideReason,
+    strategyMismatchWarning,
     riskGroup: bs?.riskGroup ?? 'n/a',
     groupTrend: displayTrend,
     exitStatus,
@@ -705,6 +758,9 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
     priceTimestamp: liveState.priceTimestamp,
     priceStaleThresholdMs: liveState.staleThresholdMs,
     priceFreshnessReason: liveState.reason,
+    exitPriceUnavailable: position.exitPriceUnavailable === true,
+    exitPriceUnavailableAt: typeof position.exitPriceUnavailableAt === 'number' ? position.exitPriceUnavailableAt : null,
+    exitPriceUnavailableReason: position.exitPriceUnavailableReason ?? null,
     spreadPct: Number.isFinite(bs?.spreadPct) ? bs?.spreadPct : null,
     quantity: position.quantity,
     usedCapitalUsd: position.quantity * position.avgEntryPrice,
@@ -782,6 +838,7 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
       warnings: [
         snapshotAudit.snapshotStatus !== 'VALID_SNAPSHOT' ? snapshotAudit.snapshotStatus : '',
         liveState.priceQuality === 'unavailable' ? 'PNL_UNAVAILABLE_LIVE_PRICE_MISSING' : '',
+        position.exitPriceUnavailable === true ? 'EXIT_CHECK_SKIPPED_NO_FRESH_CLOSE_PRICE' : '',
         liveState.priceQuality === 'fallback' ? 'FALLBACK_PRICE_USED' : '',
         liveState.priceQuality === 'stale' ? 'PNL_BASED_ON_STALE_PRICE' : '',
       ].filter(Boolean),
@@ -1029,8 +1086,18 @@ export function buildTradeV4PageModel(input: {
   activeMode?: string;
   restoringOpenPositions?: boolean;
 }): TradeV4PageModel {
-  const candidates = (input.scannerSnapshot?.candidates ?? []).map((c) =>
-    mapScannerCandidateToTradeV4View(c, input.isOrderLocked ? input.isOrderLocked(c.symbol) : false),
+  const rawCandidates = input.scannerSnapshot?.candidates ?? [];
+  const planDecisions = input.scannerSnapshot?.executionPlan?.decisions;
+  const decisionsBySymbol: ReadonlyMap<string, import('../../core/scanner/executionDecision').ExecutionDecision> | undefined = planDecisions
+    ? new Map(planDecisions.map(d => [d.symbol, d as import('../../core/scanner/executionDecision').ExecutionDecision]))
+    : undefined;
+  const candidates = rawCandidates.map((c, index) =>
+    mapScannerCandidateToTradeV4View(
+      c,
+      input.isOrderLocked ? input.isOrderLocked(c.symbol) : false,
+      index < 10 || c.status === 'BUY' || (c.warnings ?? []).length > 0 ? 'full' : 'summary',
+      decisionsBySymbol,
+    ),
   );
   if (input.scannerSnapshot?.scanId) {
     let changedTrendCount = 0;

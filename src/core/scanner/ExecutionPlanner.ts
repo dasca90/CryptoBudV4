@@ -5,6 +5,7 @@ import { buildStrategyAuditSnapshotFromCandidate } from '../strategy-audit/strat
 import { resolveEntryRiskParams } from '../trading/entry-risk-resolver';
 import { resolveAutoTargetOwnership, resolveTradingTargetOwnership } from '../trading/TradingTargetOwnership';
 import { resolveMaxSelectedPerScanConfig, type MaxSelectedPerScanSource } from '../settings/max-selected-per-scan';
+import { resolveExecutionDecision, emitCanonicalExecutionDecisionAudit, type ExecutionDecision, type ExecutionDecisionParams } from './executionDecision';
 
 export interface ExecutionPlannerInput {
   scannerSnapshot: ScannerSnapshot;
@@ -28,6 +29,106 @@ export interface ExecutionPlannerInput {
   decisionMode: 'unified';
   executionAdapter: 'paper_simulated' | 'binance_live';
   enabledRiskGroups: Record<string, boolean>;
+  runtimeCanAttemptAutoExecution?: boolean;
+}
+
+export type CanonicalExecutableCandidate = ExecutionDecision;
+
+export type CanonicalExecutableCandidateSet = {
+  scanId: string;
+  candidatesEvaluated: number;
+  executableCandidates: CanonicalExecutableCandidate[];
+  blockedCandidates: CanonicalExecutableCandidate[];
+  skippedCandidates: CanonicalExecutableCandidate[];
+  selectedCandidateForExecution: string | null;
+  noExecutionReason: string;
+  uiBuyReadySymbols: string[];
+  canonicalBuyReadySymbols: string[];
+};
+
+export function buildExecutableCandidateSet(input: {
+  scanSnapshot: ScannerSnapshot;
+  runtimeState: { canAttemptScannerAutoExecution: boolean };
+  riskState: {
+    openSymbols: string[];
+    pendingOrderSymbols: string[];
+    capital: number;
+    usedCapital: number;
+    capitalPerTrade: number;
+    maxPositions: number;
+    maxSpreadPct: number;
+  };
+}): CanonicalExecutableCandidateSet {
+  const candidates = input.scanSnapshot.candidates ?? [];
+  const capitalAvailable = Math.max(0, input.riskState.capital - input.riskState.usedCapital);
+  const capitalOk = input.riskState.capitalPerTrade > 0 && capitalAvailable >= input.riskState.capitalPerTrade;
+  const maxOpenPositionsOk = input.riskState.openSymbols.length < input.riskState.maxPositions;
+  const decisions: ExecutionDecision[] = candidates.map((candidate) => {
+    const audit = buildStrategyAuditSnapshotFromCandidate(candidate);
+    const setupResult = String(audit.setupResult ?? '');
+    const priceFresh = candidate.priceFresh ?? audit.priceFresh ?? true;
+    const spreadOk = candidate.priceFresh !== false && (candidate.spreadPct ?? 0) <= input.riskState.maxSpreadPct;
+    const tpRoomOk = candidate.tpRoomOk !== false && audit.tpRoomOk !== false;
+    const duplicateOpenPosition = input.riskState.openSymbols.includes(candidate.symbol);
+    const pendingOrder = input.riskState.pendingOrderSymbols.includes(candidate.symbol);
+
+    const params: ExecutionDecisionParams = {
+      symbol: candidate.symbol,
+      scanId: input.scanSnapshot.scanId ?? 'unknown',
+      candidateRank: candidate.rank ?? 0,
+      status: candidate.status,
+      finalExecutable: audit.finalExecutable && candidate.status === 'BUY',
+      buyAllowed: audit.buyAllowed,
+      setupResult,
+      finalExecutionStrategy: String(audit.finalExecutionStrategy ?? audit.strategySelected),
+      riskGroup: candidate.riskGroup ?? 'unknown',
+      groupName: candidate.riskGroup ?? 'unknown',
+      groupRecommendedStrategy: String(audit.groupRecommendedStrategy ?? ''),
+      groupOpenCount: input.riskState.openSymbols.filter(s => s === candidate.symbol).length,
+      groupMaxOpen: Math.floor(input.riskState.maxPositions / 5),
+      groupExposure: 0,
+      groupMaxExposure: input.riskState.capital,
+      priceFresh,
+      bookFresh: candidate.bookFresh !== false,
+      spreadOk,
+      tpRoomOk,
+      capitalOk,
+      maxOpenPositionsOk,
+      maxGroupPositionsOk: true,
+      maxGroupExposureOk: true,
+      duplicateOpenPosition,
+      pendingOrderExists: pendingOrder,
+      banned: (candidate as any).banned === true,
+      buySpacingOk: true,
+      runtimeExecutionEnabled: input.runtimeState.canAttemptScannerAutoExecution,
+    };
+    const decision = resolveExecutionDecision(params);
+    emitCanonicalExecutionDecisionAudit(decision);
+    return decision;
+  });
+
+  const decisionsWithSelected = decisions.map((d) => ({
+    ...d,
+    selectedForExecution: d.finalDecision === 'EXECUTE',
+  }));
+
+  const uiBuyReadySymbols = decisionsWithSelected
+    .filter((d) => d.finalExecutable && d.buyAllowed)
+    .map((d) => d.symbol);
+  const executableCandidates = decisionsWithSelected.filter((d) => d.selectedForExecution);
+  const blockedCandidates = decisionsWithSelected.filter((d) => !d.finalExecutable || !d.buyAllowed);
+  const skippedCandidates = decisionsWithSelected.filter((d) => d.finalExecutable && d.buyAllowed && !d.selectedForExecution);
+  return {
+    scanId: input.scanSnapshot.scanId ?? 'unknown',
+    candidatesEvaluated: decisionsWithSelected.length,
+    executableCandidates,
+    blockedCandidates,
+    skippedCandidates,
+    selectedCandidateForExecution: executableCandidates[0]?.symbol ?? null,
+    noExecutionReason: executableCandidates.length > 0 ? 'none' : (skippedCandidates[0]?.finalNoBuyReason ?? blockedCandidates[0]?.finalNoBuyReason ?? 'NO_BUY_READY_CANDIDATES'),
+    uiBuyReadySymbols,
+    canonicalBuyReadySymbols: executableCandidates.map((d) => d.symbol),
+  };
 }
 
 function computeExecutionScore(c: ScannerCandidate): number {
@@ -115,6 +216,24 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   const capitalAvailable = Math.max(0, capital - usedCapital);
   const capitalLimitedSlots = capitalPerTrade > 0 ? Math.floor(capitalAvailable / capitalPerTrade) : 0;
   logger.info(`CAPITAL_PER_COIN_ORDER_SIZE_AUDIT: symbol=none mode=${executionAdapter === 'paper_simulated' ? 'demo' : 'live'} userTradingCapital=${capital} userCapitalPerCoin=${capitalPerTrade} persistedCapitalPerCoin=${capitalPerTrade} resolvedCapitalPerCoin=${capitalPerTrade} finalOrderNotionalUsd=0 qty=0 entryPrice=0 availableCapital=${capital} usedCapitalBefore=${usedCapital} usedCapitalAfter=${usedCapital} adjustmentReason=planner_limits source=persisted`);
+  const canonicalSet = buildExecutableCandidateSet({
+    scanSnapshot: scannerSnapshot,
+    runtimeState: { canAttemptScannerAutoExecution: input.runtimeCanAttemptAutoExecution ?? true },
+    riskState: { openSymbols, pendingOrderSymbols, capital, usedCapital, capitalPerTrade, maxPositions, maxSpreadPct },
+  });
+  const excludedUiReady = canonicalSet.skippedCandidates.map((c) => `${c.symbol}:${c.finalNoBuyReason}`);
+  logger.info(`EXECUTION_SELECTION_INTEGRITY_AUDIT: scanId=${canonicalSet.scanId} uiBuyReadySymbols=${canonicalSet.uiBuyReadySymbols.join('|') || 'none'} canonicalBuyReadySymbols=${canonicalSet.canonicalBuyReadySymbols.join('|') || 'none'} executableCandidateSymbols=${canonicalSet.executableCandidates.map((c) => c.symbol).join('|') || 'none'} selectedCandidateSymbol=${canonicalSet.selectedCandidateForExecution ?? 'none'} executionSubmitted=false adapterCalled=false noExecutionReason=${canonicalSet.noExecutionReason} excludedUiReady=${excludedUiReady.join('|') || 'none'} mismatchDetected=${String(canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0)} mismatchReason=${canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0 ? canonicalSet.noExecutionReason : 'none'} invariantOk=${String(!(canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0 && excludedUiReady.length === 0))}`);
+  if (canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0 && excludedUiReady.length === 0) {
+    logger.error(`EXECUTION_SELECTION_INTEGRITY_FAILED: scanId=${canonicalSet.scanId} uiBuyReadySymbols=${canonicalSet.uiBuyReadySymbols.join('|')} canonicalBuyReadySymbols=none executableCandidateSymbols=none noExecutionReason=UNKNOWN_EXECUTION_SELECTION_BUG candidateSnapshots=${JSON.stringify((scannerSnapshot.candidates ?? []).filter((c) => canonicalSet.uiBuyReadySymbols.includes(c.symbol)).map((c) => ({ symbol: c.symbol, status: c.status, finalExecutable: (c as any).finalExecutable, buyAllowed: (c as any).buyAllowed, mainReason: c.mainReason, blockReasons: c.blockReasons })))}`);
+  }
+  // Build canonical reason lookup from buildExecutableCandidateSet
+  const canonicalDecisionBySymbol = new Map<string, string>();
+  for (const d of [...canonicalSet.executableCandidates, ...canonicalSet.blockedCandidates, ...canonicalSet.skippedCandidates]) {
+    if (d.finalNoBuyReason && d.finalNoBuyReason !== 'none') {
+      canonicalDecisionBySymbol.set(d.symbol, d.finalNoBuyReason);
+    }
+  }
+
   // Selection limit: only real safety gates — max positions and capital. No artificial maxSelectedPerScan cap.
   const selectionLimit = Math.max(0, Math.min(availableSlots, capitalLimitedSlots));
   const noBuyReasons: string[] = [];
@@ -256,6 +375,9 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
     }
 
     const strategyAudit = buildStrategyAuditSnapshotFromCandidate(candidateWithPlan);
+    if (!candidateWithPlan.riskGroup) {
+      logger.warn(`STRATEGY_MISMATCH_BLOCK_AUDIT: symbol=${symbol} finalExecutionStrategy=${strategyAudit.strategySelected} strategyAtEntry=${strategyAudit.strategyAtEntry ?? strategyAudit.strategySelected} positionStrategy=pending setupResult=${strategyAudit.setupResult ?? 'n/a'} setupMatchesStrategy=true marketBestFit=${strategyAudit.marketRecommendedStrategy ?? 'n/a'} groupRecommendedStrategy=${strategyAudit.groupRecommendedStrategy ?? 'n/a'} groupName=n/a strategyMismatchDetected=false mismatchAllowed=true mismatchReason=missing_group_metadata overrideApplied=${String(strategyAudit.overrideApplied ?? false)} overrideReason=${strategyAudit.overrideReason ?? 'none'} action=warn_missing_group_metadata_final_buy_evaluation`);
+    }
     if (!skipped && !strategyAudit.finalExecutable) {
       skipped = true;
       const missing = strategyAudit.setupMissing.map((s) => s.key);
@@ -263,7 +385,9 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
         ? 'dip_missing'
         : missing.includes('reboundConfirmed')
           ? 'rebound_missing'
-          : 'finalExecutable_false';
+          : strategyAudit.dynamicSetupContext?.primaryBlocker && strategyAudit.dynamicSetupContext.primaryBlocker !== 'finalExecutable_false'
+            ? strategyAudit.dynamicSetupContext.primaryBlocker
+            : 'unknown_final_executable_bug';
       skipReason = `strategy_setup_not_met:${exactReason}`;
       skipGate = 'ExecutionPlannerFinalGate';
       isRetryable = true;
@@ -362,7 +486,7 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
     }
 
     if (skipped) {
-      skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: skipReason, gate: skipGate, isRetryable });
+      skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: skipReason, gate: skipGate, isRetryable, finalNoBuyReason: canonicalDecisionBySymbol.get(symbol) });
       const isOverextended = Array.isArray(candidateWithPlan.blockReasons) && candidateWithPlan.blockReasons.some(r => String(r).toLowerCase().includes('overextended'));
       const isCandleExhaustion = Array.isArray(candidateWithPlan.blockReasons) && candidateWithPlan.blockReasons.some(r => String(r).toLowerCase().includes('candle'));
       const OVEREXTENSION_THRESHOLD_PCT = 1.8;
@@ -388,7 +512,7 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
         limitToken = 'CAPITAL_BLOCKED';
         limitReason = 'BLOCK_CAPITAL_LIMIT';
       }
-      skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: limitReason, gate: 'ExecutionPlannerLimit', isRetryable: true });
+      skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: limitReason, gate: 'ExecutionPlannerLimit', isRetryable: true, finalNoBuyReason: canonicalDecisionBySymbol.get(symbol) });
       skippedReasons.push(limitToken);
       if (!noBuyReasons.includes(limitToken)) noBuyReasons.push(limitToken);
       auditIntegrity(false, limitToken);
@@ -418,6 +542,16 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
       strategySource: String(decision?.strategySource ?? candidateWithPlan.strategySource ?? 'unknown'),
       strategySourceDetail: decision?.strategySourceDetail ?? candidateWithPlan.strategySourceDetail ?? null,
       strategyReason: decision?.strategyReason ?? candidateWithPlan.strategyReason ?? decision?.reason ?? null,
+      marketBestFit: strategyAudit.marketRecommendedStrategy ?? decision?.marketAnalyzerBestFit ?? candidateWithPlan.marketAnalyzerBestFit ?? null,
+      groupRecommendedStrategy: strategyAudit.groupRecommendedStrategy ?? decision?.groupRecommendedStrategy ?? candidateWithPlan.groupRecommendedStrategy ?? null,
+      autoBotsPerCoinStrategy: strategyAudit.autoBotsPerCoinStrategy ?? decision?.perCoinSelectedStrategy ?? candidateWithPlan.perCoinSelectedStrategy ?? null,
+      finalExecutionStrategy: strategyAudit.finalExecutionStrategy ?? strategyAudit.strategySelected,
+      strategyAtEntry: strategyAudit.strategyAtEntry ?? strategyAudit.strategySelected,
+      strategyDecisionReason: strategyAudit.strategyDecisionReason ?? decision?.strategyReason ?? candidateWithPlan.strategyReason ?? null,
+      overrideApplied: strategyAudit.overrideApplied ?? false,
+      overrideReason: strategyAudit.overrideReason ?? null,
+      mismatchAllowed: strategyAudit.mismatchAllowed ?? true,
+      mismatchReason: strategyAudit.mismatchReason ?? null,
       entryPrice: entryPlan.price,
       quantity: entryPlan.quantity,
       capitalAllocated: capitalPerTrade,
@@ -478,6 +612,13 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
       strategyReason: decision?.strategyReason ?? candidateWithPlan.strategyReason ?? decision?.reason,
       groupTrend: decision?.groupTrend ?? candidateWithPlan.groupTrend ?? 'n/a',
       groupRecommendedStrategy: decision?.groupRecommendedStrategy ?? candidateWithPlan.groupRecommendedStrategy ?? 'n/a',
+      marketBestFit: scannerAutoEntryConfigSnapshot.marketBestFit ?? null,
+      autoBotsPerCoinStrategy: scannerAutoEntryConfigSnapshot.autoBotsPerCoinStrategy ?? null,
+      finalExecutionStrategy: scannerAutoEntryConfigSnapshot.finalExecutionStrategy,
+      strategyAtEntry: scannerAutoEntryConfigSnapshot.strategyAtEntry,
+      strategyDecisionReason: scannerAutoEntryConfigSnapshot.strategyDecisionReason,
+      overrideApplied: scannerAutoEntryConfigSnapshot.overrideApplied,
+      overrideReason: scannerAutoEntryConfigSnapshot.overrideReason,
       confidence: candidateWithPlan.confidence,
       score,
       plannedAction: action,
@@ -521,6 +662,8 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
     canExecute,
     selectedCandidates,
     skippedCandidates,
+    decisions: [...canonicalSet.executableCandidates, ...canonicalSet.blockedCandidates, ...canonicalSet.skippedCandidates],
+    canonicalExecutableSet: canonicalSet as unknown as Record<string, unknown>,
     noBuyReasons: topNoBuy,
     plannerInputCount: executionPool.length,
     plannerInputWithEntryPlan,
