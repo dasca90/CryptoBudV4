@@ -5,6 +5,7 @@ import type {
 import type { AutoStrategyRouterInput, GroupTrendInput } from './AutoStrategyRouter';
 import type { AutoStrategyDecision, AutoStrategyName, ExecutionPlan, PaperAutoExecutionResult } from '../types';
 import { buildExecutionPlan } from './ExecutionPlanner';
+import { emitExecutionPipelineStageAudit } from './executionDecision';
 import { buildExecutionModeParityAudit, getExecutionAdapterDisplay, getExecutionControllerDisplay } from '../../lib/execution/executionDisplay';
 import { revalidateCandidate } from './PaperAutoExecutionController';
 import { revalidateLiveCandidate } from './BinanceLiveExecutionController';
@@ -51,6 +52,8 @@ function nextScannerInstanceId(): string {
 
 const MARKET_SCANNER_SOURCE_VERSION = 'market-scanner-selected-to-execution-handoff-root-cause-v3';
 const MARKET_SCANNER_BUILD_TIME = new Date().toISOString();
+const MARKET_SCANNER_APP_VERSION = '4.0.0';
+const MARKET_SCANNER_GIT_COMMIT = '0bd4af3';
 const MARKET_SCANNER_LOG_SINK_NAME = 'logger.getLogs/logger.export';
 
 export type BrainDecideFn = (symbol: string, price: MarketPrice) => Promise<TraderBrainDecision>;
@@ -912,7 +915,7 @@ export class MarketScanner {
       if (!canonicalState.invariantOk) {
         logger.warn(`RUNTIME_AUTOBOTS_STATE_INTEGRITY_FAILED: scanId=${this.currentScanId ?? 'pre_scan'} executionMode=${canonicalState.executionMode} buildMode=${canonicalState.buildMode} uiAutoBotsButtonState=${String(canonicalState.uiAutoBotsButtonState)} resolvedAutoBotsEnabled=${String(canonicalState.resolvedAutoBotsEnabled)} strategySourceResolved=${canonicalState.strategySourceResolved} dynamicPerCoinStrategy=${String(canonicalState.dynamicPerCoinStrategy)} scannerAutoEnabled=${String(canonicalState.scannerAutoEnabled)} paperAutoExecutionEnabled=${String(canonicalState.paperAutoExecutionEnabled)} marketScannerPaperAutoEnabled=${String(canonicalState.marketScannerPaperAutoEnabled)} manualOverrideEnabled=${String(canonicalState.manualOverrideEnabled)} blockedReason=${canonicalState.blockedReason} action=block_buy message="AutoBots state mismatch - UI shows ON but runtime is disabled."`);
       }
-      logger.info(`SCANNER_AUTO_EXECUTION_GATE_AUDIT: scanId=${this.currentScanId ?? 'pre_scan'} source=MarketScanner.scan paperAutoExecutionEnabled=${String(canonicalState.paperAutoExecutionEnabled)} resolvedPaperAutoExecutionEnabled=${String(canonicalState.resolvedAutoBotsEnabled)} marketScannerPaperAutoEnabled=${String(canonicalState.marketScannerPaperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} autoBotsEnabled=${String(canonicalState.resolvedAutoBotsEnabled)} scannerAutoEnabled=${String(canonicalState.scannerAutoEnabled)} executionMode=${activeExecutionMode} activeScannerInstanceId=${this.scannerInstanceId} appScannerInstanceId=${this.scannerInstanceId} autoRuntimeScannerInstanceId=${this.scannerInstanceId} buildTimestamp=${MARKET_SCANNER_BUILD_TIME} sourceFileVersion=${MARKET_SCANNER_SOURCE_VERSION} canAttemptScannerAutoExecution=${String(canonicalState.canAttemptScannerAutoExecution)} skipReason=${canonicalState.finalBlockedReason}`);
+      logger.info(`SCANNER_AUTO_EXECUTION_GATE_AUDIT: scanId=${this.currentScanId ?? 'pre_scan'} source=MarketScanner.scan paperAutoExecutionEnabled=${String(canonicalState.paperAutoExecutionEnabled)} resolvedPaperAutoExecutionEnabled=${String(canonicalState.resolvedAutoBotsEnabled)} marketScannerPaperAutoEnabled=${String(canonicalState.marketScannerPaperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} autoBotsEnabled=${String(canonicalState.resolvedAutoBotsEnabled)} scannerAutoEnabled=${String(canonicalState.scannerAutoEnabled)} executionMode=${activeExecutionMode} activeScannerInstanceId=${this.scannerInstanceId} appScannerInstanceId=${this.scannerInstanceId} autoRuntimeScannerInstanceId=${this.scannerInstanceId} buildTimestamp=${MARKET_SCANNER_BUILD_TIME} appVersion=${MARKET_SCANNER_APP_VERSION} gitCommit=${MARKET_SCANNER_GIT_COMMIT} tauriMode=${canonicalState.tauriDetected ? 'tauri' : 'browser'} sourceFileVersion=${MARKET_SCANNER_SOURCE_VERSION} canAttemptScannerAutoExecution=${String(canonicalState.canAttemptScannerAutoExecution)} skipReason=${canonicalState.finalBlockedReason}`);
     }
     if (!this.brainDecide) {
       logger.warn('SCANNER: brainDecide not set, skipping scan');
@@ -2137,6 +2140,7 @@ export class MarketScanner {
     let capitalSkippedCount = 0;
     let preAdapterAllowedCount = 0;
     executionSelectedCount = selectedBuyCandidates.length;
+    const perSymbolLifecycle = new Map<string, { adapterCalled: boolean; adapterAccepted: boolean; executed: boolean; positionCreated: boolean; journalPersisted: boolean }>();
     const perSymbolDecisions: Array<{ symbol: string; reason: string; passed: boolean }> = [];
     const openPositionsBeforeHandoff = openSymbols.length;
     let openPositionsAfterHandoff = openSymbols.length;
@@ -2473,6 +2477,13 @@ export class MarketScanner {
                 if (paperAutoResult.executed) orderFilledCount++;
                 if (paperAutoResult.positionCreated) positionCreatedCount++;
                 if (paperAutoResult.positionCreated) journalPersistedCount++;
+                perSymbolLifecycle.set(sc.symbol, {
+                  adapterCalled: !!paperAutoResult.adapterCalled,
+                  adapterAccepted: !!paperAutoResult.adapterCalled && !paperAutoResult.blocked,
+                  executed: !!paperAutoResult.executed,
+                  positionCreated: !!paperAutoResult.positionCreated,
+                  journalPersisted: !!paperAutoResult.positionCreated,
+                });
                 openPositionsAfterHandoff = this.executionOpenSymbolsFn?.().length ?? paperAutoResult.openPositionsAfter ?? openPositionsAfterHandoff;
                 if (paperAutoResult.blocked) {
                   skippedSymbols.push(sc.symbol);
@@ -2672,6 +2683,13 @@ export class MarketScanner {
             if (bfResult.executed) orderFilledCount++;
             if (bfResult.positionCreated) positionCreatedCount++;
             if (bfResult.positionCreated) journalPersistedCount++;
+            perSymbolLifecycle.set(bc.symbol, {
+              adapterCalled: !!bfResult.adapterCalled,
+              adapterAccepted: !!bfResult.adapterCalled && !bfResult.blocked,
+              executed: !!bfResult.executed,
+              positionCreated: !!bfResult.positionCreated,
+              journalPersisted: !!bfResult.positionCreated,
+            });
             openPositionsAfterHandoff = this.executionOpenSymbolsFn?.().length ?? bfResult.openPositionsAfter ?? openPositionsAfterHandoff;
             if (bfResult.blocked) {
               skippedSymbols.push(bc.symbol);
@@ -2718,6 +2736,21 @@ export class MarketScanner {
       logger.warn(`EXECUTION_BACKFILL_AFTER_RISK_BLOCK_AUDIT: scanId=${scanId} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} initialSelectedSymbols=${initialSelectedSymbols.join('|') || 'none'} failedBeforeAdapterSymbols=${attemptedSymbols.join('|') || 'none'} riskBlockedSymbols=${riskBlockedSymbols.join('|') || 'none'} riskBlockedGroups=${riskBlockedGroups.join('|') || 'none'} riskBlockedReasonsBySymbol=${Object.entries(skipReasonsBySymbol).filter(([,r]) => String(r).includes('risk_blocked') || String(r).includes('pre_adapter_block')).map(([s,r]) => `${s}:${r}`).join('|') || 'none'} createdPositionSymbols=none positionCreatedCount=${positionCreatedCount} availableSlotsBefore=${executionPlan.availableSlots} availableSlotsAfter=${Math.max(0, this.executionMaxPositions - posManagerAfter)} nextBackfillSymbolsTried=${backfillCandidateSymbols.join('|') || 'none'} nextBackfillSymbolsCreated=none backfillSkippedBecauseGlobalRiskLimit=${String(riskBlockedGroups.length > 0)} finalCreatedCount=${positionCreatedCount}`);
     }
     submitAttemptedCount = attemptedSymbols.length;
+    if (executionPlan.decisions) {
+      for (const decision of executionPlan.decisions) {
+        if (selectedBuyCandidates.some(c => c.symbol === decision.symbol)) decision.selectedForExecution = true;
+        if (attemptedSymbols.includes(decision.symbol)) decision.submitAttempted = true;
+        const ls = perSymbolLifecycle.get(decision.symbol);
+        if (ls) {
+          decision.adapterCalled = ls.adapterCalled;
+          decision.adapterAccepted = ls.adapterAccepted;
+          decision.orderFilled = ls.executed;
+          decision.positionCreated = ls.positionCreated;
+          decision.journalPersisted = ls.journalPersisted;
+        }
+        emitExecutionPipelineStageAudit(decision);
+      }
+    }
     logger.info(`ADAPTER_CALL_PROOF_AUDIT: scanId=${scanId} executionSelectedCount=${executionSelectedCount} submitAttemptedCount=${submitAttemptedCount} selectedCount=${selectedBuyCandidates.length} allowedForAdapterCount=${preAdapterAllowedCount} adapterCalledCount=${adapterCalledCount} adapterAcceptedCount=${adapterAcceptedCount} orderFilledCount=${orderFilledCount} adapterAttemptedSymbols=${attemptedSymbols.join('|') || 'none'} adapterRejectedSymbols=none positionCreatedSymbols=${positionCreatedCount > 0 ? attemptedSymbols.join('|') : 'none'} journalPersistedCount=${journalPersistedCount} telegramSentCount=${telegramSentCount} openPositionsBefore=${openPositionsBeforeHandoff} openPositionsAfter=${openPositionsAfterHandoff} exactStopReason=${adapterCalledCount === 0 ? (selectedBuyCandidates.length === 0 ? 'no_candidates_selected' : preAdapterAllowedCount === 0 ? 'all_failed_revalidation' : 'post_revalidation_block') : positionCreatedCount === 0 ? 'adapter_called_but_no_fill' : 'ok'}`);
     logger.info(`BUY_EXECUTION_PIPELINE_LIFECYCLE_AUDIT: scanId=${scanId} scannerCandidates=${rankedCandidatesToAnnotate.length} executionPoolCandidates=${executionPlan.executionPoolSize} executionSelectedCount=${executionSelectedCount} submitAttemptedCount=${submitAttemptedCount} selectedForExecutionCandidates=${selectedBuyCandidates.length} adapterSubmittedCandidates=${attemptedSymbols.length} adapterCalledCount=${adapterCalledCount} adapterAcceptedCount=${adapterAcceptedCount} orderFilledCount=${orderFilledCount} positionsCreated=${positionCreatedCount} journalPersistedCount=${journalPersistedCount} telegramSentCount=${telegramSentCount} scannerFinished=true scannerBuyReadyCount=${buyCount} selectedForExecutionCount=${selectedBuyCandidates.length} executionPlannerCreated=true controllerReceivedCount=${attemptedSymbols.length} paperAutoBuyFnCalled=${String(adapterCalledCount > 0)} executePlannedScannerBuyCalled=${String(adapterCalledCount > 0)} preAdapterValidationPassedCount=${preAdapterAllowedCount} fillCreatedCount=${orderFilledCount} positionCreatedCount=${positionCreatedCount} openPositionsBefore=${openPositionsBeforeHandoff} openPositionsAfter=${openPositionsAfterHandoff} stopStage=${adapterCalledCount === 0 ? 'pre_adapter' : 'post_adapter'} exactStopReason=${adapterCalledCount === 0 ? (duplicateSkippedCount > 0 ? 'duplicate_symbols' : preAdapterAllowedCount === 0 ? 'all_blocked_by_revalidation' : 'all_blocked_by_paperAutoBuyFn') : 'see_adapter_call_proof'}`);
     logger.info(`MULTI_BUY_HANDOFF_AUDIT: scanId=${scanId} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} executionSelectedCount=${executionSelectedCount} submitAttemptedCount=${submitAttemptedCount} selectedCount=${selectedBuyCandidates.length} buyableCandidatesCount=${selectedBuyCandidates.length} controllerReceivedCount=${attemptedSymbols.length} attemptedSymbols=${attemptedSymbols.join('|') || 'none'} skippedSymbols=${skippedSymbols.join('|') || 'none'} skipReasonsBySymbol=${Object.entries(skipReasonsBySymbol).map(([symbol, reason]) => `${symbol}:${String(reason).replace(/\s+/g, '_')}`).join('|') || 'none'} adapterCalledCount=${adapterCalledCount} adapterAcceptedCount=${adapterAcceptedCount} orderFilledCount=${orderFilledCount} positionCreatedCount=${positionCreatedCount} journalPersistedCount=${journalPersistedCount} telegramSentCount=${telegramSentCount} openPositionsBefore=${openPositionsBeforeHandoff} openPositionsAfter=${openPositionsAfterHandoff} availableSlotsBefore=${executionPlan.availableSlots} availableSlotsAfter=${Math.max(0, this.executionMaxPositions - openPositionsAfterHandoff)} safetyLimitApplied=${skippedSymbols.length > 0 ? 'per_candidate_revalidation' : 'none'}`);
@@ -2738,7 +2771,10 @@ export class MarketScanner {
     if (preFilterBuyCount > 0 && finalExecutionPool.length > 0 && selectedBuyCandidates.length > 0 && attemptedSymbols.length === 0 && skippedSymbols.length === 0) {
       logger.error(`SCANNER_EXECUTION_PHASE_MISSING_FATAL: scanId=${scanId} preFilterBuyCount=${preFilterBuyCount} poolSize=${finalExecutionPool.length} selectedCount=${selectedBuyCandidates.length} attemptedCount=0 skippedCount=0 reason=selected_candidates_never_routed_to_any_controller`);
     }
-    logger.info(`SCANNER_EXECUTION_PHASE_END: scanId=${scanId} preFilterBuyCount=${preFilterBuyCount} poolSize=${finalExecutionPool.length} executionSelectedCount=${executionSelectedCount} submitAttemptedCount=${submitAttemptedCount} selectedCount=${selectedBuyCandidates.length} attemptedCount=${attemptedSymbols.length} adapterCalledCount=${adapterCalledCount} adapterAcceptedCount=${adapterAcceptedCount} orderFilledCount=${orderFilledCount} positionCreatedCount=${positionCreatedCount} journalPersistedCount=${journalPersistedCount} telegramSentCount=${telegramSentCount} adapterCalled=${String(adapterCalledCount > 0)} positionCreated=${String(positionCreatedCount > 0)} handoffEmitted=${String(handoffEmitted)} canExecute=${String(executionPlan.canExecute)} autoExecutionEnabled=${this.paperAutoEnabled} skippedSymbols=${skippedSymbols.join('|') || 'none'}`);
+    {
+      const cs = this.getCanonicalAutoExecutionState();
+      logger.info(`SCANNER_EXECUTION_PHASE_END: scanId=${scanId} preFilterBuyCount=${preFilterBuyCount} poolSize=${finalExecutionPool.length} executionSelectedCount=${executionSelectedCount} submitAttemptedCount=${submitAttemptedCount} selectedCount=${selectedBuyCandidates.length} attemptedCount=${attemptedSymbols.length} adapterCalledCount=${adapterCalledCount} adapterAcceptedCount=${adapterAcceptedCount} orderFilledCount=${orderFilledCount} positionCreatedCount=${positionCreatedCount} journalPersistedCount=${journalPersistedCount} telegramSentCount=${telegramSentCount} adapterCalled=${String(adapterCalledCount > 0)} positionCreated=${String(positionCreatedCount > 0)} handoffEmitted=${String(handoffEmitted)} canExecute=${String(executionPlan.canExecute)} autoExecutionEnabled=${this.paperAutoEnabled} skippedSymbols=${skippedSymbols.join('|') || 'none'} buildMode=${cs.buildMode} appVersion=${MARKET_SCANNER_APP_VERSION} gitCommit=${MARKET_SCANNER_GIT_COMMIT} buildTimestamp=${MARKET_SCANNER_BUILD_TIME} tauriMode=${cs.tauriDetected ? 'tauri' : 'browser'}`);
+    }
     this.lastPaperAutoResult = paperAutoResult ?? null;
     this.lastLiveExecutionResult = liveExecutionResult ?? null;
     const controllerReceivedCount = attemptedSymbols.length;
