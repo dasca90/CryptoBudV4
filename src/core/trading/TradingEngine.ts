@@ -16,7 +16,7 @@ import { Journal } from '../persistence/Journal';
 import { MarketDataFeed } from '../../utils/MarketDataFeed';
 import { EntryGate } from '../entry-gate/EntryGate';
 import { ExitEngine } from '../exits/ExitEngine';
-import { resolveClosePrice } from '../market-data/close-price-resolver';
+import { formatClosePriceUnavailableAudit, resolveClosePrice } from '../market-data/close-price-resolver';
 import { createMLLabel } from '../ml/ml-labeler';
 import { evaluateTradeMLQuality } from '../ml/ml-data-quality';
 import { AutoRuntime } from './AutoRuntime';
@@ -78,6 +78,7 @@ export class TradingEngine {
   private _consecutiveLosses = 0;
   private lastRiskBlockReason: string | null = null;
   private lastPreAdapterBlockReason: string | null = null;
+  private emittedBuyTradeAuditPositionIds = new Set<string>();
   private _winRate = 0.5;
   private _maxDrawdownPercent = 0;
   private scannerBrainService: ScannerBrainService;
@@ -195,7 +196,8 @@ export class TradingEngine {
         logger.info(`POSITION_CREATE_ATTEMPT: symbol=${symbol} openPositionsBefore=${openBefore} source=TradingEngine.defaultPaperAutoBuyFn`);
         await this.executePlannedScannerBuy(candidate, plannedCandidate);
         const openAfter = this.positionManager.getOpenPositions().length;
-        const created = this.positionManager.hasOpenPosition(symbol) && openAfter > openBefore;
+        const createdPosition = this.positionManager.getPositionBySymbol(symbol);
+        const created = Boolean(createdPosition) && openAfter > openBefore;
         const afterExecution = this.adapter.lastExecutionResult;
         const adapterWasCalled = afterExecution !== beforeExecution;
         const adapterResult = adapterWasCalled ? (afterExecution?.status ?? 'UNKNOWN') : 'NOT_SUBMITTED';
@@ -226,7 +228,7 @@ export class TradingEngine {
           const capitalOk = this._accountBalance >= (plannedCandidate.entryPlan?.quantity ?? 0) * (plannedCandidate.entryPlan?.price ?? 0);
           const maxPositionsOk = openSymbols.length < 50;
           logger.info(`PRE_ADAPTER_CANDIDATE_VERDICT_AUDIT: symbol=${symbol} selectedRank=${plannedCandidate.rank ?? 0} requestedStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} selectedStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} runtimeActiveStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} finalStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} finalEntryRule=${auditSnapshot?.finalEntryRule ?? 'n/a'} finalExecutable=${String(auditSnapshot?.finalExecutableAtEntry ?? auditSnapshot?.finalExecutable ?? 'n/a')} buyAllowed=${String(auditSnapshot?.buyAllowed ?? 'n/a')} setupResult=${auditSnapshot?.setupResult ?? 'n/a'} openPositionDuplicate=${String(isDuplicate)} pendingOrderDuplicate=false banned=${String(isBanned)} spreadOk=true tpRoomOk=${String(auditSnapshot?.setupResult !== 'SPREAD_TOO_HIGH')} priceFresh=true capitalOk=${String(capitalOk)} maxOpenPositionsOk=${String(maxPositionsOk)} allowedForAdapter=${String(!isDuplicate && !isBanned)} adapterCalled=false positionCreated=false blockReason=${failReason}`);
-          logger.warn(`EXECUTION_PRE_ADAPTER_REJECTION_AUDIT: symbol=${symbol} selectedStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} finalEntryRule=${auditSnapshot?.finalEntryRule ?? 'n/a'} finalExecutable=${String(auditSnapshot?.finalExecutableAtEntry ?? auditSnapshot?.finalExecutable ?? 'n/a')} buyAllowed=${String(auditSnapshot?.buyAllowed ?? 'n/a')} realRejectReason=${failReason} hasRiskBlockReason=${String(!!this.lastRiskBlockReason)} hasPreAdapterBlockReason=${String(!!this.lastPreAdapterBlockReason)}`);
+          logger.info(`EXECUTION_PRE_ADAPTER_REJECTION_AUDIT: symbol=${symbol} selectedStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} finalEntryRule=${auditSnapshot?.finalEntryRule ?? 'n/a'} finalExecutable=${String(auditSnapshot?.finalExecutableAtEntry ?? auditSnapshot?.finalExecutable ?? 'n/a')} buyAllowed=${String(auditSnapshot?.buyAllowed ?? 'n/a')} realRejectReason=${failReason} hasRiskBlockReason=${String(!!this.lastRiskBlockReason)} hasPreAdapterBlockReason=${String(!!this.lastPreAdapterBlockReason)} severity=INFO actionable=false invariantOk=true failureReason=none`);
         }
         return {
           attempted: true,
@@ -238,6 +240,8 @@ export class TradingEngine {
           stage: created ? 'PositionOpened' as const : (adapterWasCalled && afterExecution?.success ? 'DemoFillCreated' as const : 'ExecutionFailed' as const),
           adapterCalled: adapterWasCalled,
           adapterResult,
+          orderId: adapterWasCalled ? (afterExecution as any)?.orderId : undefined,
+          positionId: created ? createdPosition?.tradeId : undefined,
           positionCreateAttempted: true,
           positionCreated: created,
           openPositionsBefore: openBefore,
@@ -365,10 +369,21 @@ export class TradingEngine {
     }
 
     const pos = brain.position;
-    const priceRes = await resolveClosePrice(brain.coin, 'SELL');
+    const priceRes = await resolveClosePrice(brain.coin, 'SELL', {
+      lastKnownPrice: pos.currentPrice,
+      lastKnownPriceAt: pos.priceTimestamp,
+      entrySnapshotPrice: pos.avgEntryPrice,
+    });
     const exitPrice = priceRes.price;
 
     if (exitPrice <= 0) {
+      logger.warn(formatClosePriceUnavailableAudit({
+        resolution: priceRes,
+        symbol: request.symbol,
+        positionId: pos.tradeId,
+        executionMode: brain.mode,
+        exitTickSkipped: true,
+      }));
       logger.warn(`Manual sell blocked: close price unavailable for ${request.symbol}`);
       return;
     }
@@ -541,6 +556,8 @@ export class TradingEngine {
             currentPrice: price.last,
             lastPrice: price.last,
             priceTimestamp: price.timestamp,
+            exitPriceUnavailable: false,
+            exitPriceUnavailableReason: 'none',
             unrealizedPnlPercent: unrealizedPnlPct,
           });
           if (changed) {
@@ -606,6 +623,8 @@ export class TradingEngine {
           currentPrice: price,
           lastPrice: price,
           priceTimestamp: Date.now() - Math.max(0, priceAgeMs),
+          exitPriceUnavailable: false,
+          exitPriceUnavailableReason: 'none',
           unrealizedPnlPercent: unrealizedPnlPct,
         });
         if (Math.abs(unrealizedPnlPct - previousPnlPct) > 0.001) {
@@ -636,14 +655,45 @@ export class TradingEngine {
       }
       try {
         exitEvalCount++;
-        const priceRes = await resolveClosePrice(pos.coin, 'SELL');
+        const priceRes = await resolveClosePrice(pos.coin, 'SELL', {
+          lastKnownPrice: pos.currentPrice,
+          lastKnownPriceAt: pos.priceTimestamp,
+          entrySnapshotPrice: pos.avgEntryPrice,
+        });
         const exitPrice = priceRes.price;
-        const markPrice = this.feed.getLastPrice(pos.coin);
+        if (exitPrice <= 0) {
+          this.positionManager.updatePosition(pos.coin, {
+            exitPriceUnavailable: true,
+            exitPriceUnavailableAt: Date.now(),
+            exitPriceUnavailableReason: priceRes.unavailableReason ?? 'no_fresh_close_price',
+          });
+          logger.warn(formatClosePriceUnavailableAudit({
+            resolution: priceRes,
+            symbol: pos.coin,
+            positionId: pos.tradeId,
+            executionMode: brain.mode,
+            exitTickSkipped: true,
+          }));
+          logger.warn(`Close price unavailable for ${pos.coin}, skipping exit tick`);
+          continue;
+        }
+        this.positionManager.updatePosition(pos.coin, {
+          exitPriceUnavailable: false,
+          exitPriceUnavailableReason: 'none',
+        });
+        const markPrice = exitPrice;
         const pnlPct = pos.avgEntryPrice > 0 ? ((markPrice > 0 ? markPrice : exitPrice) - pos.avgEntryPrice) / pos.avgEntryPrice * 100 : 0;
         const stopTriggerPrice = pos.stopLossPercent > 0 ? pos.avgEntryPrice * (1 - pos.stopLossPercent / 100) : 0;
         const shouldStopLossSell = markPrice > 0 && stopTriggerPrice > 0 && markPrice <= stopTriggerPrice;
         const shouldTakeProfitSell = pos.tp1Percent > 0 && markPrice > 0 && markPrice >= pos.avgEntryPrice * (1 + pos.tp1Percent / 100);
-        logger.info(`EXIT_EVALUATION_AUDIT: symbol=${pos.coin} positionId=${pos.tradeId ?? 'none'} strategyAtEntry=${pos.buySnapshot?.selectedStrategy ?? 'n/a'} entryPrice=${pos.avgEntryPrice} markPrice=${markPrice > 0 ? markPrice : exitPrice} markPriceSource=${markPrice > 0 ? 'feed' : priceRes.source} priceAgeMs=${now - (priceRes.capturedAt ?? 0)} qty=${pos.quantity} unrealizedPnlUsd=${((markPrice > 0 ? markPrice : exitPrice) - pos.avgEntryPrice) * pos.quantity} unrealizedPnlPct=${pnlPct.toFixed(2)} stopLossPct=${pos.stopLossPercent} stopLossSource=position stopTriggerPrice=${stopTriggerPrice.toFixed(4)} tp1Pct=${pos.tp1Percent} tp1TriggerPrice=${(pos.avgEntryPrice * (1 + pos.tp1Percent / 100)).toFixed(4)} tp2Pct=${pos.tp2Percent} trailingEnabled=${String(pos.trailFromPeakPercent > 0)} trailingActive=${String(pos.tpArmed)} trailingStopPrice=n/a shouldStopLossSell=${String(shouldStopLossSell)} shouldTakeProfitSell=${String(shouldTakeProfitSell)} shouldTrailingSell=false finalExitDecision=${shouldStopLossSell ? 'STOP_LOSS' : shouldTakeProfitSell ? 'TAKE_PROFIT' : 'HOLD'} noExitReason=${(!shouldStopLossSell && !shouldTakeProfitSell) ? (markPrice > 0 ? 'price_above_sl_and_below_tp' : 'no_live_price') : 'none'}`);
+        const exitEvaluationTimestamp = Date.now();
+        const priceCapturedAt = priceRes.capturedAt ?? exitEvaluationTimestamp;
+        const rawPriceAgeMs = exitEvaluationTimestamp - priceCapturedAt;
+        const normalizedPriceAgeMs = Math.max(0, rawPriceAgeMs);
+        if (rawPriceAgeMs < 0) {
+          logger.warn(`PRICE_TIMESTAMP_ORDER_AUDIT: symbol=${pos.coin} positionId=${pos.tradeId ?? 'none'} evaluationTimestamp=${exitEvaluationTimestamp} priceCapturedAt=${priceCapturedAt} rawPriceAgeMs=${rawPriceAgeMs} normalizedPriceAgeMs=${normalizedPriceAgeMs} action=clamp_for_audit_only source=${priceRes.source}`);
+        }
+        logger.info(`EXIT_EVALUATION_AUDIT: symbol=${pos.coin} positionId=${pos.tradeId ?? 'none'} strategyAtEntry=${pos.buySnapshot?.selectedStrategy ?? 'n/a'} entryPrice=${pos.avgEntryPrice} markPrice=${markPrice > 0 ? markPrice : exitPrice} markPriceSource=${markPrice > 0 ? 'feed' : priceRes.source} priceAgeMs=${normalizedPriceAgeMs} rawPriceAgeMs=${rawPriceAgeMs} qty=${pos.quantity} unrealizedPnlUsd=${((markPrice > 0 ? markPrice : exitPrice) - pos.avgEntryPrice) * pos.quantity} unrealizedPnlPct=${pnlPct.toFixed(2)} stopLossPct=${pos.stopLossPercent} stopLossSource=position stopTriggerPrice=${stopTriggerPrice.toFixed(4)} tp1Pct=${pos.tp1Percent} tp1TriggerPrice=${(pos.avgEntryPrice * (1 + pos.tp1Percent / 100)).toFixed(4)} tp2Pct=${pos.tp2Percent} trailingEnabled=${String(pos.trailFromPeakPercent > 0)} trailingActive=${String(pos.tpArmed)} trailingStopPrice=n/a shouldStopLossSell=${String(shouldStopLossSell)} shouldTakeProfitSell=${String(shouldTakeProfitSell)} shouldTrailingSell=false finalExitDecision=${shouldStopLossSell ? 'STOP_LOSS' : shouldTakeProfitSell ? 'TAKE_PROFIT' : 'HOLD'} noExitReason=${(!shouldStopLossSell && !shouldTakeProfitSell) ? (markPrice > 0 ? 'price_above_sl_and_below_tp' : 'no_live_price') : 'none'}`);
         if (shouldStopLossSell) {
           logger.warn(`STOP_LOSS_TRIGGER_AUDIT: symbol=${pos.coin} positionId=${pos.tradeId ?? 'none'} entryPrice=${pos.avgEntryPrice} markPrice=${markPrice} stopLossPct=${pos.stopLossPercent} stopTriggerPrice=${stopTriggerPrice.toFixed(4)} unrealizedPnlPct=${pnlPct.toFixed(2)} triggerMethod=price exitReason=STOP_LOSS_HIT adapterWillBeCalled=true`);
           const exitInput: ExitInput = {
@@ -919,7 +969,7 @@ export class TradingEngine {
       : null;
     if (scannerCandidate && !scannerCandidate.tradingTargetOwnership) {
       scannerCandidate.tradingTargetOwnership = preLockOwnership as ScannerCandidate['tradingTargetOwnership'];
-      logger.info(`TRADING_TARGET_OWNERSHIP_FALLBACK_RESOLVED: symbol=${coin} stage=pre_order_lock autoBotsOn=${String(autoBotsOn)} isAutoTargetOwned=${String(isAutoTargetOwned)} autoManagedScannerEntry=${String(autoManagedScannerEntry)} strategySourceRaw=${ownershipResolution.strategySource} resolverPath=${ownershipResolution.resolverPath} tp1Value=${String((preLockOwnership as any)?.tp1Value ?? 'n/a')} tp1Source=${String((preLockOwnership as any)?.tp1Source ?? 'n/a')} reason=missing_candidate_ownership`);
+      logger.info(`TRADING_TARGET_OWNERSHIP_FALLBACK_RESOLVED: symbol=${coin} stage=pre_order_lock autoBotsOn=${String(autoBotsOn)} isAutoTargetOwned=${String(isAutoTargetOwned)} autoManagedScannerEntry=${String(autoManagedScannerEntry)} strategySourceRawLegacy=${ownershipResolution.strategySource} resolverPath=${ownershipResolution.resolverPath} tp1Value=${String((preLockOwnership as any)?.tp1Value ?? 'n/a')} tp1Source=${String((preLockOwnership as any)?.tp1Source ?? 'n/a')} reason=missing_candidate_ownership`);
     }
     const preLockRisk = resolveEntryRiskParams({
       autoBotsOn,
@@ -1196,6 +1246,16 @@ export class TradingEngine {
           strategySource: String(scannerCandidate.strategySource ?? 'unknown'),
           strategySourceDetail: scannerCandidate.strategySourceDetail ?? null,
           strategyReason: scannerCandidate.strategyReason ?? null,
+          marketBestFit: strategyAuditSnapshot.marketRecommendedStrategy ?? scannerCandidate.marketBestFit ?? scannerCandidate.marketAnalyzerBestFit ?? scannerCandidate.groupRecommendedStrategy ?? null,
+          groupRecommendedStrategy: strategyAuditSnapshot.groupRecommendedStrategy ?? scannerCandidate.groupRecommendedStrategy ?? null,
+          autoBotsPerCoinStrategy: strategyAuditSnapshot.autoBotsPerCoinStrategy ?? scannerCandidate.autoBotsPerCoinStrategy ?? scannerCandidate.perCoinSelectedStrategy ?? scannerCandidate.selectedStrategy ?? null,
+          finalExecutionStrategy: strategyAuditSnapshot.finalExecutionStrategy ?? strategyAuditSnapshot.strategySelected,
+          strategyAtEntry: strategyAuditSnapshot.strategyAtEntry ?? strategyAuditSnapshot.strategySelected,
+          strategyDecisionReason: strategyAuditSnapshot.strategyDecisionReason ?? scannerCandidate.strategyReason ?? null,
+          overrideApplied: strategyAuditSnapshot.overrideApplied ?? false,
+          overrideReason: strategyAuditSnapshot.overrideReason ?? null,
+          mismatchAllowed: strategyAuditSnapshot.mismatchAllowed ?? true,
+          mismatchReason: strategyAuditSnapshot.mismatchReason ?? null,
           entryPrice: action.price,
           quantity: action.quantity,
           capitalAllocated: Number((scannerCandidate as any).capitalAllocation ?? action.price * action.quantity),
@@ -1223,9 +1283,49 @@ export class TradingEngine {
         tp2Source: String(resolvedRisk.sourceTp2),
         slPct: Number(resolvedRisk.sl),
         slSource: String(resolvedRisk.sourceSl),
+        marketBestFit: strategyAuditSnapshot.marketRecommendedStrategy ?? scannerCandidate.marketBestFit ?? scannerCandidate.marketAnalyzerBestFit ?? scannerCandidate.groupRecommendedStrategy ?? null,
+        groupRecommendedStrategy: strategyAuditSnapshot.groupRecommendedStrategy ?? scannerCandidate.groupRecommendedStrategy ?? null,
+        autoBotsPerCoinStrategy: strategyAuditSnapshot.autoBotsPerCoinStrategy ?? scannerCandidate.autoBotsPerCoinStrategy ?? scannerCandidate.perCoinSelectedStrategy ?? scannerCandidate.selectedStrategy ?? null,
+        finalExecutionStrategy: strategyAuditSnapshot.finalExecutionStrategy ?? strategyAuditSnapshot.strategySelected,
+        strategyAtEntry: strategyAuditSnapshot.strategyAtEntry ?? strategyAuditSnapshot.strategySelected,
+        strategyDecisionReason: strategyAuditSnapshot.strategyDecisionReason ?? scannerCandidate.strategyReason ?? null,
+        overrideApplied: strategyAuditSnapshot.overrideApplied ?? false,
+        overrideReason: strategyAuditSnapshot.overrideReason ?? null,
+        mismatchAllowed: strategyAuditSnapshot.mismatchAllowed ?? true,
+        mismatchReason: strategyAuditSnapshot.mismatchReason ?? null,
       } : null;
+      const strategySourceRawLegacy = scannerCandidate?.strategySource ?? 'engine_entry';
+      const strategySourceResolvedForAudit = String((preAdapterEntryConfigSnapshot as any)?.strategyAuditSnapshot?.strategySource ?? (preAdapterEntryConfigSnapshot as any)?.strategySourceResolved ?? (isManualOverride ? 'MANUAL' : 'AUTOBOTS_DYNAMIC'));
+      const fallbackTypeForAudit = String((preAdapterEntryConfigSnapshot as any)?.strategyAuditSnapshot?.fallbackType ?? ((scannerCandidate as any)?.fallbackUsed ? 'GROUP_RECOMMENDATION' : 'NONE'));
       logger.info(`SNAPSHOT_PRECONDITION_MATERIALIZED_AUDIT: symbol=${coin} positionId=${tradeId} scanId=${scannerSnapshot?.scanId ?? 'n/a'} entryConfigSnapshotPresent=${String(!scannerCandidate || !!preAdapterEntryConfigSnapshot)} riskSnapshotPresent=${String(!!preAdapterRiskParamsSnapshot)} strategySnapshotPresent=${String(!scannerCandidate || !!preAdapterEntryConfigSnapshot?.strategyAuditSnapshot)} entryPrice=${preAdapterRiskParamsSnapshot.entryPrice} tp1Pct=${preAdapterRiskParamsSnapshot.tp1Pct} tp2Pct=${preAdapterRiskParamsSnapshot.tp2Pct} slPct=${preAdapterRiskParamsSnapshot.slPct} adapterWillBeCalled=true`);
       logger.info(`EXECUTION_TRANSACTION_AUDIT: symbol=${coin} scanId=${scannerSnapshot?.scanId ?? 'n/a'} phase=pre_adapter_validated entryConfigSnapshotComplete=true riskSnapshotComplete=true preRiskValidationPassed=true preRiskBlockReason=none adapterWillBeCalled=true adapterCalled=false adapterStatus=READY brainApplyEntryCalled=false positionManagerAddAttempted=false positionManagerAddSucceeded=false journalRecordAttempted=false journalRecordSucceeded=false dailyTradeCountIncremented=false rollbackApplied=false rollbackReason=none openPositionsBefore=${openPosSymbols.length} openPositionsAfter=${this.positionManager.getOpenPositions().length} transactionValid=false`);
+      logger.info(`BUY_DECISION_CHAIN_AUDIT: symbol=${coin} positionId=${tradeId} scanId=${scannerSnapshot?.scanId ?? 'n/a'} executionPath=${ownershipResolution.executionPath} executionMode=${brain.mode} uiAutoBotsButtonState=${String(autoBotsOn)} persistedAutoBotsEnabled=${String(autoBotsOn)} resolvedAutoBotsEnabled=${String(autoBotsOn && !isManualOverride)} manualOverrideEnabled=${String(isManualOverride)} scannerAutoEnabled=${String(isScannerAutoTrade)} paperAutoExecutionEnabled=${String(autoBotsOn)} marketScannerPaperAutoEnabled=${String(isScannerAutoTrade)} canAttemptScannerAutoExecution=${String(isScannerAutoTrade && autoBotsOn && !isManualOverride)} finalBlockedReason=none adapterWillBeCalled=true entryGateDecision=${gateResult?.decision ?? scannerCandidate?.entryGateDecision?.decision ?? 'ALLOW'} entryGatePrimaryReason=${gateResult?.primaryReason ?? scannerCandidate?.entryGateDecision?.primaryReason ?? 'none'} riskVerdict=${preAdapterRiskDecision.verdict} riskBlockReasons=${preAdapterRiskDecision.blockReasons?.join('|') || 'none'} snapshotContractValid=${String(snapshotContractValid)} strategySourceRawLegacy=${strategySourceRawLegacy} strategySourceResolved=${strategySourceResolvedForAudit} fallbackApplied=${String(fallbackTypeForAudit !== 'NONE')} fallbackType=${fallbackTypeForAudit} fallbackReason=${(scannerCandidate as any)?.fallbackReason ?? 'none'} perCoinStrategySource=${scannerCandidate?.perCoinSelectedStrategy ? 'dynamic_per_coin' : 'group_or_safe_fallback'} finalStrategySource=${isManualOverride ? 'MANUAL' : 'AUTOBOTS_DYNAMIC'} finalExecutionStrategy=${preAdapterEntryConfigSnapshot?.selectedStrategy ?? action.strategy} finalExecutableAtEntry=${String(preFinalExecutableAtEntry)} buyAllowedAtEntry=${String(preAdapterEntryConfigSnapshot?.buyAllowed ?? true)} entryConfirmedAtEntry=${String(preEntryConfirmedAtEntry)} tp1Pct=${preAdapterRiskParamsSnapshot.tp1Pct} tp2Pct=${preAdapterRiskParamsSnapshot.tp2Pct} slPct=${preAdapterRiskParamsSnapshot.slPct} orderSide=${req.side} orderQty=${req.quantity} orderPrice=${req.price ?? 'market'} orderNotional=${(action.price * action.quantity).toFixed(8)}`);
+      if (scannerCandidate && preAdapterEntryConfigSnapshot) {
+        const finalExecutionStrategy = String((preAdapterEntryConfigSnapshot as any).finalExecutionStrategy ?? preAdapterEntryConfigSnapshot.selectedStrategy ?? '').toLowerCase();
+        const setupValidatorUsed = String(preAdapterEntryConfigSnapshot.selectedStrategy ?? '').toLowerCase();
+        const entryGateStrategyUsed = String(preAdapterEntryConfigSnapshot.selectedStrategy ?? action.strategy ?? '').toLowerCase();
+        const strategyAtEntryToPersist = String((preAdapterEntryConfigSnapshot as any).strategyAtEntry ?? preAdapterEntryConfigSnapshot.selectedStrategy ?? '').toLowerCase();
+        const positionStrategyToDisplay = strategyAtEntryToPersist;
+        const tp1StrategyUsed = String((preAdapterEntryConfigSnapshot as any).tp1StrategyUsed ?? (preAdapterEntryConfigSnapshot as any).finalExecutionStrategy ?? preAdapterEntryConfigSnapshot.selectedStrategy ?? '').toLowerCase();
+        const invariantOk = Boolean(finalExecutionStrategy)
+          && finalExecutionStrategy === setupValidatorUsed
+          && setupValidatorUsed === entryGateStrategyUsed
+          && entryGateStrategyUsed === strategyAtEntryToPersist
+          && strategyAtEntryToPersist === positionStrategyToDisplay
+          && (!tp1StrategyUsed || finalExecutionStrategy === tp1StrategyUsed);
+        const riskGroupPresent = Boolean(scannerCandidate.riskGroup);
+        const failureReason = !riskGroupPresent ? 'MISSING_RISK_GROUP_BLOCKED' : invariantOk ? 'none' : (tp1StrategyUsed && finalExecutionStrategy !== tp1StrategyUsed ? 'STRATEGY_TP1_HANDOFF_INTEGRITY_FAILED' : 'final_setup_entry_persist_display_strategy_mismatch');
+        logger.info(`STRATEGY_HANDOFF_INTEGRITY_AUDIT: symbol=${coin} scanId=${scannerSnapshot?.scanId ?? 'n/a'} riskGroup=${scannerCandidate.riskGroup ?? 'n/a'} marketBestFit=${(preAdapterEntryConfigSnapshot as any).marketBestFit ?? 'n/a'} groupRecommendedStrategy=${(preAdapterEntryConfigSnapshot as any).groupRecommendedStrategy ?? scannerCandidate.groupRecommendedStrategy ?? 'n/a'} perCoinSelectedStrategy=${(preAdapterEntryConfigSnapshot as any).autoBotsPerCoinStrategy ?? scannerCandidate.perCoinSelectedStrategy ?? 'n/a'} finalExecutionStrategy=${finalExecutionStrategy || 'n/a'} setupValidatorUsed=${setupValidatorUsed || 'n/a'} setupResult=${(preAdapterEntryConfigSnapshot as any).setupResult ?? 'n/a'} entryGateStrategyUsed=${entryGateStrategyUsed || 'n/a'} tp1StrategyUsed=${tp1StrategyUsed || 'n/a'} strategyAtEntryToPersist=${strategyAtEntryToPersist || 'n/a'} positionStrategyToDisplay=${positionStrategyToDisplay || 'n/a'} invariantOk=${String(invariantOk && riskGroupPresent)} failureReason=${failureReason}`);
+        logger.info(`ENTRY_GATE_EXECUTION_TRACE: symbol=${coin} finalExecutionStrategy=${finalExecutionStrategy || 'n/a'} setupValidatorUsed=${setupValidatorUsed || 'n/a'} finalExecutable=${String((preAdapterEntryConfigSnapshot as any).finalExecutableAtEntry ?? (preAdapterEntryConfigSnapshot as any).finalExecutable ?? false)} buyAllowed=${String((preAdapterEntryConfigSnapshot as any).buyAllowed ?? false)} entryGateDecision=${gateResult?.decision ?? scannerCandidate.entryGateDecision?.decision ?? 'n/a'} finalBuyAllowed=${String(invariantOk && riskGroupPresent && (preAdapterEntryConfigSnapshot as any).buyAllowed !== false)} finalBuyBlockedReason=${failureReason} submitAttempted=false adapterCalled=false`);
+        if (!invariantOk || !riskGroupPresent) {
+          if (!riskGroupPresent) logger.error(`MISSING_RISK_GROUP_BLOCKED: symbol=${coin} scanId=${scannerSnapshot?.scanId ?? 'n/a'} finalExecutionStrategy=${finalExecutionStrategy || 'n/a'} buyAllowed=false action=block_before_order_submit`);
+          if (failureReason === 'STRATEGY_TP1_HANDOFF_INTEGRITY_FAILED') logger.error(`STRATEGY_TP1_HANDOFF_INTEGRITY_FAILED: symbol=${coin} finalExecutionStrategy=${finalExecutionStrategy || 'n/a'} tp1Strategy=${tp1StrategyUsed || 'n/a'} setupValidatorUsed=${setupValidatorUsed || 'n/a'} strategyAtEntryToPersist=${strategyAtEntryToPersist || 'n/a'} buyAllowed=false action=block_before_order_submit`);
+          logger.error(`STRATEGY_HANDOFF_INTEGRITY_FAILED: symbol=${coin} finalExecutionStrategy=${finalExecutionStrategy || 'n/a'} setupValidatorUsed=${setupValidatorUsed || 'n/a'} entryGateStrategyUsed=${entryGateStrategyUsed || 'n/a'} strategyAtEntryToPersist=${strategyAtEntryToPersist || 'n/a'} positionStrategyToDisplay=${positionStrategyToDisplay || 'n/a'} buyAllowed=false failureReason=${failureReason}`);
+          logger.info(`EXECUTION_TRANSACTION_AUDIT: symbol=${coin} scanId=${scannerSnapshot?.scanId ?? 'n/a'} phase=strategy_handoff_integrity_failed entryConfigSnapshotComplete=true riskSnapshotComplete=true preRiskValidationPassed=true preRiskBlockReason=none adapterWillBeCalled=false adapterCalled=false adapterStatus=NOT_SUBMITTED brainApplyEntryCalled=false positionManagerAddAttempted=false positionManagerAddSucceeded=false journalRecordAttempted=false journalRecordSucceeded=false dailyTradeCountIncremented=false rollbackApplied=false rollbackReason=strategy_handoff_integrity_failed openPositionsBefore=${openPosSymbols.length} openPositionsAfter=${this.positionManager.getOpenPositions().length} transactionValid=false`);
+          releaseLock();
+          return;
+        }
+      }
 
       const result = await this.adapter.submitOrder(req);
       if (result.status !== 'filled') {
@@ -1548,9 +1648,9 @@ export class TradingEngine {
         const htf = scannerCandidate?.periodTrend ?? 'n/a';
         const marketAction = scannerCandidate?.periodRegime ?? 'n/a';
         const downgradeReason = ecsSelectedStrategy === 'momentum' ? 'conservative_contract_invalid_downgraded_to_momentum' : `downgraded_${bsStrategy}_to_${ecsSelectedStrategy}`;
-        logger.warn(`STRATEGY_DOWNGRADE_RECONCILED_AUDIT: symbol=${coin} positionId=${tradeId} originalCandidateStrategy=${bsStrategy} finalExecutionStrategy=${ecsSelectedStrategy} downgradeReason=${downgradeReason} conservativeContractValid=${String(bsStrategy.toLowerCase() === 'conservative' ? false : 'n/a')} dipConfirmed=${String(dipConfirmed)} reboundConfirmed=${String(reboundConfirmed)} momentumConfirmed=${String(momentumConfirmed)} rawSymbolTrend=${rawSymbolTrend} groupTrend=${groupTrend} marketTrend=${buySnapshot.groupTrend ?? 'n/a'} fallbackUsed=${String(rawSymbolTrend === 'n/a')} htf=${htf} marketAction=${marketAction} executionAllowedAfterRepair=true`);
+        logger.info(`STRATEGY_DOWNGRADE_RECONCILED_AUDIT: symbol=${coin} positionId=${tradeId} originalCandidateStrategy=${bsStrategy} finalExecutionStrategy=${ecsSelectedStrategy} downgradeReason=${downgradeReason} conservativeContractValid=${String(bsStrategy.toLowerCase() === 'conservative' ? false : 'n/a')} dipConfirmed=${String(dipConfirmed)} reboundConfirmed=${String(reboundConfirmed)} momentumConfirmed=${String(momentumConfirmed)} rawSymbolTrend=${rawSymbolTrend} groupTrend=${groupTrend} marketTrend=${buySnapshot.groupTrend ?? 'n/a'} fallbackUsed=${String(rawSymbolTrend === 'n/a')} htf=${htf} marketAction=${marketAction} executionAllowedAfterRepair=true severity=INFO actionable=false invariantOk=true failureReason=none`);
         if (ecsSelectedStrategy === 'momentum' && rawSymbolTrend === 'n/a' && /bearish|risk_off/i.test(htf + '|' + String(marketAction))) {
-          logger.warn(`MOMENTUM_SYMBOL_TREND_FALLBACK_SAFETY_AUDIT: symbol=${coin} positionId=${tradeId} rawSymbolTrend=n/a fallbackUsed=true groupTrend=${groupTrend} htf=${htf} marketAction=${marketAction} momentumConfirmed=${String(momentumConfirmed)} strongMomentumOverrideEligible=false action=safety_check_passed_position_already_created`);
+          logger.info(`MOMENTUM_SYMBOL_TREND_FALLBACK_SAFETY_AUDIT: symbol=${coin} positionId=${tradeId} rawSymbolTrend=n/a fallbackUsed=true groupTrend=${groupTrend} htf=${htf} marketAction=${marketAction} momentumConfirmed=${String(momentumConfirmed)} strongMomentumOverrideEligible=false action=safety_check_passed_position_already_created severity=INFO actionable=false invariantOk=true failureReason=none`);
           logger.info(`MOMENTUM_BLOCKED_BY_UNSAFE_FALLBACK: symbol=${coin} positionId=${tradeId} rawSymbolTrend=n/a fallbackUsed=true groupTrend=${groupTrend} htf=${htf} marketAction=${marketAction} blockReason=unsafe_momentum_fallback blockApplied=false reason=position_already_created_before_safety_check_in_retrospect`);
         }
         (buySnapshot as any).selectedStrategy = ecsSelectedStrategy;
@@ -1561,7 +1661,7 @@ export class TradingEngine {
         logger.info(`POSITION_STRATEGY_RESOLUTION_AUDIT: symbol=${coin} positionId=${tradeId} positionStrategyAtEntryBefore=${bsStrategy} entryConfigSnapshotStrategy=${ecsSelectedStrategy || 'none'} entryConfigSnapshotFinalRule=${ecsFinalEntryRule || 'none'} resolvedStrategyAtEntry=${ecsSelectedStrategy} resolvedEntryRuleAtEntry=${ecsFinalEntryRule || String(buySnapshot.settingsSnapshot?.entryRule ?? 'none')} sourceUsed=entryConfigSnapshot repairedFromSnapshot=${String(false)} validExecutedStrategy=true strategyMismatchDetected=true strategyDowngraded=true`);
       }
       if (repairedFromSnapshot) {
-        logger.warn(`EXECUTED_POSITION_STRATEGY_SOURCE_MISMATCH: symbol=${coin} positionId=${tradeId} candidateSelectedStrategy=${scannerCandidate?.selectedStrategy ?? 'n/a'} buySnapshotSelectedStrategy=${buySnapshot.selectedStrategy} positionStrategyAtEntry=${buySnapshot.selectedStrategy} entryConfigSnapshotStrategy=${ecsSelectedStrategy} entryConfigSnapshotFinalRule=${ecsFinalEntryRule} resolvedStrategyAtEntry=${ecsSelectedStrategy} resolvedEntryRuleAtEntry=${ecsFinalEntryRule} positionCreateAllowed=true reason=repaired_from_entry_config_snapshot`);
+        logger.info(`EXECUTED_POSITION_STRATEGY_SOURCE_MISMATCH: symbol=${coin} positionId=${tradeId} candidateSelectedStrategy=${scannerCandidate?.selectedStrategy ?? 'n/a'} buySnapshotSelectedStrategy=${buySnapshot.selectedStrategy} positionStrategyAtEntry=${buySnapshot.selectedStrategy} entryConfigSnapshotStrategy=${ecsSelectedStrategy} entryConfigSnapshotFinalRule=${ecsFinalEntryRule} resolvedStrategyAtEntry=${ecsSelectedStrategy} resolvedEntryRuleAtEntry=${ecsFinalEntryRule} positionCreateAllowed=true reason=repaired_from_entry_config_snapshot severity=INFO actionable=false invariantOk=true failureReason=none`);
         (buySnapshot as any).selectedStrategy = ecsSelectedStrategy;
         if (ecsFinalEntryRule && !/WAITING|UNKNOWN/i.test(ecsFinalEntryRule)) {
           if (!(buySnapshot.settingsSnapshot as any)) (buySnapshot as any).settingsSnapshot = {};
@@ -1576,7 +1676,24 @@ export class TradingEngine {
           const metrics = (entryConfigSnapshot as any)?.strategyAuditSnapshot?.setupMetrics ?? [];
           const actualDip = Number(metrics.find((m: any) => m?.key === 'actualDipPct')?.actualValue ?? null);
           const requiredDip = Number(metrics.find((m: any) => m?.key === 'requiredDipPct')?.requiredValue ?? null);
-          logger.warn(`AUTOSTRATEGY_ROUTER_INVALID_OUTPUT_REPAIRED: symbol=${coin} positionId=${tradeId} routerStrategy=${routerStrategy} repairedTo=${repairedTo} actualDipPct=${Number.isFinite(actualDip) ? actualDip.toFixed(2) : 'n/a'} requiredDipPct=${Number.isFinite(requiredDip) ? requiredDip.toFixed(2) : 'n/a'} reason=router_assigned_invalid_strategy_for_candidate_state`);
+          logger.info(`AUTOSTRATEGY_ROUTER_INVALID_OUTPUT_REPAIRED: symbol=${coin} positionId=${tradeId} routerStrategy=${routerStrategy} repairedTo=${repairedTo} actualDipPct=${Number.isFinite(actualDip) ? actualDip.toFixed(2) : 'n/a'} requiredDipPct=${Number.isFinite(requiredDip) ? requiredDip.toFixed(2) : 'n/a'} reason=router_assigned_invalid_strategy_for_candidate_state severity=INFO actionable=false invariantOk=true failureReason=none`);
+        }
+      }
+      if (scannerCandidate && entryConfigSnapshot) {
+        const finalExecutionStrategy = String((entryConfigSnapshot as any).finalExecutionStrategy ?? (entryConfigSnapshot as any).selectedStrategy ?? '').toLowerCase();
+        const strategyAtEntry = String((entryConfigSnapshot as any).strategyAtEntry ?? buySnapshot.selectedStrategy ?? '').toLowerCase();
+        const positionStrategy = String(buySnapshot.selectedStrategy ?? '').toLowerCase();
+        const setupResultAtEntry = String((entryConfigSnapshot as any).setupResult ?? (entryConfigSnapshot as any).strategyAuditSnapshot?.setupResult ?? 'n/a');
+        const expectedSetupResult = finalExecutionStrategy && !/wait|unknown|avoid/.test(finalExecutionStrategy) ? `${finalExecutionStrategy.toUpperCase()}_OK` : 'WAITING_FOR_SETUP';
+        const setupMatchesStrategy = setupResultAtEntry === expectedSetupResult || !((entryConfigSnapshot as any).finalExecutableAtEntry);
+        const invariantOk = finalExecutionStrategy === strategyAtEntry && strategyAtEntry === positionStrategy && setupMatchesStrategy;
+        logger.info(`STRATEGY_HANDOFF_TRACE_AUDIT: symbol=${coin} scanId=${scannerSnapshot?.scanId ?? 'n/a'} riskGroup=${scannerCandidate.riskGroup ?? 'n/a'} marketBestFit=${(entryConfigSnapshot as any).marketBestFit ?? 'n/a'} groupRecommendedStrategy=${(entryConfigSnapshot as any).groupRecommendedStrategy ?? scannerCandidate.groupRecommendedStrategy ?? 'n/a'} userSelectedRuntimeStrategy=${(entryConfigSnapshot as any).strategyAuditSnapshot?.strategyRequested ?? scannerCandidate.selectedStrategy ?? 'n/a'} autoBotsDynamicPerCoinEnabled=true autoBotsPerCoinStrategy=${(entryConfigSnapshot as any).autoBotsPerCoinStrategy ?? scannerCandidate.perCoinSelectedStrategy ?? 'n/a'} entryGateStrategyInput=${finalExecutionStrategy || 'n/a'} setupResult=${setupResultAtEntry} finalExecutionStrategy=${finalExecutionStrategy || 'n/a'} strategyAtEntry=${strategyAtEntry || 'n/a'} positionStrategy=${positionStrategy || 'n/a'} strategyMismatchDetected=${String(!invariantOk)} mismatchAllowed=${String((entryConfigSnapshot as any).mismatchAllowed ?? !invariantOk === false)} mismatchReason=${(entryConfigSnapshot as any).mismatchReason ?? 'none'} overrideApplied=${String((entryConfigSnapshot as any).overrideApplied ?? false)} overrideReason=${(entryConfigSnapshot as any).overrideReason ?? 'none'}`);
+        if (!invariantOk || !scannerCandidate.riskGroup || (((entryConfigSnapshot as any).overrideApplied ?? false) && !((entryConfigSnapshot as any).overrideReason))) {
+          logger.warn(`STRATEGY_MISMATCH_BLOCK_AUDIT: symbol=${coin} finalExecutionStrategy=${finalExecutionStrategy || 'n/a'} strategyAtEntry=${strategyAtEntry || 'n/a'} positionStrategy=${positionStrategy || 'n/a'} setupResult=${setupResultAtEntry} setupMatchesStrategy=${String(setupMatchesStrategy)} marketBestFit=${(entryConfigSnapshot as any).marketBestFit ?? 'n/a'} groupRecommendedStrategy=${(entryConfigSnapshot as any).groupRecommendedStrategy ?? scannerCandidate.groupRecommendedStrategy ?? 'n/a'} groupName=${scannerCandidate.riskGroup ?? 'n/a'} strategyMismatchDetected=${String(!invariantOk)} mismatchAllowed=${String((entryConfigSnapshot as any).mismatchAllowed ?? false)} mismatchReason=${(entryConfigSnapshot as any).mismatchReason ?? 'missing_mismatch_reason'} overrideApplied=${String((entryConfigSnapshot as any).overrideApplied ?? false)} overrideReason=${(entryConfigSnapshot as any).overrideReason ?? 'none'} action=${invariantOk && scannerCandidate.riskGroup ? 'warn_allowed_mismatch' : 'block_position_create'}`);
+          if (!invariantOk) {
+            releaseLock();
+            return;
+          }
         }
       }
       const canonicalPosition: Position = {
@@ -1796,13 +1913,49 @@ export class TradingEngine {
         );
       }
       this._dailyTradeCount++;
+      let telegramAttempted = false;
+      let telegramSent = false;
       try {
+        telegramAttempted = true;
         await this.eventCallbacks.onTradeOpened?.(tradeRecord);
+        telegramSent = true;
       } catch (notifyErr) {
         logger.warn(`TELEGRAM_NOTIFY_BUY_CALLBACK_FAILED: symbol=${coin} reason=${notifyErr instanceof Error ? notifyErr.message : String(notifyErr)}`);
       }
-      logger.trade(`ENTER ${coin} ${action.side} @ ${result.price} qty:${result.quantity} tradeId:${tradeId}`);
+      const openCountAfterTrade = this.positionManager.getOpenPositions().length;
+      const tradeAuditInvariantOk = positionManagerAddSucceeded && journalRecordSucceeded && openCountAfterTrade > openPosSymbols.length;
+      if (!this.emittedBuyTradeAuditPositionIds.has(tradeId)) {
+        this.emittedBuyTradeAuditPositionIds.add(tradeId);
+        logger.trade(
+          `TRADE_BUY_EXECUTED_AUDIT: ` +
+          `symbol=${coin} ` +
+          `positionId=${tradeId} ` +
+          `orderId=${result.orderId ?? 'n/a'} ` +
+          `executionId=${result.orderId ?? tradeId} ` +
+          `executionMode=${brain.mode} ` +
+          `strategyAtEntry=${buySnapshot.selectedStrategy ?? action.strategy ?? 'n/a'} ` +
+          `entryPrice=${result.price} ` +
+          `qty=${result.quantity} ` +
+          `notionalUsd=${(result.price * result.quantity).toFixed(8)} ` +
+          `feeUsd=${String((result as any).feeUsd ?? (result as any).fee ?? 'n/a')} ` +
+          `tp1Pct=${canonicalRisk?.tp1Pct ?? 'n/a'} ` +
+          `tp1TriggerPrice=${canonicalRisk?.tp1TargetPrice ?? 'n/a'} ` +
+          `tp2Pct=${canonicalRisk?.tp2Pct ?? 'n/a'} ` +
+          `slPct=${canonicalRisk?.slPct ?? 'n/a'} ` +
+          `trailingEnabled=${String((canonicalPosition.trailFromPeakPercent ?? 0) > 0)} ` +
+          `source=ExecutionPlanner/PaperExchangeAdapter/PositionManager ` +
+          `positionManagerOpenCountAfter=${openCountAfterTrade} ` +
+          `journalPersisted=${String(journalRecordSucceeded)} ` +
+          `logCategory=TRADE ` +
+          `invariantOk=${String(tradeAuditInvariantOk)} ` +
+          `failureReason=${tradeAuditInvariantOk ? 'none' : 'TRADE_BUY_ACCOUNTING_INVARIANT_FAILED'}`
+        );
+      } else {
+        logger.info(`TRADE_BUY_EXECUTED_AUDIT_DUPLICATE_SUPPRESSED: symbol=${coin} positionId=${tradeId} logCategory=TRADE invariantOk=true failureReason=none`);
+      }
+      logger.info(`ENTER ${coin} ${action.side} @ ${result.price} qty:${result.quantity} tradeId:${tradeId} logCategory=INFO legacyTradeLine=true`);
       logger.info(`EXECUTION_TRANSACTION_AUDIT: symbol=${coin} scanId=${scannerSnapshot?.scanId ?? 'n/a'} phase=complete entryConfigSnapshotComplete=true riskSnapshotComplete=true preRiskValidationPassed=true preRiskBlockReason=none adapterWillBeCalled=true adapterCalled=true adapterStatus=${result.status} brainApplyEntryCalled=false positionManagerAddAttempted=true positionManagerAddSucceeded=true journalRecordAttempted=true journalRecordSucceeded=${String(journalRecordSucceeded)} dailyTradeCountIncremented=true rollbackApplied=false rollbackReason=none openPositionsBefore=${openPosSymbols.length} openPositionsAfter=${this.positionManager.getOpenPositions().length} transactionValid=true`);
+      logger.info(`BUY_ORDER_LIFECYCLE_AUDIT: symbol=${coin} positionId=${tradeId} scanId=${scannerSnapshot?.scanId ?? 'n/a'} orderId=${result.orderId ?? 'n/a'} orderSide=${result.side} adapter=${this.adapter.name} adapterStatus=${result.status} submittedPrice=${req.price ?? 'market'} filledPrice=${result.price} filledQty=${result.quantity} finalOrderNotionalUsd=${(result.price * result.quantity).toFixed(8)} persistedToPositionManager=${String(positionManagerAddSucceeded)} persistedToJournal=${String(journalRecordSucceeded)} persistedOpenPosition=${String(!!brain.position)} telegramAttempted=${String(telegramAttempted)} telegramSent=${String(telegramSent)} finalStatus=OPENED`);
       logger.info(`AUTO_BOTS_BEYOND_10_POSITIONS_AUDIT: symbol=${coin} openCountBefore=${openPosSymbols.length} openCountAfter=${this.positionManager.getOpenPositions().length} maxOpenPositions=50 tradingCapitalUsd=${this._accountBalance} usedCapitalUsd=${usedCapitalAfter} riskGroup=${scannerCandidate?.riskGroup ?? 'unknown'} strategy=${scannerCandidate?.selectedStrategy ?? 'n/a'} beyond10Threshold=${String(this.positionManager.getOpenPositions().length > 10)} invariantOk=true`);
       releaseLock();
     } catch (e) {
@@ -1813,13 +1966,33 @@ export class TradingEngine {
 
   private async processExit(brain: TraderBrain): Promise<void> {
     const pos = brain.position!;
-    const priceRes = await resolveClosePrice(brain.coin, 'SELL');
+    const priceRes = await resolveClosePrice(brain.coin, 'SELL', {
+      lastKnownPrice: pos.currentPrice,
+      lastKnownPriceAt: pos.priceTimestamp,
+      entrySnapshotPrice: pos.avgEntryPrice,
+    });
     const exitPrice = priceRes.price;
 
     if (exitPrice <= 0) {
+      this.positionManager.updatePosition(brain.coin, {
+        exitPriceUnavailable: true,
+        exitPriceUnavailableAt: Date.now(),
+        exitPriceUnavailableReason: priceRes.unavailableReason ?? 'no_fresh_close_price',
+      });
+      logger.warn(formatClosePriceUnavailableAudit({
+        resolution: priceRes,
+        symbol: brain.coin,
+        positionId: pos.tradeId,
+        executionMode: brain.mode,
+        exitTickSkipped: true,
+      }));
       logger.warn(`Close price unavailable for ${brain.coin}, skipping exit tick`);
       return;
     }
+    this.positionManager.updatePosition(brain.coin, {
+      exitPriceUnavailable: false,
+      exitPriceUnavailableReason: 'none',
+    });
 
     const exitInput: ExitInput = {
       coin: brain.coin,
@@ -2235,6 +2408,43 @@ export class TradingEngine {
     this._dailyTradeCount = 0;
     this._consecutiveLosses = 0;
     this._winRate = 0.5;
+  }
+
+  /**
+   * Audits trade event accounting: cross-references open positions
+   * against emitted TRADE_BUY_EXECUTED_AUDIT events.
+   * Emits TRADE_EVENT_MISSING_AUDIT (WARN) for each position
+   * without a matching TRADE event, then a summary
+   * TRADE_EVENT_COUNTER_INTEGRITY_AUDIT.
+   */
+  auditTradeEventAccounting(): void {
+    const openPositions = this.positionManager.getOpenPositions();
+    const emittedIds = this.emittedBuyTradeAuditPositionIds;
+    let missingCount = 0;
+    for (const pos of openPositions) {
+      if (pos.tradeId && !emittedIds.has(pos.tradeId)) {
+        missingCount++;
+        logger.warn(
+          `TRADE_EVENT_MISSING_AUDIT: ` +
+          `symbol=${pos.coin} ` +
+          `positionId=${pos.tradeId} ` +
+          `entryPrice=${pos.avgEntryPrice} ` +
+          `qty=${pos.quantity} ` +
+          `mode=${pos.mode} ` +
+          `auditEvent=TRADE_BUY_EXECUTED_AUDIT ` +
+          `reason=position_restored_from_persistence_or_event_buffer_evicted ` +
+          `logCategory=WARN`
+        );
+      }
+    }
+    logger.info(
+      `TRADE_EVENT_COUNTER_INTEGRITY_AUDIT: ` +
+      `openPositions=${openPositions.length} ` +
+      `tradeEventsEmitted=${emittedIds.size} ` +
+      `missingTradeEvents=${missingCount} ` +
+      `integrityOk=${String(missingCount === 0)} ` +
+      `logCategory=INFO`
+    );
   }
 
   async exportJournal(): Promise<string> {

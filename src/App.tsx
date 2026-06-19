@@ -30,12 +30,28 @@ import type { TraderBrainConfig, LiveSafetyState, LiveSafetyCheckResult, Univers
 import type { RefMode } from './core/scanner/ReferencePriceCalculator';
 import { SettingsPersistence } from './core/persistence/SettingsPersistence';
 import { TelegramNotifier } from './core/notifications/TelegramNotifier';
+import { buildEquityDisplayAudit, buildPaperBalancePositionIntegrityAudit, formatEquityDisplaySourceAudit, formatEquityZeroWithActiveRuntimeWarning, formatPaperBalancePositionIntegrityAudit } from './lib/execution/equityDisplayAudit';
 import type { MainTab } from './state/ui-store';
 import packageJson from '../package.json';
 
 const RENDERER_BUILD_TIME = new Date().toISOString();
 const RENDERER_BUILD_ID = `runtime-${Date.now().toString(36)}`;
 const APP_BOOT_ID = `boot-${Date.now().toString(36)}`;
+const PAPER_BALANCE_POSITION_INTEGRITY_AUDIT_EVENT = 'PAPER_BALANCE_POSITION_INTEGRITY_AUDIT';
+declare const __GIT_COMMIT__: string;
+declare const __BUILD_TIMESTAMP__: string;
+const BUILD_GIT_COMMIT = typeof __GIT_COMMIT__ !== 'undefined' ? __GIT_COMMIT__ : 'unknown';
+const BUILD_TIMESTAMP = typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : RENDERER_BUILD_TIME;
+
+function stableHash(value: unknown): string {
+  const text = typeof value === 'string' ? value : JSON.stringify(value ?? null);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
 
 function mapUiRefModeToScanner(mode: string | undefined): RefMode | undefined {
   if (!mode || mode === 'AUTO') return undefined; // use scanner default (sma)
@@ -62,21 +78,34 @@ export default function App() {
     return de;
   });
   useEffect(() => {
-    logger.info(`APP_BUILD_VERSION_AUDIT: buildTime=${RENDERER_BUILD_TIME} gitHashIfAvailable=${(import.meta as any).env?.VITE_GIT_HASH ?? 'unavailable'} packageVersion=${packageJson.version} rendererVersion=${RENDERER_BUILD_ID}`);
-  }, []);
+    const isTauri = typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' || window.location.protocol === 'tauri:';
+    const settingsRaw = (() => {
+      try { return typeof localStorage !== 'undefined' ? (localStorage.getItem('cryptobud_v4_settings') ?? localStorage.getItem('cryptobud_v4:settings') ?? '') : ''; }
+      catch { return 'localStorage_unavailable'; }
+    })();
+    const runtimeState = engine.getAutoRuntime()?.getScanner?.()?.getCanonicalAutoExecutionState?.();
+    logger.info(`APP_BUILD_VERSION_AUDIT: buildTime=${BUILD_TIMESTAMP} gitHashIfAvailable=${BUILD_GIT_COMMIT} packageVersion=${packageJson.version} rendererVersion=${RENDERER_BUILD_ID}`);
+    logger.info(`INSTALLED_BUILD_METADATA_AUDIT: appVersion=${packageJson.version} gitCommit=${BUILD_GIT_COMMIT} buildTimestamp=${BUILD_TIMESTAMP} buildMode=${(import.meta as any).env?.MODE ?? 'unknown'} tauriMode=${isTauri ? 'installed_or_tauri' : 'browser'} isTauri=${String(isTauri)} binaryPath=unavailable_in_renderer appPath=${window.location.href} storageRoot=${isTauri ? 'tauri_appdata' : window.location.origin} settingsHash=${stableHash(settingsRaw)} runtimeConfigHash=${stableHash(runtimeState ?? {})}`);
+  }, [engine]);
+  useEffect(() => {
+    return engine.getPositionManager().subscribe((positions, reason, symbol) => {
+      logger.info(`POSITION_MANAGER_REACTIVE_RENDER_AUDIT: target=App reason=${reason} symbol=${symbol ?? 'none'} openCount=${positions.length} symbols=${positions.map(p => p.coin).join('|') || 'none'}`);
+      forceUpdate(n => n + 1);
+    });
+  }, [engine]);
   const [perfGuard] = useState(() => new PerformanceGuard());
   const [diagSnapshot, setDiagSnapshot] = useState<DiagnosticsSnapshot | null>(null);
 
   const [isRunning, setIsRunning] = useState(false);
   const [liveState, setLiveState] = useState<LiveSafetyState>(INITIAL_SAFETY_STATE);
   const [liveCheckResult, setLiveCheckResult] = useState<LiveSafetyCheckResult | null>(null);
-  const [totalEquity, setTotalEquity] = useState(0);
+  const [totalEquity, setTotalEquity] = useState(() => (engine.getAdapter() as PaperExchangeAdapter).getTotalEquity());
   const [, forceUpdate] = useState(0);
 
   const [brain, setBrain] = useState<MLBrainModel | null>(null);
   const [importedRows, setImportedRows] = useState<ImportedMLRow[]>([]);
   const [guardState, setGuardState] = useState<MlRuntimeGuardState>(() => mlRuntimeGuard.getGuardState(false, false));
-  const [mlEvents, setMlEvents] = useState<MlRuntimeEvent[]>([]);
+  const [mlEvents, setMlEvents] = useState<MlRuntimeEvent[]>(() => mlRuntimeEvents.getRecentEvents(25));
   const [publicDataReady, setPublicDataReady] = useState(false);
   const [publicDataRefreshing, setPublicDataRefreshing] = useState(false);
   const [exchangeInfoLoaded, setExchangeInfoLoaded] = useState(false);
@@ -84,6 +113,8 @@ export default function App() {
   const [positionBootRestoring, setPositionBootRestoring] = useState(true);
   const [closedTradesBootRestoring, setClosedTradesBootRestoring] = useState(true);
   const banlistRef = useRef<string[]>([]);
+  const configuredDemoStartingCapitalRef = useRef(10000);
+  const configuredTradingCapitalRef = useRef(10000);
 
   const refreshPublicData = useCallback(async () => {
     logger.info('PUBLIC_DATA_MANUAL_REFRESH_START');
@@ -249,6 +280,7 @@ export default function App() {
         }
         logger.info(`PERSISTENCE_RESTORE_POSITIONS_SUCCESS: restored ${restored.length} / ${savedPositions.length} positions`);
         logger.info(`OPEN_POSITIONS_RESTORED: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=0 restoredSymbols=${restored.map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=boot_restore_success`);
+        engine.auditTradeEventAccounting();
         if ((engine as any).adapter?.reconcileAllHoldings) {
           const openPositions = engine.getPositionManager().getOpenPositions();
           (engine as any).adapter.reconcileAllHoldings(openPositions.map(p => ({ coin: p.coin, quantity: p.quantity, avgEntryPrice: p.avgEntryPrice ?? 0 })));
@@ -287,8 +319,12 @@ export default function App() {
       telegramNotifierRef.current.updateSettings(telegramSettings);
       banlistRef.current = [...new Set((settings.scannerBanlist ?? settings.manualScannerBanlist ?? []).map((x) => String(x).toUpperCase().trim()).filter(Boolean))];
       const scanner = engine.getAutoRuntime().getScanner();
+      const bootUniverseMode = (settings.scannerUniverseMode === 'TOP_100' ? 'BINANCE_TOP_250' : settings.scannerUniverseMode ?? 'BINANCE_TOP_250') as UniverseMode;
       logger.info(`APP_SCANNER_WIRING_AUDIT: stage=boot scannerInstanceId=${scanner.getScannerInstanceId()} paperAutoExecutionEnabled=${String(scanner.isPaperAutoEnabled())} paperAutoBuyFnPresent=${String(scanner.hasPaperAutoBuyFn())} logSinkName=logger.getLogs/logger.export`);
-      scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? false);
+      scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? true);
+      scanner.setUniverseMode(bootUniverseMode);
+      store.setUniverseMode(bootUniverseMode);
+      logger.info(`SCANNER_UNIVERSE_MODE_HYDRATED: source=settings value=${bootUniverseMode}`);
       scanner.setScannerConfig({
         riskGroups: settings.scannerRiskGroups ?? {
           top_caps: true,
@@ -300,6 +336,7 @@ export default function App() {
         referencePeriod: settings.scannerReferencePeriod ?? '1h',
         scannerBanlist: settings.scannerBanlist ?? settings.manualScannerBanlist ?? [],
       });
+      scanner.setScannerDiagnosticsLevel?.((settings as any).scannerDiagnosticsLevel ?? 'normal');
       scanner.setExecutionLimits({
         maxPositions: settings.maxPositions ?? 10,
         maxSelectedPerScan: (settings as any).maxSelectedPerScan ?? 10,
@@ -312,6 +349,41 @@ export default function App() {
         persistedLegacyMaxEntriesPerCycle: (settings as any).maxEntriesPerCycle,
         userExplicit: (settings as any).maxSelectedPerScanUserSet === true,
       });
+      {
+        const configuredDemoStartingCapital = Number((settings as any).paperStartingBalance ?? (settings as any).demoStartingCapital ?? (settings as any).autoTradingCapital ?? 10000);
+        configuredDemoStartingCapitalRef.current = configuredDemoStartingCapital;
+        configuredTradingCapitalRef.current = Number((settings as any).autoTradingCapital ?? configuredDemoStartingCapital);
+        const paperCashBefore = paperAdapter.getCashBalance('USDT');
+        const hasPersistedCash = paperAdapter.hasCashBalance('USDT') && paperCashBefore > 0;
+        const noOpenPositions = engine.getPositionManager().getOpenPositions().length === 0;
+        const balanceInitializedFromConfig = noOpenPositions && configuredDemoStartingCapital > 0 && !hasPersistedCash
+          ? paperAdapter.initializeCashBalanceFromConfig(configuredDemoStartingCapital, 'USDT')
+          : false;
+        if (balanceInitializedFromConfig) {
+          setTotalEquity(paperAdapter.getTotalEquity());
+        }
+        const audit = buildPaperBalancePositionIntegrityAudit({
+          executionMode: 'DEMO',
+          dbStatus: journal.isOpenPositionsHydrated() && journal.isClosedTradesHydrated() ? 'OK' : 'HYDRATING',
+          uiHeaderEquity: paperAdapter.getTotalEquity(),
+          paperCashBalance: paperAdapter.getCashBalance('USDT'),
+          paperEquity: paperAdapter.getTotalEquity(),
+          configuredDemoStartingCapital,
+          configuredTradingCapital: configuredTradingCapitalRef.current,
+          openPositionsCount: engine.getPositionManager().getOpenPositions().length,
+          openPositionsMarketValue: engine.getPositionManager().getExposureSummary().totalExposure,
+          positionManagerEquity: paperAdapter.getTotalEquity(),
+          persistenceBalanceLoaded: hasPersistedCash,
+          persistenceSource: hasPersistedCash ? 'PaperExchangeAdapter.balances' : 'configured_demo_starting_capital',
+          resetStateActive: false,
+          resetVersion: 'none',
+          resetAt: 'none',
+          balanceInitializedFromConfig,
+          intentionalZeroBalance: configuredDemoStartingCapital === 0,
+        });
+        if (audit.invariantOk) logger.info(formatPaperBalancePositionIntegrityAudit(audit));
+        else logger.warn(formatPaperBalancePositionIntegrityAudit(audit));
+      }
       logger.info(`CAPITAL_PER_COIN_SETTINGS_AUDIT: symbol=none mode=demo strategySource=settings userCapitalPerCoin=${(settings as any).capitalPerCoin ?? 100} resolvedCapitalPerCoin=${(settings as any).capitalPerCoin ?? settings.capitalPerTrade ?? 100} finalOrderNotionalUsd=0 qty=0 entryPrice=0 minNotional=0 maxOpenPositions=${settings.maxPositions ?? 10} availableCapital=${(settings as any).autoTradingCapital ?? 1000} usedCapitalBefore=0 usedCapitalAfter=0 reason=scanner_execution_limits_applied source=settings`);
       scanner.setExecutionContextProviders({
         getUsedCapital: () => engine.getPositionManager().getOpenPositions().reduce((s, p) => s + (p.avgEntryPrice * p.quantity), 0),
@@ -369,7 +441,8 @@ export default function App() {
         logger.info(`DEMO_EXECUTION_CONTROLLER_CALLED: symbol=${symbol} source=App.setDemoAutoBuyFn adapterCalled=pending`);
         await engine.executePlannedScannerBuy(candidate, plannedCandidate);
         const openAfter = engine.getPositionManager().getOpenPositions().length;
-        const created = engine.getPositionManager().hasOpenPosition(symbol) && openAfter > openBefore;
+        const createdPosition = engine.getPositionManager().getPositionBySymbol(symbol);
+        const created = Boolean(createdPosition) && openAfter > openBefore;
         const lastPaperExec = paperAdapter.lastExecutionResult;
         const adapterWasCalled = lastPaperExec !== lastPaperExecBefore;
         const enginePreAdapterBlock = engine.getLastPreAdapterBlockReason();
@@ -395,14 +468,24 @@ export default function App() {
           const auditSnapshot = plannedCandidate.scannerAutoEntryConfigSnapshot;
           const openSymbols = engine.getPositionManager().getOpenPositions().map(p => p.coin);
           const isDuplicate = openSymbols.includes(symbol);
-          logger.warn(`PRE_ADAPTER_CANDIDATE_VERDICT_AUDIT: symbol=${symbol} selectedRank=${plannedCandidate.rank ?? 0} requestedStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} selectedStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} runtimeActiveStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} finalStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} finalEntryRule=${auditSnapshot?.finalEntryRule ?? 'n/a'} finalExecutable=${String(auditSnapshot?.finalExecutableAtEntry ?? auditSnapshot?.finalExecutable ?? 'n/a')} buyAllowed=${String(auditSnapshot?.buyAllowed ?? 'n/a')} setupResult=${auditSnapshot?.setupResult ?? 'n/a'} openPositionDuplicate=${String(isDuplicate)} pendingOrderDuplicate=false banned=false spreadOk=true tpRoomOk=true priceFresh=true capitalOk=true maxOpenPositionsOk=true allowedForAdapter=${String(!isDuplicate)} adapterCalled=false positionCreated=false blockReason=${finalRejectReason}`);
+          logger.info(`PRE_ADAPTER_CANDIDATE_VERDICT_AUDIT: symbol=${symbol} selectedRank=${plannedCandidate.rank ?? 0} requestedStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} selectedStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} runtimeActiveStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} finalStrategy=${auditSnapshot?.selectedStrategy ?? 'n/a'} finalEntryRule=${auditSnapshot?.finalEntryRule ?? 'n/a'} finalExecutable=${String(auditSnapshot?.finalExecutableAtEntry ?? auditSnapshot?.finalExecutable ?? 'n/a')} buyAllowed=${String(auditSnapshot?.buyAllowed ?? 'n/a')} setupResult=${auditSnapshot?.setupResult ?? 'n/a'} openPositionDuplicate=${String(isDuplicate)} pendingOrderDuplicate=false banned=false spreadOk=true tpRoomOk=true priceFresh=true capitalOk=true maxOpenPositionsOk=true allowedForAdapter=${String(!isDuplicate)} adapterCalled=false positionCreated=false blockReason=${finalRejectReason} severity=INFO actionable=false invariantOk=true failureReason=none`);
         }
         if (adapterWasCalled && lastPaperExec?.success) {
           logger.info(`DEMO_EXECUTION_FILL_CREATED: symbol=${symbol} status=${lastPaperExec.status} qty=${lastPaperExec.executedQuantity} price=${lastPaperExec.executedPrice}`);
         }
         if (created) logger.info(`POSITION_CREATED: symbol=${symbol} openPositionsAfter=${openAfter}`);
-        else logger.warn(`POSITION_CREATE_FAILED: symbol=${symbol} openPositionsBefore=${openBefore} openPositionsAfter=${openAfter} adapterCalled=${String(adapterWasCalled)} adapterResult=${adapterWasCalled ? (lastPaperExec?.status ?? 'unknown') : 'NOT_SUBMITTED'} rejectReason=${finalRejectReason}`);
-        if (!created) logger.warn(`POSITION_CREATE_FAILED_REASON_AUDIT: symbol=${symbol} adapterCalled=${String(adapterWasCalled)} adapterResult=${adapterWasCalled ? (lastPaperExec?.status ?? 'unknown') : 'NOT_SUBMITTED'} rejectReason=${finalRejectReason} executionSuccess=${String(adapterWasCalled && !!lastPaperExec?.success)}`);
+        else {
+          const positionFailureIsInvariant = adapterWasCalled && !!lastPaperExec?.success;
+          const positionFailureLine = `POSITION_CREATE_FAILED: symbol=${symbol} openPositionsBefore=${openBefore} openPositionsAfter=${openAfter} adapterCalled=${String(adapterWasCalled)} adapterResult=${adapterWasCalled ? (lastPaperExec?.status ?? 'unknown') : 'NOT_SUBMITTED'} rejectReason=${finalRejectReason} severity=${positionFailureIsInvariant ? 'WARN' : 'INFO'} actionable=${String(positionFailureIsInvariant)} invariantOk=${String(!positionFailureIsInvariant)} failureReason=${positionFailureIsInvariant ? 'FILL_WITHOUT_POSITION_CREATED' : 'none'}`;
+          if (positionFailureIsInvariant) logger.warn(positionFailureLine);
+          else logger.info(positionFailureLine);
+        }
+        if (!created) {
+          const positionFailureIsInvariant = adapterWasCalled && !!lastPaperExec?.success;
+          const positionReasonLine = `POSITION_CREATE_FAILED_REASON_AUDIT: symbol=${symbol} adapterCalled=${String(adapterWasCalled)} adapterResult=${adapterWasCalled ? (lastPaperExec?.status ?? 'unknown') : 'NOT_SUBMITTED'} rejectReason=${finalRejectReason} executionSuccess=${String(adapterWasCalled && !!lastPaperExec?.success)} severity=${positionFailureIsInvariant ? 'WARN' : 'INFO'} actionable=${String(positionFailureIsInvariant)} invariantOk=${String(!positionFailureIsInvariant)} failureReason=${positionFailureIsInvariant ? 'FILL_WITHOUT_POSITION_CREATED' : 'none'}`;
+          if (positionFailureIsInvariant) logger.warn(positionReasonLine);
+          else logger.info(positionReasonLine);
+        }
         forceUpdate(n => n + 1);
         const failReason = adapterWasCalled && lastPaperExec?.success
           ? 'Demo fill created but position not opened'
@@ -415,7 +498,12 @@ export default function App() {
                 : snapshotMissingFields.length > 0
                   ? `entry_config_snapshot_incomplete:${snapshotMissingFields.join('|')}`
                   : 'Demo execution blocked before adapter: pre_adapter_block_before_submit';
-        if (!created) logger.warn(`DEMO_EXECUTION_FAILURE_REASON_AUDIT: symbol=${symbol} reason=${failReason} adapterCalled=${String(adapterWasCalled)} adapterStatus=${adapterWasCalled ? (lastPaperExec?.status ?? 'unknown') : 'NOT_SUBMITTED'} rejectReason=${finalRejectReason}`);
+        if (!created) {
+          const positionFailureIsInvariant = adapterWasCalled && !!lastPaperExec?.success;
+          const executionFailureLine = `DEMO_EXECUTION_FAILURE_REASON_AUDIT: symbol=${symbol} reason=${failReason} adapterCalled=${String(adapterWasCalled)} adapterStatus=${adapterWasCalled ? (lastPaperExec?.status ?? 'unknown') : 'NOT_SUBMITTED'} rejectReason=${finalRejectReason} severity=${positionFailureIsInvariant ? 'WARN' : 'INFO'} actionable=${String(positionFailureIsInvariant)} invariantOk=${String(!positionFailureIsInvariant)} failureReason=${positionFailureIsInvariant ? 'FILL_WITHOUT_POSITION_CREATED' : 'none'}`;
+          if (positionFailureIsInvariant) logger.warn(executionFailureLine);
+          else logger.info(executionFailureLine);
+        }
         return {
           attempted: true,
           executed: created,
@@ -428,6 +516,8 @@ export default function App() {
           stage: created ? 'PositionOpened' : (adapterWasCalled && lastPaperExec?.success ? 'DemoFillCreated' : 'ExecutionFailed'),
           adapterCalled: adapterWasCalled,
           adapterResult: adapterWasCalled ? (lastPaperExec?.status ?? 'UNKNOWN') : 'NOT_SUBMITTED',
+          orderId: adapterWasCalled ? (lastPaperExec as any)?.orderId : undefined,
+          positionId: created ? createdPosition?.tradeId : undefined,
           positionCreateAttempted: true,
           positionCreated: created,
           openPositionsBefore: openBefore,
@@ -521,13 +611,19 @@ export default function App() {
   useEffect(() => {
     engine.setEventCallbacks({
       onTradeOpened: async (trade) => {
+        const openBeforeNotify = engine.getPositionManager().getOpenPositions();
+        logger.info(`TELEGRAM_BUY_NOTIFY_POSITION_SYNC_AUDIT: phase=before_notify symbol=${trade.coin} positionManagerHasSymbol=${String(engine.getPositionManager().hasOpenPosition(trade.coin))} positionManagerOpenCount=${openBeforeNotify.length} openSymbols=${openBeforeNotify.map(p => p.coin).join('|') || 'none'}`);
+        forceUpdate(n => n + 1);
         const sent = await telegramNotifierRef.current.notify('BUY_OPENED', {
           event: 'BUY_OPENED',
           symbol: trade.coin,
           message: `BUY opened for ${trade.coin}`,
           trade,
         });
+        const openAfterNotify = engine.getPositionManager().getOpenPositions();
         logger.info(`TELEGRAM_BUY_NOTIFY_${sent ? 'SENT' : 'SKIPPED'}: symbol=${trade.coin}`);
+        logger.info(`TELEGRAM_BUY_NOTIFY_POSITION_SYNC_AUDIT: phase=after_notify symbol=${trade.coin} positionManagerHasSymbol=${String(engine.getPositionManager().hasOpenPosition(trade.coin))} positionManagerOpenCount=${openAfterNotify.length} openSymbols=${openAfterNotify.map(p => p.coin).join('|') || 'none'}`);
+        forceUpdate(n => n + 1);
       },
       onTradeClosed: async (trade) => {
         const reason = trade.closeSnapshot?.exitReason ?? '';
@@ -589,20 +685,76 @@ export default function App() {
       setTotalEquity(equity);
       const now = Date.now();
       store.addEquityPoint(now, equity);
-      const paperBal = (paperAdapter as any).balances?.get?.('USDT') ?? 0;
+      const paperBal = paperAdapter.getCashBalance('USDT');
       const posCount = engine.getPositionManager().getOpenPositions().length;
       const totalExposure = engine.getPositionManager().getExposureSummary().totalExposure;
       const cashBalance = paperBal;
       const usedCapital = totalExposure;
       const openPnl = equity - (cashBalance + usedCapital);
-      const mismatchDetected = equity <= 0 && (cashBalance > 0 || posCount > 0);
-      if (mismatchDetected || equity !== (totalEquity as any)) {
-        logger.info(`EQUITY_HEADER_BINDING_AUDIT: headerEquity=${equity.toFixed(2)} accountEquity=${equity.toFixed(2)} cashBalance=${cashBalance.toFixed(2)} usedCapital=${usedCapital.toFixed(4)} openPnl=${openPnl.toFixed(2)} positionManagerOpenCount=${posCount} mismatchDetected=${String(mismatchDetected)}`);
+      const realizedPnL = Number(journal.computeSummary().totalPnl ?? 0);
+      const storeOpenCount = journal.getOpenTrades().length;
+      const audit = buildEquityDisplayAudit({
+        configuredCapital: 10000,
+        availableCapital: cashBalance,
+        usedCapital,
+        openPositionExposure: totalExposure,
+        realizedPnL,
+        unrealizedPnL: openPnl,
+        equityDisplayValue: equity,
+        equitySource: 'PaperExchangeAdapter.getTotalEquity',
+        persistenceHydrated: journal.isOpenPositionsHydrated() && journal.isClosedTradesHydrated(),
+        positionManagerOpenCount: posCount,
+        storeOpenCount,
+        mode: 'PAPER',
+      });
+      if (audit.mismatchDetected || equity !== (totalEquity as any)) {
+        logger.info(formatEquityDisplaySourceAudit(audit));
+      }
+      if (audit.zeroWithActiveRuntime) {
+        logger.warn(formatEquityZeroWithActiveRuntimeWarning(audit));
+      }
+      {
+        const positions = engine.getPositionManager().getOpenPositions();
+        const openExposure = totalExposure;
+        const unrealizedPnl = positions.reduce((sum, p) => {
+          const mark = Number.isFinite(p.currentPrice) && p.currentPrice > 0 ? p.currentPrice : p.avgEntryPrice;
+          return sum + ((mark - p.avgEntryPrice) * p.quantity);
+        }, 0);
+        const dbOk = journal.isOpenPositionsHydrated() && journal.isClosedTradesHydrated();
+        const configuredDemoStartingCapital = configuredDemoStartingCapitalRef.current;
+        const configuredTradingCapital = configuredTradingCapitalRef.current;
+        const balanceInitializedFromConfig = positions.length === 0 && configuredDemoStartingCapital > 0 && cashBalance <= 0
+          ? paperAdapter.initializeCashBalanceFromConfig(configuredDemoStartingCapital, 'USDT')
+          : false;
+        const headerEquity = balanceInitializedFromConfig ? paperAdapter.getTotalEquity() : equity;
+        if (balanceInitializedFromConfig) setTotalEquity(headerEquity);
+        const audit = buildPaperBalancePositionIntegrityAudit({
+          executionMode: 'DEMO',
+          dbStatus: dbOk ? 'OK' : 'HYDRATING',
+          uiHeaderEquity: headerEquity,
+          paperCashBalance: paperAdapter.getCashBalance('USDT'),
+          paperEquity: paperAdapter.getTotalEquity(),
+          configuredDemoStartingCapital,
+          configuredTradingCapital,
+          openPositionsCount: positions.length,
+          openPositionsMarketValue: openExposure,
+          positionManagerEquity: paperAdapter.getTotalEquity(),
+          persistenceBalanceLoaded: paperAdapter.hasCashBalance('USDT'),
+          persistenceSource: 'PaperExchangeAdapter.balances',
+          resetStateActive: false,
+          resetVersion: 'none',
+          resetAt: 'none',
+          balanceInitializedFromConfig,
+          intentionalZeroBalance: configuredDemoStartingCapital === 0 && cashBalance === 0 && positions.length === 0,
+        });
+        const auditLine = `${formatPaperBalancePositionIntegrityAudit(audit)} unrealizedPnl=${unrealizedPnl} positionSymbols=${positions.map(p => p.coin).join('|') || 'none'}`;
+        if (audit.invariantOk) logger.info(auditLine);
+        else logger.warn(auditLine);
       }
       forceUpdate(n => n + 1);
     }, 3000);
     return () => clearInterval(interval);
-  }, [paperAdapter, store]);
+  }, [engine, journal, paperAdapter, positionBootRestoring, store, totalEquity]);
 
   // Periodic diagnostics snapshot
   useEffect(() => {
@@ -709,6 +861,8 @@ export default function App() {
     }
     try {
       const settings = await settingsPersistence.loadSettings();
+      const effectiveAutoBots = settings.paperAutoExecutionEnabled ?? true;
+      const effectiveStrategySource = effectiveAutoBots ? 'autobots' : (settings.strategySource ?? 'autobots');
       banlistRef.current = [...new Set((settings.scannerBanlist ?? settings.manualScannerBanlist ?? []).map((x) => String(x).toUpperCase().trim()).filter(Boolean))];
       const riskGroups = settings.scannerRiskGroups ?? {
         top_caps: true,
@@ -719,10 +873,13 @@ export default function App() {
       };
       const referencePeriod = settings.scannerReferencePeriod ?? '1h';
       const universeMode = (settings.scannerUniverseMode === 'TOP_100' ? 'BINANCE_TOP_250' : settings.scannerUniverseMode ?? 'BINANCE_TOP_250') as UniverseMode;
+      autoRuntime.getScanner().setUniverseMode(universeMode);
+      store.setUniverseMode(universeMode);
+      logger.info(`SCANNER_UNIVERSE_MODE_START_APPLIED: source=settings value=${universeMode}`);
       // Preserve live scanner auto state — UI toggle (TradePage.tsx handleTogglePaperAuto) and hydration
       // update scanner immediately. Persisted settings may be stale if persistence write hasn't completed.
       const livePaperAuto = autoRuntime.getScanner().isPaperAutoEnabled();
-      const persistedPaperAuto = settings.paperAutoExecutionEnabled ?? false;
+      const persistedPaperAuto = effectiveAutoBots;
       if (livePaperAuto !== persistedPaperAuto) {
         logger.warn(`SCANNER_LIVE_AUTO_STATE_MISMATCH: live=${livePaperAuto} persisted=${persistedPaperAuto} resolution=keep_live scannerInstanceId=${autoRuntime.getScanner().getScannerInstanceId()}`);
       }
@@ -741,6 +898,23 @@ export default function App() {
         referenceMode: mapUiRefModeToScanner(settings.refMode),
         scannerBanlist: settings.scannerBanlist ?? settings.manualScannerBanlist ?? [],
       });
+      autoRuntime.getScanner().setScannerDiagnosticsLevel?.((settings as any).scannerDiagnosticsLevel ?? 'normal');
+      autoRuntime.getScanner().setManualStrategy(!effectiveAutoBots && effectiveStrategySource === 'manual_override'
+        ? (settings.riskStyle === 'aggressive' ? 'momentum' : settings.riskStyle === 'conservative' ? 'conservative' : 'balanced')
+        : null);
+      autoRuntime.getScanner().setTradingTargetConfig({
+        strategySource: effectiveStrategySource,
+        confirmationMode: settings.entryConfirmationMode ?? 'smart',
+        manualTp1Pct: settings.tp1Pct ?? 2.0,
+        manualTp2Pct: settings.tp2Pct ?? 4.0,
+        stopLossPct: settings.stopLossPct ?? 1.5,
+        dynamicTrailingEnabled: settings.dynamicTrailingEnabled ?? false,
+        trailPullbackPct: settings.trailPullbackPct ?? 0.25,
+      });
+      {
+        const diag = autoRuntime.getScanner().getRuntimeSettingsDiagnostics?.();
+        logger.info(`AUTOBOTS_RUNTIME_BINDING_AUDIT: reason=scanner_start uiAutoBotsOn=${String(effectiveAutoBots)} persistedAutoBotsOn=${String(persistedPaperAuto)} runtimeAutoBotsOn=${String(diag?.paperAutoEnabled === true)} scannerAutoExecutionEnabled=${String(diag?.paperAutoEnabled === true)} executionControllerEnabled=${String(diag?.paperAutoBuyFnPresent === true || diag?.liveBuyFnPresent === true)} paperAutoBuyFnPresent=${String(diag?.paperAutoBuyFnPresent === true)} liveBuyFnPresent=${String(diag?.liveBuyFnPresent === true)} scannerRunning=${String(store.state.scannerRunning)} canExecute=${String(effectiveAutoBots && !!diag?.paperAutoBuyFnPresent)} invariantOk=${String(!effectiveAutoBots || (diag?.paperAutoEnabled === true && diag.strategySourceMode === 'autobots' && diag.manualMode === false))}`);
+      }
       logger.info(`REFERENCE_UI_TO_SCANNER_WIRING_AUDIT selectedReferenceMode=${settings.refMode} effectiveReferenceMode=${mapUiRefModeToScanner(settings.refMode) ?? 'default_sma'} selectedReferenceWindow=${settings.refWindow} scannerReferencePeriod=${referencePeriod} interval=n/a limit=n/a scannerReferenceCandles=n/a sourceUsed=boot_startup uiMatchesScanner=true`);
       autoRuntime.getScanner().setExecutionLimits({
         maxPositions: settings.maxPositions ?? 10,
