@@ -35,7 +35,7 @@ ok(engineSrc.includes('DEFAULT_PAPER_AUTO_BUY_HANDLER_INSTALLED'), 'default pape
 ok(engineSrc.includes('source=TradingEngine.defaultPaperAutoBuyFn'), 'default handler routes selected scanner buys through TradingEngine');
 ok(engineSrc.includes('ACTIVE_RUNTIME_SCANNER_WIRING_AUDIT'), 'TradingEngine logs active runtime scanner wiring against the exact scanner instance');
 
-ok(appSrc.includes('scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? false)'), 'boot applies persisted paperAutoExecutionEnabled to scanner runtime');
+ok(appSrc.includes('scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? true)'), 'boot applies persisted paperAutoExecutionEnabled to scanner runtime with fresh-install AutoBots ON default');
 ok(appSrc.includes('autoRuntime.getScanner().setPaperAutoEnabled(true)'), 'scanner start applies persisted paperAutoExecutionEnabled to scanner runtime, preferring live state over stale settings');
 ok(appSrc.includes('SCANNER_LIVE_AUTO_STATE_MISMATCH'), 'scanner start audits mismatch between live and persisted auto state');
 ok(appSrc.includes('SCANNER_AUTO_STATE_KEEP_LIVE'), 'scanner start logs when live state is preserved over stale persisted');

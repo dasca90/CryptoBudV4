@@ -154,7 +154,7 @@ const SCANNER_VISUAL_THEME: Record<string, VisualToken> = {
 export function getVisualToken(state: string): VisualToken | undefined {
   const token = SCANNER_VISUAL_THEME[state];
   if (!token) {
-    logger.warn(`AIR_SCANNER_VISUAL_STATE_BINDING_AUDIT: logicalScannerState=${state} resolvedVisualState=unknown legendTokenUsed=none bubbleTokenUsed=none baseColor=none glowColor=none fallbackUsed=true fallbackReason=state_not_in_theme positionOpen=false executionSubmitted=false candidateStatus=n/a`);
+    logger.warn(`AIR_SCANNER_VISUAL_STATE_BINDING_AUDIT: logicalScannerState=${state} resolvedVisualState=unknown legendTokenUsed=none bubbleTokenUsed=none baseColor=none glowColor=none fallbackUsed=true fallbackReason=state_not_in_theme positionOpen=false submitAttempted=false candidateStatus=n/a`);
     return undefined;
   }
   return token;

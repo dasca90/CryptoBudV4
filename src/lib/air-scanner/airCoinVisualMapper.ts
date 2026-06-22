@@ -122,7 +122,7 @@ export function mapCandidatesToAirCoins(params: {
     const visualLabel = resolveAirCoinStatusLabel(candidate, !!openPosition);
     const rawStatus = candidate.status;
     if (visualLabel !== rawStatus) {
-      logger.info(`AIR_SCANNER_VISUAL_LABEL_AUDIT: symbol=${candidate.symbol} candidateStatus=${rawStatus} finalExecutable=${String(candidate.finalExecutable ?? 'n/a')} buyAllowed=${String(candidate.buyAllowed ?? 'n/a')} executionSelected=false executionSubmitted=false adapterCalled=false positionOpen=${String(!!openPosition)} finalNoBuyReason=${candidate.mainReason ?? 'n/a'} visualLabelBefore=${rawStatus} visualLabelAfter=${visualLabel} visualState=${fallbackState} reason=status_label_mapped`);
+      logger.info(`AIR_SCANNER_VISUAL_LABEL_AUDIT: symbol=${candidate.symbol} candidateStatus=${rawStatus} finalExecutable=${String(candidate.finalExecutable ?? 'n/a')} buyAllowed=${String(candidate.buyAllowed ?? 'n/a')} executionSelected=false submitAttempted=false adapterCalled=false positionOpen=${String(!!openPosition)} finalNoBuyReason=${candidate.mainReason ?? 'n/a'} visualLabelBefore=${rawStatus} visualLabelAfter=${visualLabel} visualState=${fallbackState} reason=status_label_mapped`);
     }
 
     coins.push({

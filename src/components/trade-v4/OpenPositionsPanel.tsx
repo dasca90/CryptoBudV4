@@ -5,6 +5,7 @@ import { CoinSymbolCell } from "./CoinLogo";
 import { logger } from "../../utils/logger";
 import { formatLocalTime } from "../../utils/timeFormatter";
 import { useVirtualWindow } from "../../lib/ui/virtualization";
+import { getMemoryPressureState } from "../../core/diagnostics/memoryLifecycle";
 
 const PAGE_SIZE = 10;
 const POSITION_VIRTUALIZATION_THRESHOLD = 25;
@@ -183,15 +184,22 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
     virtualAuditRef.current = now;
     logger.info(`VIRTUALIZED_TABLE_RENDER_AUDIT: table=open_positions enabled=${String(virtualWindow.isVirtualized)} visibleRows=${rows.length} totalRows=${filteredPositions.length} threshold=${POSITION_VIRTUALIZATION_THRESHOLD} pnlDisplayPreserved=true freshnessBadgePreserved=true`);
   }, [virtualWindow.isVirtualized, rows.length, filteredPositions.length]);
+  const cellAuditSignaturesRef = useRef(new Map<string, { signature: string; emittedAt: number }>());
   useEffect(() => {
     let emittedCount = 0;
     let suppressedCount = 0;
-    const MAX_UI_AUDIT_PER_CYCLE = 3;
+    const MAX_UI_AUDIT_PER_CYCLE = getMemoryPressureState().active ? 0 : 3;
+    const now = Date.now();
     for (const p of rows) {
       const invalidTp1 = p.tp1Pct == null || p.tp1Pct <= 0;
       const valueDisplayed = invalidTp1 ? 'BUG: TP1 INVALID' : `${Number(p.tp1Pct).toFixed(2)}%`;
-      if (emittedCount < MAX_UI_AUDIT_PER_CYCLE) {
+      const signature = `${valueDisplayed}|${p.riskSnapshotStatus ?? 'n/a'}|${p.sourceUsed ?? 'n/a'}`;
+      const previous = cellAuditSignaturesRef.current.get(p.symbol);
+      const changed = previous?.signature !== signature;
+      const periodic = previous == null || now - previous.emittedAt > 60000;
+      if ((changed || periodic || invalidTp1) && emittedCount < MAX_UI_AUDIT_PER_CYCLE) {
         logger.info(`OPEN_POSITION_UI_CELL_AUDIT: symbol=${p.symbol} column=TP1 valueDisplayed=${valueDisplayed} sourceField=tp1Pct sourceObjectPath=TradeV4OpenPositionView.tp1Pct riskSnapshotStatus=${p.riskSnapshotStatus ?? 'n/a'} sourceUsed=${p.sourceUsed ?? 'n/a'}`);
+        cellAuditSignaturesRef.current.set(p.symbol, { signature, emittedAt: now });
         emittedCount++;
       } else {
         suppressedCount++;
@@ -201,7 +209,7 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
       }
     }
     if (suppressedCount > 0) {
-      logger.info(`UI_AUDIT_RATE_LIMIT_AUDIT: auditName=OPEN_POSITION_UI_CELL_AUDIT emittedCount=${emittedCount} suppressedCount=${suppressedCount} reason=rate_limit_per_render_cycle`);
+      logger.throttled("INFO", `UI_AUDIT_RATE_LIMIT_AUDIT: auditName=OPEN_POSITION_UI_CELL_AUDIT emittedCount=${emittedCount} suppressedCount=${suppressedCount} reason=value_change_or_60s_rate_limit memoryPressure=${String(getMemoryPressureState().active)}`, "open-position-ui-cell-audit-rate-limit", 30000);
     }
   }, [rows]);
 
@@ -274,9 +282,19 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                     <td style={{ fontWeight: 600 }}>
                       <CoinSymbolCell symbol={p.symbol} />
                       {!p.hasSnapshot && <div className="status-warn" style={{ fontSize: 9 }}>LEGACY / MISSING SNAPSHOT</div>}
+                      {p.exitPriceUnavailable && <div className="status-bad" style={{ fontSize: 9 }}>Exit check skipped - no fresh close price.</div>}
                     </td>
                     <td><span className={`v3-pill ${stateTone(p).cls}`}>{stateTone(p).label}</span></td>
-                    <td><span className={`v3-pill ${strategyTone(p.strategy)}`}>{p.strategy}</span>{p.strategy === 'dip_and_rebound' && p.reboundPct != null && p.reboundPct <= 0 && <span className="status-bad" style={{fontSize:8,marginLeft:4}}>INVALID D&R</span>}</td>
+                    <td>
+                      <span
+                        className={`v3-pill ${strategyTone(p.strategy)}`}
+                        title={`Strategy: ${p.strategy}\nMarket: ${p.marketBestFit ?? 'n/a'}\nGroup: ${p.groupRecommendedStrategy ?? 'n/a'}\nFinal: ${p.finalExecutionStrategy ?? p.strategy}\nReason: ${p.strategyDecisionReason ?? 'n/a'}\nOverride: ${p.overrideApplied ? (p.overrideReason ?? 'missing reason') : 'none'}`}
+                      >
+                        {p.strategy}
+                      </span>
+                      {p.strategyMismatchWarning && <span className="status-bad" style={{fontSize:8,marginLeft:4}}>{p.strategyMismatchWarning}</span>}
+                      {p.strategy === 'dip_and_rebound' && p.reboundPct != null && p.reboundPct <= 0 && <span className="status-bad" style={{fontSize:8,marginLeft:4}}>INVALID D&R</span>}
+                    </td>
                     <td><span className={`v3-pill ${trendTone(p.groupTrend ?? p.marketRegimeAtEntry)}`}>{p.groupTrend ?? p.marketRegimeAtEntry ?? 'n/a'}</span></td>
                     <td>{p.quantity != null ? Number(p.quantity).toFixed(4) : 'n/a'}</td>
                     <td>{p.usedCapitalUsd != null ? `$${p.usedCapitalUsd.toFixed(2)}` : 'n/a'}</td>
@@ -319,6 +337,7 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                           {p.pnlBreakdown?.priceFreshness === 'stale' && <span className="status-warn">PNL BASED ON STALE PRICE</span>}
                           {p.pnlBreakdown?.priceFreshness === 'fallback' && <span className="status-warn">FALLBACK PRICE USED</span>}
                           {p.pnlBreakdown?.priceFreshness === 'unavailable' && <span className="status-bad">PNL UNAVAILABLE — LIVE PRICE MISSING</span>}
+                          {p.exitPriceUnavailable && <span className="status-bad">Exit check skipped - no fresh close price.</span>}
                         </span>
                       </span>
                     </td>
@@ -459,6 +478,7 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
           <div className="row-tooltip-section"><b>Mode:</b> {tooltipState.position.mode ?? 'n/a'} · {tooltipState.position.executionMode ?? 'Demo'}</div>
           <div className="row-tooltip-section"><b>Entry Rule:</b> {tooltipState.position.entryRule ?? 'n/a'}</div>
           {tooltipState.position.hasSnapshot === false && <div className="row-tooltip-section status-bad">MISSING ENTRY SNAPSHOT</div>}
+          {tooltipState.position.exitPriceUnavailable && <div className="row-tooltip-section status-bad">Exit check skipped - no fresh close price.</div>}
           {tooltipState.position.strategy === 'dip_and_rebound' && (() => {
             const r = tooltipState.position.reboundPct;
             const drViolation = r != null && r <= 0;

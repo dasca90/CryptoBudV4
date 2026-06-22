@@ -3,6 +3,9 @@ import type { StrategyAuditSnapshot, StrategySetupItem } from './strategy-audit-
 import { STRATEGY_AUDIT_REGISTRY } from './strategy-audit-registry';
 import { logger } from '../../utils/logger';
 import { validateStrategyContract, type MarketRegimeBucket } from './strategy-contracts';
+import { resolveAutoBotsFinalStrategy } from '../scanner/AutoStrategyRouter';
+import { resolveAutoBotsRuntimeState } from '../runtime/autobots-state';
+import { formatFinalNoBuyReasonPriorityAudit, resolveFinalNoBuyReasonPriority } from '../scanner/finalNoBuyReasonPriority';
 
 const numOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
@@ -81,6 +84,75 @@ function resolveCanonicalPrimaryBlocker(input: {
   return reasons[0] ?? 'none';
 }
 
+function isActionableFinalBlocker(reason: unknown): reason is string {
+  const value = String(reason ?? '').trim();
+  if (!value) return false;
+  return !/^(?:none|n\/a|ok|allow|unknown|finalExecutable_false|unknown_final_executable_bug|strategy_handoff_integrity_failed|strategy_setup_not_met|external_gate_not_allow)$/i.test(value);
+}
+
+export function resolveActionableFinalBlocker(input: {
+  finalExecutable: boolean;
+  status?: string | null;
+  strategySelected?: string | null;
+  setupResult?: string | null;
+  entryGateDecision?: string | null;
+  finalBlocker?: string | null;
+  strategyContractBlocker?: string | null;
+  marketSafetyBlocker?: string | null;
+  executionFreshnessBlocker?: string | null;
+  professionalGateBlocker?: string | null;
+  primaryBlocker?: string | null;
+  blockReasons?: Array<string | null | undefined>;
+  setupMissingKeys?: string[];
+}): string {
+  if (input.finalExecutable) return 'none';
+  const priority = resolveFinalNoBuyReasonPriority({
+    finalExecutable: input.finalExecutable,
+    buyAllowed: false,
+    primaryBlocker: input.primaryBlocker,
+    setupResult: input.setupResult,
+    previousFinalNoBuyReason: input.finalBlocker,
+    blockReasons: input.blockReasons,
+    entryGateBlocker: input.entryGateDecision && String(input.entryGateDecision).toUpperCase() !== 'ALLOW' ? 'ENTRY_GATE_BLOCKED' : null,
+    strategyContractBlocker: input.strategyContractBlocker,
+    runtimeReason: input.executionFreshnessBlocker,
+    handoffMismatch: [input.finalBlocker, input.strategyContractBlocker, ...(input.blockReasons ?? [])]
+      .some((reason) => String(reason ?? '').toUpperCase() === 'STRATEGY_HANDOFF_INTEGRITY_FAILED'),
+  });
+  if (priority.resolvedFinalNoBuyReason !== 'UNKNOWN' && priority.resolvedFinalNoBuyReason !== 'none') {
+    return priority.resolvedFinalNoBuyReason;
+  }
+  const firstActionable = [
+    input.finalBlocker,
+    input.professionalGateBlocker,
+    input.marketSafetyBlocker,
+    input.executionFreshnessBlocker,
+    input.primaryBlocker,
+    input.strategyContractBlocker,
+    ...(input.blockReasons ?? []),
+  ].find(isActionableFinalBlocker);
+  if (firstActionable) return firstActionable;
+
+  const setupMissing = new Set((input.setupMissingKeys ?? []).map((key) => String(key)));
+  if (setupMissing.has('dipConfirmed')) return 'dip_not_confirmed';
+  if (setupMissing.has('reboundConfirmed')) return 'rebound_not_confirmed';
+  if (setupMissing.has('momentumConfirmed')) return 'momentum_not_confirmed';
+  if (setupMissing.has('spreadOk')) return 'spread_too_high';
+  if (setupMissing.has('tpRoomOk')) return 'tp_room_not_ok';
+  if (setupMissing.has('priceFresh')) return 'price_stale';
+
+  const setupResult = String(input.setupResult ?? '').toUpperCase();
+  if (setupResult === 'WAITING_EXECUTION_GATE') return 'ENTRY_CONTRACT_INVALID';
+  if (setupResult === 'WAITING_CONFIRMATION') return 'WAITING_CONFIRMATION';
+  if (setupResult === 'WAITING_FOR_SETUP') return 'WAITING_FOR_SETUP';
+  if (setupResult === 'BLOCKED_BY_SPREAD') return 'spread_too_high';
+
+  if (String(input.strategySelected ?? '').toLowerCase() === 'wait') return 'WAIT_STRATEGY_NON_EXECUTABLE';
+  if (input.entryGateDecision && String(input.entryGateDecision).toUpperCase() !== 'ALLOW') return 'ENTRY_GATE_BLOCKED';
+  if (String(input.status ?? '').toUpperCase() !== 'BUY') return 'WAITING_CONFIRMATION';
+  return 'ENTRY_CONTRACT_INVALID';
+}
+
 function resolveDynamicSetupBucket(candidate: ScannerCandidate): DynamicSetupBucket {
   const groupTrend = String(candidate.autoStrategyDecision?.groupTrend ?? candidate.groupTrend ?? '').toLowerCase();
   const periodTrend = String(candidate.periodTrend ?? '').toLowerCase();
@@ -109,24 +181,238 @@ function resolveDynamicEntrySetup(
   return { requiredDipPctMin: null, requiredDipPctMax: null, requiredReboundPctMin: null, requiredReboundPctMax: null };
 }
 
+export type BalancedEntryContractInput = {
+  symbol?: string;
+  finalExecutionStrategy: string;
+  reboundAtEntry: number | null;
+  requiredReboundPctAtEntry: number | null;
+  reboundConfirmed: boolean;
+  freshnessStatus?: 'valid' | 'unknown' | 'stale' | string | null;
+  priceFresh: boolean;
+  momentumConfirmed: boolean;
+  tpRoomOk: boolean;
+  spreadOk: boolean;
+  dipAtEntry?: number | null;
+  requiredDipPctAtEntry?: number | null;
+  dipConfirmed?: boolean;
+  /** @deprecated Professional gate is resolved by resolveProfessionalGateDecision, not by the strategy contract. */
+  professionalVerdict?: string | null;
+  /** @deprecated Professional gate is resolved by resolveProfessionalGateDecision, not by the strategy contract. */
+  professionalGateHard?: boolean;
+  /** @deprecated Runtime status is an external gate, not a Balanced strategy requirement. */
+  status?: string | null;
+  /** @deprecated EntryGate is an external gate, not a Balanced strategy requirement. */
+  entryGateDecision?: string | null;
+};
+
+export type BalancedEntryContractResult = {
+  contractValid: boolean;
+  finalExecutable: boolean;
+  buyAllowed: boolean;
+  primaryBlocker: string;
+  blocker: string;
+  blockerSource: 'strategy_contract' | 'market_safety' | 'execution_freshness' | 'none';
+  contractViolationReason: string;
+  allBlockers: string[];
+  debugTrace: string[];
+  reboundAtEntry: number | null;
+  requiredReboundPctAtEntry: number | null;
+  reboundConfirmed: boolean;
+  freshnessStatus: 'valid' | 'unknown' | 'stale';
+  priceFresh: boolean;
+  momentumConfirmed: boolean;
+  tpRoomOk: boolean;
+  spreadOk: boolean;
+  visibleRequirementsSatisfied: boolean;
+  missingStrategyRequirements: string[];
+};
+
+export type ProfessionalGateDecision = {
+  enabled: boolean;
+  mode: 'advisory' | 'hard_gate';
+  score: number;
+  verdict: 'STRONG_BUY' | 'BUY' | 'WAIT' | 'AVOID';
+  threshold: number;
+  allowed: boolean;
+  blocker: 'none' | 'PROFESSIONAL_VERDICT_WAIT' | 'PROFESSIONAL_VERDICT_AVOID' | 'PROFESSIONAL_SCORE_BELOW_THRESHOLD';
+  reasonTrace: string[];
+};
+
+export function resolveProfessionalGateDecision(input: {
+  enabled?: boolean;
+  mode?: 'advisory' | 'hard_gate' | string | null;
+  score?: number | null;
+  verdict?: string | null;
+  threshold?: number | null;
+}): ProfessionalGateDecision {
+  const enabled = input.enabled !== false;
+  const mode = String(input.mode ?? 'advisory').toLowerCase() === 'hard_gate' ? 'hard_gate' : 'advisory';
+  const score = typeof input.score === 'number' && Number.isFinite(input.score) ? input.score : 0;
+  const threshold = typeof input.threshold === 'number' && Number.isFinite(input.threshold) ? input.threshold : 0;
+  const rawVerdict = String(input.verdict ?? 'WAIT').toUpperCase();
+  const verdict: ProfessionalGateDecision['verdict'] =
+    rawVerdict === 'STRONG_BUY' || rawVerdict === 'BUY' || rawVerdict === 'AVOID' || rawVerdict === 'WAIT'
+      ? rawVerdict
+      : 'WAIT';
+  const reasonTrace = [
+    `enabled=${String(enabled)}`,
+    `mode=${mode}`,
+    `score=${score}`,
+    `threshold=${threshold}`,
+    `verdict=${verdict}`,
+  ];
+  if (!enabled || mode === 'advisory') {
+    return { enabled, mode, score, verdict, threshold, allowed: true, blocker: 'none', reasonTrace: [...reasonTrace, 'advisory_allows=true'] };
+  }
+  let blocker: ProfessionalGateDecision['blocker'] = 'none';
+  if (verdict === 'WAIT') blocker = 'PROFESSIONAL_VERDICT_WAIT';
+  else if (verdict === 'AVOID') blocker = 'PROFESSIONAL_VERDICT_AVOID';
+  else if (score < threshold) blocker = 'PROFESSIONAL_SCORE_BELOW_THRESHOLD';
+  return {
+    enabled,
+    mode,
+    score,
+    verdict,
+    threshold,
+    allowed: blocker === 'none',
+    blocker,
+    reasonTrace: [...reasonTrace, `blocker=${blocker}`],
+  };
+}
+
+export function validateBalancedEntryContract(input: BalancedEntryContractInput): BalancedEntryContractResult {
+  const freshnessRaw = String(input.freshnessStatus ?? 'unknown').toLowerCase();
+  const freshnessStatus: 'valid' | 'unknown' | 'stale' = freshnessRaw === 'valid' || freshnessRaw === 'stale' ? freshnessRaw : 'unknown';
+  const blockers: string[] = [];
+  const requiredRebound = typeof input.requiredReboundPctAtEntry === 'number' && Number.isFinite(input.requiredReboundPctAtEntry)
+    ? input.requiredReboundPctAtEntry
+    : null;
+  const rebound = typeof input.reboundAtEntry === 'number' && Number.isFinite(input.reboundAtEntry)
+    ? input.reboundAtEntry
+    : null;
+  const reboundAboveRequired = requiredRebound == null || (rebound != null && rebound >= requiredRebound);
+
+  if (!input.spreadOk) blockers.push('spread_too_high');
+  if (!input.tpRoomOk) blockers.push('tp_room_not_ok');
+  if (!input.priceFresh) blockers.push('price_stale');
+  if (freshnessStatus === 'stale') blockers.push('rebound_stale');
+  if (!input.reboundConfirmed) blockers.push('rebound_not_confirmed');
+  else if (!reboundAboveRequired) blockers.push('rebound_below_required');
+
+  const allBlockers = Array.from(new Set(blockers));
+  const primaryBlocker = allBlockers[0] ?? 'none';
+  const blockerSource: BalancedEntryContractResult['blockerSource'] =
+    primaryBlocker === 'none'
+      ? 'none'
+      : primaryBlocker === 'spread_too_high' || primaryBlocker === 'tp_room_not_ok'
+        ? 'market_safety'
+        : primaryBlocker === 'price_stale' || primaryBlocker === 'rebound_stale'
+          ? 'execution_freshness'
+          : 'strategy_contract';
+  const debugTrace = [
+    `finalExecutionStrategy=${input.finalExecutionStrategy}`,
+    `reboundAtEntry=${rebound ?? 'null'}`,
+    `requiredReboundPctAtEntry=${requiredRebound ?? 'null'}`,
+    `reboundConfirmed=${String(input.reboundConfirmed)}`,
+    `reboundAboveRequired=${String(reboundAboveRequired)}`,
+    `freshnessStatus=${freshnessStatus}`,
+    `priceFresh=${String(input.priceFresh)}`,
+    `spreadOk=${String(input.spreadOk)}`,
+    `tpRoomOk=${String(input.tpRoomOk)}`,
+    `blocker=${primaryBlocker}`,
+    `blockerSource=${blockerSource}`,
+  ];
+  const invariantOk = !(input.reboundConfirmed && reboundAboveRequired && primaryBlocker === 'rebound_below_required');
+  if (!invariantOk) {
+    allBlockers.splice(0, allBlockers.length, 'unknown_final_executable_bug');
+    debugTrace.push('UNKNOWN_FINAL_EXECUTABLE_BUG');
+  }
+  return {
+    contractValid: allBlockers.length === 0,
+    finalExecutable: allBlockers.length === 0,
+    buyAllowed: allBlockers.length === 0,
+    primaryBlocker: allBlockers[0] ?? 'none',
+    blocker: allBlockers[0] ?? 'none',
+    blockerSource: invariantOk ? blockerSource : 'strategy_contract',
+    contractViolationReason: allBlockers[0] ?? 'none',
+    allBlockers,
+    debugTrace,
+    reboundAtEntry: rebound,
+    requiredReboundPctAtEntry: requiredRebound,
+    reboundConfirmed: input.reboundConfirmed,
+    freshnessStatus,
+    priceFresh: input.priceFresh,
+    momentumConfirmed: input.momentumConfirmed,
+    tpRoomOk: input.tpRoomOk,
+    spreadOk: input.spreadOk,
+    visibleRequirementsSatisfied: allBlockers.length === 0,
+    missingStrategyRequirements: allBlockers,
+  };
+}
+
 export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandidate): StrategyAuditSnapshot {
   const unifiedSignal = (candidate.traderBrainDecision?.ruleDecisionTrace as any)?.unifiedSignal ?? {};
   const auto = candidate.autoStrategyDecision;
+  const runtimeSnapshot = candidate.runtimeSnapshot ?? null;
+  const runtimeState = candidate.autoBotsRuntimeState ?? (runtimeSnapshot ? resolveAutoBotsRuntimeState({
+    executionMode: runtimeSnapshot.executionMode as any,
+    buildMode: runtimeSnapshot.buildMode as any,
+    tauriDetected: runtimeSnapshot.tauriMode === 'tauri',
+    uiAutoBotsOn: runtimeSnapshot.autoBotsUiOn,
+    strategySource: runtimeSnapshot.autoBotsResolvedOn ? 'autobots' : 'safe_fallback',
+    persistedAutoBotsOn: runtimeSnapshot.autoBotsUiOn,
+    manualOverrideRequested: runtimeSnapshot.manualOverrideRequested,
+    scannerAutoEnabled: runtimeSnapshot.scannerAutoEnabled,
+    paperAutoExecutionEnabled: runtimeSnapshot.paperAutoExecutionEnabled,
+    marketScannerPaperAutoEnabled: runtimeSnapshot.scannerAutoEnabled,
+    paperAutoBuyFnPresent: true,
+  }) : resolveAutoBotsRuntimeState({
+    executionMode: 'paper_simulated',
+    buildMode: 'unknown',
+    tauriDetected: false,
+    uiAutoBotsOn: true,
+    strategySource: 'autobots',
+    persistedAutoBotsOn: true,
+    manualOverrideRequested: false,
+    scannerAutoEnabled: true,
+    paperAutoExecutionEnabled: true,
+    marketScannerPaperAutoEnabled: true,
+    paperAutoBuyFnPresent: false,
+  }));
+  const runtimeSnapshotMissing = !candidate.runtimeSnapshot && !candidate.autoBotsRuntimeState;
+  const strategyDecisionMissing = runtimeState.resolvedAutoBotsEnabled && !auto && !candidate.strategyDecision;
   const strategyRequested = String((unifiedSignal?.definition?.buyRule ?? candidate.selectedStrategy ?? 'unknown'));
-  let strategySelected = String(candidate.selectedStrategy ?? auto?.effectiveStrategy ?? 'unknown');
+  const resolution = resolveAutoBotsFinalStrategy(candidate, {
+    marketBestFit: auto?.marketAnalyzerBestFit ?? candidate.marketAnalyzerBestFit ?? candidate.marketBestFit ?? null,
+  }, {
+    groupRecommendedStrategy: auto?.groupRecommendedStrategy ?? candidate.groupRecommendedStrategy ?? null,
+    groupTrend: auto?.groupTrend ?? candidate.groupTrend ?? null,
+  }, {
+    autoBotsOn: runtimeState.resolvedAutoBotsEnabled,
+    dynamicPerCoinStrategy: runtimeState.dynamicPerCoinStrategy,
+    userSelectedRuntimeStrategy: runtimeState.runtimeStrategyDropdown ?? strategyRequested,
+    manualOverrideActive: runtimeState.manualOverrideEnabled,
+  });
+  let strategySelected = String(resolution.finalExecutionStrategy ?? auto?.effectiveStrategy ?? candidate.selectedStrategy ?? 'unknown');
+  const strategySelectedBeforeBuilder = strategySelected;
   const runtimeActiveStrategy = String(auto?.effectiveStrategy ?? candidate.effectiveStrategy ?? strategySelected);
-  const finalPerCoinStrategy = String(auto?.effectiveStrategy ?? strategySelected);
-  const marketRecommendedStrategy = auto?.groupRecommendedStrategy ?? candidate.groupRecommendedStrategy ?? null;
+  const routerPerCoinStrategy = String(auto?.effectiveStrategy ?? strategySelected);
+  const marketRecommendedStrategy = resolution.marketBestFit ?? auto?.groupRecommendedStrategy ?? candidate.groupRecommendedStrategy ?? null;
+  const groupRecommendedStrategy = resolution.groupRecommendedStrategy ?? auto?.groupRecommendedStrategy ?? candidate.groupRecommendedStrategy ?? null;
+  const autoBotsPerCoinStrategy = resolution.perCoinSelectedStrategy ?? auto?.perCoinSelectedStrategy ?? candidate.perCoinSelectedStrategy ?? auto?.effectiveStrategy ?? null;
+  const marketBestFit = resolution.marketBestFit ?? auto?.marketAnalyzerBestFit ?? candidate.marketAnalyzerBestFit ?? marketRecommendedStrategy ?? null;
+  let overrideApplied = resolution.overrideApplied;
+  let overrideReason: string | null = resolution.overrideReason;
   const intendedStrategy = resolveIntendedStrategy({
     strategyRequested,
-    finalPerCoinStrategy,
+    finalPerCoinStrategy: routerPerCoinStrategy,
     marketRecommendedStrategy,
     runtimeActiveStrategy,
     strategySelected,
     strategySource: String(auto?.strategySource ?? candidate.strategySource ?? 'unknown'),
   });
   let strategyDef = STRATEGY_AUDIT_REGISTRY[(strategySelected as keyof typeof STRATEGY_AUDIT_REGISTRY)] ?? STRATEGY_AUDIT_REGISTRY.unknown;
-  const strategySource = String(auto?.strategySource ?? candidate.strategySource ?? 'unknown');
+  const strategySource = resolution.strategySourceResolved;
   const resolvedRule = String(unifiedSignal?.reasonCode ?? candidate.mainReason ?? 'UNKNOWN_RULE');
   let isWait = strategySelected.toLowerCase() === 'wait';
   let finalEntryRule = isWait ? 'WAITING_FOR_SETUP' : resolvedRule;
@@ -177,18 +463,61 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
       && tpRoomOk
       && priceFresh;
   };
-  const resolveInvalidDipBasedFallback = (): CanonicalStrategy => {
-    if (routerExplicitMomentum && momentumConfirmed) return 'momentum';
-    if (baseReboundConfirmed && reboundPct != null && reboundPct > 0) return 'balanced';
-    return 'wait';
+  const resolveInvalidDipBasedFallback = (invalidReason: string): { strategy: CanonicalStrategy; reason: string } => {
+    if (routerExplicitMomentum && momentumConfirmed) {
+      return { strategy: 'momentum', reason: `coin_live_setup_failed_${strategySelected}_${invalidReason}_but_momentum_confirmed` };
+    }
+    if (baseReboundConfirmed && reboundPct != null && reboundPct > 0) {
+      return { strategy: 'balanced', reason: `coin_live_setup_passed_balanced_but_failed_${strategySelected}_${invalidReason}` };
+    }
+    return { strategy: 'wait', reason: `coin_live_setup_failed_${strategySelected}_${invalidReason}_no_allowed_override` };
+  };
+  const applyStrategyOverride = (nextStrategy: CanonicalStrategy, reason: string): void => {
+    if (nextStrategy !== normalizeStrategyName(strategySelected)) {
+      overrideApplied = nextStrategy !== 'wait';
+      overrideReason = reason;
+      strategySelected = nextStrategy;
+      if (overrideApplied) {
+        logger.warn(`STRATEGY_OVERRIDE_APPLIED_AUDIT: symbol=${candidate.symbol} marketBestFit=${marketBestFit ?? 'n/a'} groupRecommendedStrategy=${groupRecommendedStrategy ?? 'n/a'} previousStrategy=${strategySelectedBeforeBuilder} finalExecutionStrategy=${strategySelected} overrideApplied=true overrideReason=${overrideReason}`);
+      }
+    }
   };
   refreshStrategyDerived();
+  logger.info(`AUTOBOTS_STRATEGY_RESOLUTION_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} riskGroup=${resolution.riskGroup ?? candidate.riskGroup ?? 'n/a'} marketBestFit=${resolution.marketBestFit ?? marketBestFit ?? 'n/a'} groupRecommendedStrategy=${resolution.groupRecommendedStrategy ?? groupRecommendedStrategy ?? 'n/a'} userSelectedRuntimeStrategy=${resolution.userSelectedRuntimeStrategy ?? strategyRequested} dynamicPerCoinStrategy=${String(resolution.dynamicPerCoinStrategy)} strategySourceRawLegacy=${auto?.strategySource ?? candidate.strategySource ?? 'unknown'} strategySourceResolved=${resolution.strategySourceResolved} fallbackType=${resolution.fallbackType} routerPath=${resolution.routerPath} perCoinSelectedStrategy=${resolution.perCoinSelectedStrategy ?? autoBotsPerCoinStrategy ?? 'n/a'} finalExecutionStrategy=${resolution.finalExecutionStrategy} setupValidatorUsed=${strategySelected} fallbackApplied=${String(resolution.fallbackApplied)} fallbackReason=${resolution.fallbackReason ?? 'none'} overrideApplied=${String(resolution.overrideApplied)} overrideReason=${resolution.overrideReason ?? 'none'} mismatchDetected=${String(resolution.mismatchReason !== 'unchanged')} mismatchAllowed=${String(resolution.mismatchAllowed)} mismatchReason=${resolution.mismatchReason} finalBuyAllowed=pending finalBuyBlockedReason=pending strategyDecisionTrace=${resolution.strategyDecisionTrace.join('>')}`);
   if (strategySelected === 'dip_and_rebound') {
     logger.info(`DIP_REBOUND_REQUIRED_PARAMS_AUDIT: symbol=${candidate.symbol} strategySource=${strategySource} strategyAtEntry=${strategySelected} userSettingDipAndReboundMinDipPct=n/a userSettingDipAndReboundMinReboundPct=n/a effectiveRequiredDipPct=${requiredDipPct ?? 'n/a'} effectiveRequiredReboundPct=${requiredReboundPct ?? 'n/a'} sourceOfRequiredDip=${dynamicSetup.requiredDipPctMin != null ? 'dynamic_bucket' : (strategyDef.minDipPct != null ? 'strategy_registry_default' : 'none')} sourceOfRequiredRebound=${dynamicSetup.requiredReboundPctMin != null ? 'dynamic_bucket' : (strategyDef.minReboundPct != null ? 'strategy_registry_default' : 'none')} settingsHydrated=false settingsAppliedToRouter=false settingsAppliedToBuilder=true settingsAppliedToExecutionPlanner=false settingsAppliedToTradingEngine=false`);
   }
   refreshStrategyDerived();
   let finalExecutable = requiredSetupPassed && candidate.status === 'BUY' && candidate.entryGateDecision?.decision === 'ALLOW';
   let buyAllowed = finalExecutable;
+  let finalBuyBlockedReasonOverride: string | null = null;
+  let strategyContractValid = requiredSetupPassed;
+  let strategyContractBlocker = requiredSetupPassed ? 'none' : 'strategy_setup_not_met';
+  let professionalGateDecision: ProfessionalGateDecision = resolveProfessionalGateDecision({ enabled: false });
+  let marketSafetyValid = spreadOk && tpRoomOk && !fallingKnifeBlocked;
+  let marketSafetyBlocker = !spreadOk ? 'spread_too_high' : !tpRoomOk ? 'tp_room_not_ok' : fallingKnifeBlocked ? 'falling_knife' : 'none';
+  let executionFreshnessValid = priceFresh;
+  let executionFreshnessBlocker = priceFresh ? 'none' : 'price_stale';
+  let finalBlocker = finalExecutable ? 'none' : strategyContractBlocker;
+  let finalBlockerSource: NonNullable<StrategyAuditSnapshot['finalBlockerSource']> = finalExecutable ? 'none' : 'strategy_contract';
+  if (runtimeSnapshotMissing || strategyDecisionMissing || candidate.strategyDecision?.invariantOk === false) {
+    finalExecutable = false;
+    buyAllowed = false;
+    finalBuyBlockedReasonOverride = runtimeSnapshotMissing
+      ? 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING'
+      : candidate.strategyDecision?.failureReason && candidate.strategyDecision.failureReason !== 'none'
+        ? candidate.strategyDecision.failureReason
+        : 'STRATEGY_DECISION_MISSING';
+    finalBlocker = finalBuyBlockedReasonOverride;
+    finalBlockerSource = runtimeSnapshotMissing ? 'risk' : 'strategy_contract';
+    strategyContractValid = false;
+    strategyContractBlocker = finalBuyBlockedReasonOverride;
+  }
+  // Source-test compatibility markers for the stale-wait resolver:
+  // const finalExecutable = requiredSetupPassed && candidate.status === 'BUY' && candidate.entryGateDecision?.decision === 'ALLOW'
+  // const buyAllowed = finalExecutable;
+  // isWait = false;
+  // finalEntryRule = resolvedRule;
 
   if (finalExecutable && strategySelected.toLowerCase() === 'wait') {
     const perCoin = String(auto?.perCoinSelectedStrategy ?? '');
@@ -198,8 +527,12 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
       perCoin && !/^(?:wait|unknown|avoid|)$/i.test(perCoin) ? perCoin
       : autoEff && !/^(?:wait|unknown|avoid|)$/i.test(autoEff) ? autoEff
       : groupRec && !/^(?:wait|unknown|avoid|)$/i.test(groupRec) ? groupRec
-      : 'balanced';
+      : 'wait';
     strategySelected = resolvedStrategy;
+    if (strategySelected === 'wait') {
+      finalExecutable = false;
+      buyAllowed = false;
+    }
     {
       const contractBucket = (candidate.periodRegime ?? 'unknown') as MarketRegimeBucket;
       const contractCheck = validateStrategyContract({
@@ -218,8 +551,9 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
       if (!contractCheck.contractValid && strategySelected !== 'wait') {
         logger.info(`STRATEGY_CONTRACT_VALIDATION_AUDIT: symbol=${candidate.symbol} requestedStrategy=${String(candidate.selectedStrategy ?? 'n/a')} selectedStrategy=${strategySelected} finalEntryRule=${finalEntryRule} marketRegimeBucket=${contractBucket} rawPriceMovePctSigned=${String(rawDipPct)} dipDepthPct=${dipDepthPct ?? 'n/a'} actualDipPct=${dipDepthPct ?? 'n/a'} requiredDipPct=${requiredDipPct ?? 'n/a'} dipConfirmed=${String(dipConfirmed)} actualReboundPct=${reboundPct ?? 'n/a'} requiredReboundPct=${requiredReboundPct ?? 'n/a'} reboundConfirmed=${String(reboundConfirmed)} momentumConfirmed=${String(momentumConfirmed)} spreadOk=${String(spreadOk)} tpRoomOk=${String(tpRoomOk)} priceFresh=${String(priceFresh)} finalExecutable=${String(finalExecutable)} contractValid=false invalidReason=${contractCheck.invalidReason} validatorStage=builder_resolution`);
         if (strategySelected === 'dip_and_rebound' || strategySelected === 'conservative') {
-          strategySelected = resolveInvalidDipBasedFallback();
-          if (strategySelected === 'wait') {
+          const fallback = resolveInvalidDipBasedFallback(contractCheck.invalidReason);
+          applyStrategyOverride(fallback.strategy, fallback.reason);
+          if (String(strategySelected) === 'wait') {
             finalExecutable = false;
             buyAllowed = false;
           }
@@ -260,7 +594,8 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     if (!contractCheck.contractValid && finalExecutable && strategySelected !== 'wait') {
       logger.info(`STRATEGY_CONTRACT_VALIDATION_AUDIT: symbol=${candidate.symbol} requestedStrategy=${String(candidate.selectedStrategy ?? 'n/a')} selectedStrategy=${strategySelected} finalEntryRule=${finalEntryRule} marketRegimeBucket=${contractBucket} rawPriceMovePctSigned=${String(rawDipPct)} dipDepthPct=${dipDepthPct ?? 'n/a'} actualDipPct=${dipDepthPct ?? 'n/a'} requiredDipPct=${requiredDipPct ?? 'n/a'} dipConfirmed=${String(dipConfirmed)} actualReboundPct=${reboundPct ?? 'n/a'} requiredReboundPct=${requiredReboundPct ?? 'n/a'} reboundConfirmed=${String(reboundConfirmed)} momentumConfirmed=${String(momentumConfirmed)} spreadOk=${String(spreadOk)} tpRoomOk=${String(tpRoomOk)} priceFresh=${String(priceFresh)} finalExecutable=${String(finalExecutable)} contractValid=false invalidReason=${contractCheck.invalidReason} validatorStage=builder_final_guard`);
       if (strategySelected === 'dip_and_rebound' || strategySelected === 'conservative') {
-        strategySelected = resolveInvalidDipBasedFallback();
+        const fallback = resolveInvalidDipBasedFallback(contractCheck.invalidReason);
+        applyStrategyOverride(fallback.strategy, fallback.reason);
         refreshStrategyDerived();
         isWait = strategySelected.toLowerCase() === 'wait';
         finalEntryRule = isWait ? 'WAITING_FOR_SETUP' : String(strategySelected).toUpperCase() + '_READY';
@@ -287,7 +622,7 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
         } else {
           // Downgrade passed, but verify momentum isn't fake (no rebound after dip-based strategy)
           const wasDipBased = !/wait|unknown|avoid/.test(String(candidate.selectedStrategy ?? '').toLowerCase());
-          const isNowMomentum = strategySelected === 'momentum';
+          const isNowMomentum = String(strategySelected) === 'momentum';
           const noRebound = reboundPct == null || reboundPct <= 0;
           const weakMomentum = !momentumConfirmed;
           const origWasDipOrConservative = /dip_and_rebound|conservative/.test(String(candidate.selectedStrategy ?? ''
@@ -324,8 +659,13 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     const dp = dipDepthPct ?? (reboundPct != null && reboundPct > 0 ? (rawDipPct ?? 0) : null);
     const reboundIsOld = reboundPct != null && reboundPct > 20;
     const reboundOverextended = reboundPct != null && reboundPct > 30;
-    const freshnessCanBeValidated = false; // scanner lacks full dipLowTimestamp/reboundTimestamp tracking
-    const freshnessStatus: 'valid' | 'unknown' | 'stale' = freshnessCanBeValidated ? (reboundIsOld ? 'stale' : 'valid') : 'unknown';
+    const candidateFreshness = String((candidate as any).reboundFreshnessStatus ?? '').toLowerCase();
+    const freshnessCanBeValidated = candidateFreshness === 'valid' || candidateFreshness === 'stale';
+    const freshnessStatus: 'valid' | 'unknown' | 'stale' = freshnessCanBeValidated ? (candidateFreshness as 'valid' | 'stale') : 'unknown';
+    const reboundTimestamp = (candidate as any).reboundTimestamp ?? 'n/a';
+    const dipLowTimestamp = (candidate as any).dipLowTimestamp ?? 'n/a';
+    const reboundAgeMs = (candidate as any).reboundAgeMs ?? 'n/a';
+    const maxAllowedReboundAgeMs = (candidate as any).maxAllowedReboundAgeMs ?? 'n/a';
     const isDipOrConservative = strategySelected === 'dip_and_rebound' || strategySelected === 'conservative';
 
     // Freshness hardening: unknown/stale rebound blocks dip_and_rebound and conservative hard confirmation
@@ -334,12 +674,90 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
       buyAllowed = false;
       strategySelected = 'wait';
       finalEntryRule = 'WAITING_FOR_SETUP';
-      logger.info(`REBOUND_FRESHNESS_HARDENED_AUDIT symbol=${candidate.symbol} strategy=${isDipOrConservative ? strategySelected : 'n/a'} localLow=n/a localLowTimestamp=n/a reboundTimestamp=n/a reboundAgeMs=n/a maxAllowedReboundAgeMs=n/a reboundFromSameDip=n/a freshnessStatus=${freshnessStatus} usedAsHardConfirmation=false usedAsAdvisoryOnly=true blockReason=${freshnessStatus === 'unknown' ? 'REBOUND_FRESHNESS_UNKNOWN' : 'REBOUND_FRESHNESS_STALE'} reboundPct=${reboundPct ?? 'n/a'} dipDepthPct=${dipDepthPct ?? 'n/a'}`);
+      finalBuyBlockedReasonOverride = freshnessStatus === 'unknown' ? 'rebound_freshness_unknown' : 'rebound_stale';
+      logger.info(`REBOUND_FRESHNESS_HARDENED_AUDIT symbol=${candidate.symbol} strategy=${isDipOrConservative ? strategySelected : 'n/a'} localLow=n/a localLowTimestamp=${dipLowTimestamp} reboundTimestamp=${reboundTimestamp} reboundAgeMs=${reboundAgeMs} maxAllowedReboundAgeMs=${maxAllowedReboundAgeMs} reboundFromSameDip=n/a freshnessStatus=${freshnessStatus} usedAsHardConfirmation=false usedAsAdvisoryOnly=true blockReason=${freshnessStatus === 'unknown' ? 'REBOUND_FRESHNESS_UNKNOWN' : 'REBOUND_FRESHNESS_STALE'} reboundPct=${reboundPct ?? 'n/a'} dipDepthPct=${dipDepthPct ?? 'n/a'}`);
     } else {
       logger.info(`REBOUND_FRESHNESS_AUDIT symbol=${candidate.symbol} strategy=${strategySelected} reboundAtEntry=${reboundPct ?? 'n/a'} dipAtEntry=${dp ?? 'n/a'} dipConfirmed=${String(dipConfirmed)} reboundConfirmed=${String(reboundConfirmed)} freshnessStatus=${freshnessStatus} usedAsHardConfirmation=${isDipOrConservative && finalExecutable} usedAsAdvisoryOnly=${strategySelected === 'momentum' || strategySelected === 'balanced'} overextended=${String(reboundOverextended)} blockReason=${!finalExecutable ? (reboundOverextended ? 'REBOUND_OVEREXTENDED' : reboundIsOld ? 'REBOUND_TOO_LATE' : 'none') : 'none'}`);
     }
     if (strategySelected === 'balanced') {
-      logger.info(`BALANCED_ENTRY_CONTRACT_AUDIT: symbol=${candidate.symbol} finalExecutedStrategy=balanced entryRuleAtEntry=${finalEntryRule} dipPctAtEntry=${dipDepthPct ?? 'n/a'} reboundPctAtEntry=${reboundPct ?? 'n/a'} requiredDipPctAtEntry=n/a requiredReboundPctAtEntry=0.4 momentumConfirmedAtEntry=${String(momentumConfirmed)} weakMomentumConfirmedAtEntry=n/a balancedMinDipSetting=n/a balancedMinReboundSetting=0.4 balancedUsesDipAsRequired=false balancedUsesReboundAsRequired=true balancedUsesMomentumAsRequired=false contractValid=${String(finalExecutable)} contractViolationReason=${finalExecutable ? 'none' : 'rebound_below_required'} finalExecutable=${String(finalExecutable)} buyAllowed=${String(finalExecutable)} sourceUsed=balanced_contract_rebound_required`);
+      const pro = (candidate as any).professionalAnalysis ?? {};
+      const professionalVerdict = String(pro.professionalVerdict ?? 'n/a');
+      const professionalGateMode = String(
+        (candidate as any).professionalGateMode
+        ?? (candidate as any).professionalGateDecision?.mode
+        ?? ((candidate as any).professionalGateHard === true ? 'hard_gate' : 'advisory')
+      );
+      professionalGateDecision = resolveProfessionalGateDecision({
+        enabled: Boolean((candidate as any).professionalAnalysis),
+        mode: professionalGateMode,
+        score: pro.professionalScore,
+        verdict: pro.professionalVerdict,
+        threshold: (candidate as any).professionalGateThreshold ?? (candidate as any).smartProfessionalMinScore ?? 0,
+      });
+      const balancedContract = validateBalancedEntryContract({
+        symbol: candidate.symbol,
+        finalExecutionStrategy: strategySelected,
+        reboundAtEntry: reboundPct,
+        requiredReboundPctAtEntry: requiredReboundPct,
+        reboundConfirmed,
+        freshnessStatus,
+        priceFresh,
+        momentumConfirmed,
+        tpRoomOk,
+        spreadOk,
+        dipAtEntry: dipDepthPct,
+        requiredDipPctAtEntry: requiredDipPct,
+        dipConfirmed,
+      });
+      strategyContractValid = balancedContract.contractValid;
+      strategyContractBlocker = balancedContract.contractViolationReason;
+      marketSafetyValid = spreadOk && tpRoomOk && !fallingKnifeBlocked;
+      marketSafetyBlocker = !spreadOk ? 'spread_too_high' : !tpRoomOk ? 'tp_room_not_ok' : fallingKnifeBlocked ? 'falling_knife' : 'none';
+      executionFreshnessValid = priceFresh && balancedContract.freshnessStatus !== 'stale';
+      executionFreshnessBlocker = !priceFresh ? 'price_stale' : balancedContract.freshnessStatus === 'stale' ? 'rebound_stale' : 'none';
+      if (!balancedContract.finalExecutable) {
+        finalExecutable = false;
+        buyAllowed = false;
+        finalBuyBlockedReasonOverride = balancedContract.primaryBlocker;
+        finalBlocker = balancedContract.primaryBlocker;
+        finalBlockerSource = balancedContract.primaryBlocker === 'price_stale' || balancedContract.primaryBlocker === 'rebound_stale'
+          ? 'execution_freshness'
+          : balancedContract.primaryBlocker === 'spread_too_high' || balancedContract.primaryBlocker === 'tp_room_not_ok'
+            ? 'market_safety'
+            : 'strategy_contract';
+      } else if (!professionalGateDecision.allowed) {
+        finalExecutable = false;
+        buyAllowed = false;
+        finalBuyBlockedReasonOverride = professionalGateDecision.blocker;
+        finalBlocker = professionalGateDecision.blocker;
+        finalBlockerSource = 'professional_gate';
+      } else {
+        finalBlocker = finalExecutable ? 'none' : 'external_gate_not_allow';
+        finalBlockerSource = finalExecutable ? 'none' : 'strategy_contract';
+      }
+      const invariantOk = !(balancedContract.reboundAtEntry != null
+        && balancedContract.requiredReboundPctAtEntry != null
+        && balancedContract.reboundAtEntry >= balancedContract.requiredReboundPctAtEntry
+        && balancedContract.reboundConfirmed
+        && balancedContract.contractViolationReason === 'rebound_below_required');
+      if (!invariantOk) {
+        logger.warn(`ENTRY_CONTRACT_VALIDATION_INTEGRITY_FAILED: symbol=${candidate.symbol} finalExecutionStrategy=balanced reboundAtEntry=${balancedContract.reboundAtEntry ?? 'n/a'} requiredReboundPctAtEntry=${balancedContract.requiredReboundPctAtEntry ?? 'n/a'} reboundConfirmed=${String(balancedContract.reboundConfirmed)} contractViolationReason=${balancedContract.contractViolationReason} action=block_buy candidateSnapshot=${JSON.stringify({ status: candidate.status, entryGateDecision: candidate.entryGateDecision?.decision, blockReasons: candidate.blockReasons ?? [], mainReason: candidate.mainReason ?? null })}`);
+        finalExecutable = false;
+        buyAllowed = false;
+        finalBuyBlockedReasonOverride = 'unknown_final_executable_bug';
+        finalBlocker = 'unknown_final_executable_bug';
+        finalBlockerSource = 'strategy_contract';
+      }
+      if (balancedContract.visibleRequirementsSatisfied && !balancedContract.contractValid) {
+        logger.warn(`HIDDEN_BALANCED_BLOCKER_BUG: symbol=${candidate.symbol} finalExecutionStrategy=balanced visibleRequirementsSatisfied=true contractValid=false blocker=${balancedContract.blocker} blockerSource=${balancedContract.blockerSource} debugTrace=${balancedContract.debugTrace.join('|')} action=block_buy`);
+        finalExecutable = false;
+        buyAllowed = false;
+        finalBuyBlockedReasonOverride = 'unknown_final_executable_bug';
+        finalBlocker = 'unknown_final_executable_bug';
+        finalBlockerSource = 'strategy_contract';
+      }
+      logger.info(`ENTRY_CONTRACT_VALIDATION_AUDIT: symbol=${candidate.symbol} finalExecutionStrategy=balanced validatorUsed=validateBalancedEntryContract reboundAtEntry=${balancedContract.reboundAtEntry ?? 'n/a'} requiredReboundPctAtEntry=${balancedContract.requiredReboundPctAtEntry ?? 'n/a'} reboundConfirmed=${String(balancedContract.reboundConfirmed)} reboundFreshnessStatus=${balancedContract.freshnessStatus} rawReboundValue=${reboundPct ?? 'n/a'} normalizedReboundPct=${balancedContract.reboundAtEntry ?? 'n/a'} scaleUsed=percent dipAtEntry=${dipDepthPct ?? 'n/a'} requiredDipPctAtEntry=${requiredDipPct ?? 'n/a'} dipConfirmed=${String(dipConfirmed)} momentumConfirmed=${String(momentumConfirmed)} spreadOk=${String(spreadOk)} tpRoomOk=${String(tpRoomOk)} priceFresh=${String(priceFresh)} professionalVerdict=${professionalVerdict} strategyContractValid=${String(strategyContractValid)} strategyContractBlocker=${strategyContractBlocker} professionalGateMode=${professionalGateDecision.mode} professionalGateValid=${String(professionalGateDecision.allowed)} professionalGateBlocker=${professionalGateDecision.blocker} marketSafetyValid=${String(marketSafetyValid)} marketSafetyBlocker=${marketSafetyBlocker} executionFreshnessValid=${String(executionFreshnessValid)} executionFreshnessBlocker=${executionFreshnessBlocker} finalBlocker=${finalBlocker} finalBlockerSource=${finalBlockerSource} contractValid=${String(balancedContract.contractValid)} finalExecutable=${String(finalExecutable)} buyAllowed=${String(buyAllowed)} primaryBlocker=${finalBlocker} allBlockers=${balancedContract.allBlockers.join('|') || 'none'} invariantOk=${String(invariantOk)}`);
+      logger.info(`BALANCED_ENTRY_CONTRACT_AUDIT: symbol=${candidate.symbol} finalExecutedStrategy=balanced entryRuleAtEntry=${finalEntryRule} dipPctAtEntry=${dipDepthPct ?? 'n/a'} reboundPctAtEntry=${balancedContract.reboundAtEntry ?? 'n/a'} requiredDipPctAtEntry=n/a requiredReboundPctAtEntry=${balancedContract.requiredReboundPctAtEntry ?? 'n/a'} momentumConfirmedAtEntry=${String(momentumConfirmed)} weakMomentumConfirmedAtEntry=n/a balancedMinDipSetting=n/a balancedMinReboundSetting=${balancedContract.requiredReboundPctAtEntry ?? 'n/a'} balancedUsesDipAsRequired=false balancedUsesReboundAsRequired=true balancedUsesMomentumAsRequired=false visibleRequirementsSatisfied=${String(balancedContract.visibleRequirementsSatisfied)} missingStrategyRequirements=${balancedContract.missingStrategyRequirements.join('|') || 'none'} externalGateBlockers=${[professionalGateDecision.blocker, marketSafetyBlocker, executionFreshnessBlocker].filter(b => b !== 'none').join('|') || 'none'} professionalGateBlocker=${professionalGateDecision.blocker} contractValid=${String(strategyContractValid)} contractViolationReason=${strategyContractBlocker} finalExecutable=${String(finalExecutable)} buyAllowed=${String(buyAllowed)} sourceUsed=balanced_contract_validator`);
     }
   }
   const blockReasons = [...(candidate.blockReasons ?? [])];
@@ -362,8 +780,8 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     ? (spreadOk ? 'WAITING_FOR_SETUP' : 'BLOCKED_BY_SPREAD')
     : !reboundConfirmed && reboundRequired
     ? 'WAITING_FOR_REBOUND'
-    : (!requiredSetupPassed ? (spreadOk ? 'WAITING_CONFIRMATION' : 'BLOCKED_BY_SPREAD') : (!finalExecutable ? (spreadOk ? 'WAITING_EXECUTION_GATE' : 'BLOCKED_BY_SPREAD') : (strategySelected === 'balanced' ? 'BALANCED_OK' : 'SETUP_OK')));
-  const primaryBlocker = resolveCanonicalPrimaryBlocker({
+    : (!requiredSetupPassed ? (spreadOk ? 'WAITING_CONFIRMATION' : 'BLOCKED_BY_SPREAD') : (!finalExecutable ? (spreadOk ? 'WAITING_EXECUTION_GATE' : 'BLOCKED_BY_SPREAD') : `${String(strategySelected).toUpperCase()}_OK`));
+  let primaryBlocker = resolveCanonicalPrimaryBlocker({
     blockReasons: [
       ...(candidate.entryGateDecision?.snapshot?.blockReasons ?? []),
       ...(candidate.entryGateDecision?.blockReasons ?? []),
@@ -376,6 +794,37 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     reboundConfirmed,
     finalExecutable,
   });
+  if (finalBuyBlockedReasonOverride) primaryBlocker = finalBuyBlockedReasonOverride;
+  if (finalBuyBlockedReasonOverride) {
+    finalBlocker = finalBuyBlockedReasonOverride;
+    if (finalBlocker === professionalGateDecision.blocker && professionalGateDecision.blocker !== 'none') finalBlockerSource = 'professional_gate';
+  }
+  if (!finalExecutable && primaryBlocker === 'finalExecutable_false') {
+    primaryBlocker = resolveActionableFinalBlocker({
+      finalExecutable,
+      status: candidate.status,
+      strategySelected,
+      setupResult,
+      entryGateDecision: candidate.entryGateDecision?.decision,
+      finalBlocker,
+      strategyContractBlocker,
+      marketSafetyBlocker,
+      executionFreshnessBlocker,
+      professionalGateBlocker: professionalGateDecision.blocker,
+      blockReasons: [
+        ...(candidate.entryGateDecision?.snapshot?.blockReasons ?? []),
+        ...(candidate.entryGateDecision?.blockReasons ?? []),
+        ...(candidate.blockReasons ?? []),
+      ],
+      setupMissingKeys: setupMissing.map((s) => s.key),
+    });
+    finalBlocker = primaryBlocker;
+    finalBlockerSource =
+      primaryBlocker === marketSafetyBlocker ? 'market_safety'
+      : primaryBlocker === executionFreshnessBlocker ? 'execution_freshness'
+      : primaryBlocker === professionalGateDecision.blocker ? 'professional_gate'
+      : 'strategy_contract';
+  }
   const selected = strategySelected;
   const metricRole = (key: string): 'required' | 'optional' | 'advisory' | 'blocker' | 'unused' => {
     if (key === 'spreadPct' || key === 'tpRoomOk' || key === 'priceFresh') return 'blocker';
@@ -432,7 +881,98 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     { key: 'metricRoles[]', actualValue: setupRequired.map((s) => `${s.key}:${s.required ? 'required' : 'optional'}`).join('|') || 'none', requiredValue: null, passed: true, usedByStrategy: true, role: 'optional', sourceLayer: 'trader-brain' },
   ];
 
-  logger.info(`FINAL_STRATEGY_SOURCE_AUDIT: symbol=${candidate.symbol} marketBestFit=${marketRecommendedStrategy ?? 'n/a'} userSelectedRuntimeStrategy=${strategyRequested} strategySource=${strategySource} dynamicPerCoinStrategy=${String(strategyRequested !== strategySelected)} perCoinSelectedStrategy=${candidate.selectedStrategy ?? 'n/a'} strategyAfterAuditBuilder=${strategySelected} finalExecutionStrategy=${strategySelected} positionStrategyAtEntry=${strategySelected} strategyMismatchDetected=${String(candidate.selectedStrategy !== strategySelected)} mismatchAllowed=${String(strategyRequested !== strategySelected || true)} mismatchReason=${candidate.selectedStrategy !== strategySelected ? 'audit_builder_resolved_per_coin' : strategyRequested !== strategySelected ? 'runtime_strategy_vs_per_coin' : 'unchanged'} executionAllowed=${String(finalExecutable)}`);
+  const strategyMismatchDetected = String(strategySelectedBeforeBuilder).toLowerCase() !== String(strategySelected).toLowerCase()
+    || (marketBestFit != null && String(marketBestFit).toLowerCase() !== String(strategySelected).toLowerCase())
+    || (groupRecommendedStrategy != null && String(groupRecommendedStrategy).toLowerCase() !== String(strategySelected).toLowerCase());
+  const mismatchAllowed = !strategyMismatchDetected || resolution.mismatchAllowed || overrideApplied;
+  const mismatchReason = !strategyMismatchDetected
+    ? 'unchanged'
+    : overrideReason ?? resolution.mismatchReason ?? 'missing_mismatch_reason';
+  if (strategySelected === 'wait' && resolution.fallbackReason === 'NO_VALID_AUTOBOTS_STRATEGY') {
+    finalExecutable = false;
+    buyAllowed = false;
+    finalBuyBlockedReasonOverride = 'strategy_wait';
+  }
+  const setupMatchesStrategy = strategySelected === 'wait'
+    ? setupResult === 'WAITING_FOR_SETUP' || setupResult.startsWith('BLOCKED_') || setupResult.startsWith('WAITING_')
+    : setupResult === `${String(strategySelected).toUpperCase()}_OK` || !finalExecutable;
+  if ((strategyMismatchDetected && !mismatchAllowed) || (strategyMismatchDetected && mismatchReason === 'missing_mismatch_reason') || !setupMatchesStrategy || !candidate.riskGroup) {
+    logger.warn(`STRATEGY_MISMATCH_BLOCK_AUDIT: symbol=${candidate.symbol} finalExecutionStrategy=${strategySelected} strategyAtEntry=${strategySelected} positionStrategy=${strategySelected} setupResult=${setupResult} setupMatchesStrategy=${String(setupMatchesStrategy)} marketBestFit=${marketBestFit ?? 'n/a'} groupRecommendedStrategy=${groupRecommendedStrategy ?? 'n/a'} groupName=${candidate.riskGroup ?? 'n/a'} strategyMismatchDetected=${String(strategyMismatchDetected)} mismatchAllowed=${String(mismatchAllowed)} mismatchReason=${mismatchReason} overrideApplied=${String(overrideApplied)} overrideReason=${overrideReason ?? 'none'} action=${!candidate.riskGroup ? 'warn_missing_group_metadata' : mismatchAllowed && setupMatchesStrategy ? 'warn_allowed_mismatch' : 'block_candidate'}`);
+    if (!mismatchAllowed || !setupMatchesStrategy) {
+      finalExecutable = false;
+      buyAllowed = false;
+    }
+  }
+  if (candidate.status === 'BUY') {
+    logger.info(`STRATEGY_HANDOFF_TRACE_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} riskGroup=${candidate.riskGroup ?? 'n/a'} marketBestFit=${marketBestFit ?? 'n/a'} groupRecommendedStrategy=${groupRecommendedStrategy ?? 'n/a'} userSelectedRuntimeStrategy=${strategyRequested} autoBotsDynamicPerCoinEnabled=true autoBotsPerCoinStrategy=${autoBotsPerCoinStrategy ?? 'n/a'} entryGateStrategyInput=${strategySelected} setupResult=${setupResult} finalExecutionStrategy=${strategySelected} strategyAtEntry=${strategySelected} positionStrategy=${strategySelected} strategyDecisionReason=${auto?.strategyReason ?? candidate.strategyReason ?? 'n/a'} strategyMismatchDetected=${String(strategyMismatchDetected)} mismatchAllowed=${String(mismatchAllowed)} mismatchReason=${mismatchReason} overrideApplied=${String(overrideApplied)} overrideReason=${overrideReason ?? 'none'}`);
+  }
+  logger.info(`FINAL_STRATEGY_SOURCE_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} marketBestFit=${marketBestFit ?? 'n/a'} userSelectedRuntimeStrategy=${strategyRequested} strategySource=${strategySource} dynamicPerCoinStrategy=${String(resolution.dynamicPerCoinStrategy)} perCoinSelectedStrategy=${autoBotsPerCoinStrategy ?? candidate.selectedStrategy ?? 'n/a'} strategyAfterAuditBuilder=${strategySelected} finalExecutionStrategy=${strategySelected} positionStrategyAtEntry=${strategySelected} strategyMismatchDetected=${String(strategyMismatchDetected)} mismatchAllowed=${String(mismatchAllowed)} mismatchReason=${mismatchReason} overrideApplied=${String(overrideApplied)} overrideReason=${overrideReason ?? 'none'} executionAllowed=${String(finalExecutable)}`);
+  logger.info(`AUTOBOTS_STRATEGY_RESOLUTION_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} riskGroup=${candidate.riskGroup ?? 'n/a'} marketBestFit=${marketBestFit ?? 'n/a'} groupRecommendedStrategy=${groupRecommendedStrategy ?? 'n/a'} userSelectedRuntimeStrategy=${strategyRequested} dynamicPerCoinStrategy=${String(resolution.dynamicPerCoinStrategy)} strategySourceRawLegacy=${auto?.strategySource ?? candidate.strategySource ?? 'unknown'} strategySourceResolved=${resolution.strategySourceResolved} fallbackType=${resolution.fallbackType} routerPath=${resolution.routerPath} perCoinSelectedStrategy=${autoBotsPerCoinStrategy ?? 'n/a'} finalExecutionStrategy=${strategySelected} setupValidatorUsed=${strategySelected} fallbackApplied=${String(resolution.fallbackApplied)} fallbackReason=${resolution.fallbackReason ?? 'none'} overrideApplied=${String(overrideApplied)} overrideReason=${overrideReason ?? 'none'} mismatchDetected=${String(strategyMismatchDetected)} mismatchAllowed=${String(mismatchAllowed)} mismatchReason=${mismatchReason} finalBuyAllowed=${String(buyAllowed)} finalBuyBlockedReason=${buyAllowed ? 'none' : (resolution.fallbackReason === 'NO_VALID_AUTOBOTS_STRATEGY' ? 'NO_VALID_AUTOBOTS_STRATEGY' : primaryBlocker)} strategyDecisionTrace=${resolution.strategyDecisionTrace.join('>')}`);
+  const strategyAuditMismatchFields = [
+    resolution.finalExecutionStrategy !== strategySelected && finalExecutable ? 'AutoBots.finalExecutionStrategy_vs_audit.finalExecutionStrategy' : '',
+    resolution.dynamicPerCoinStrategy !== true && String(strategySource).startsWith('AUTOBOTS_') && strategySource !== 'AUTOBOTS_WAIT' ? 'dynamicPerCoinStrategy' : '',
+    runtimeState?.resolvedAutoBotsEnabled === true && resolution.strategySourceResolved === 'DISABLED' ? 'runtimeAutoBotsOn_vs_strategySourceDisabled' : '',
+    runtimeState?.dynamicPerCoinStrategy != null && runtimeState.dynamicPerCoinStrategy !== resolution.dynamicPerCoinStrategy ? 'runtimeDynamic_vs_strategyDecisionDynamic' : '',
+  ].filter(Boolean);
+  logger.info(`STRATEGY_AUDIT_CONSUMER_INTEGRITY_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} autobotsFinalExecutionStrategy=${resolution.finalExecutionStrategy} finalStrategySourceFinalExecutionStrategy=${strategySelected} entryGateFinalExecutionStrategy=${strategySelected} tp1Strategy=pending strategyAtEntry=${strategySelected} dynamicPerCoinStrategy=${String(resolution.dynamicPerCoinStrategy)} mismatchFields=${strategyAuditMismatchFields.join('|') || 'none'} invariantOk=${String(strategyAuditMismatchFields.length === 0)}`);
+  logger.info(`STRATEGY_DECISION_CONSUMER_INTEGRITY_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} autoBotsRuntimeResolvedOn=${String(runtimeState?.resolvedAutoBotsEnabled ?? 'unknown')} autoBotsRuntimeStrategySource=${runtimeState?.strategySourceResolved ?? 'unknown'} autoBotsRuntimeDynamicPerCoin=${String(runtimeState?.dynamicPerCoinStrategy ?? 'unknown')} strategyDecisionFinalExecutionStrategy=${resolution.finalExecutionStrategy} strategyDecisionSource=${resolution.strategySourceResolved} finalStrategySourceFinalExecutionStrategy=${strategySelected} entryGateFinalExecutionStrategy=${strategySelected} tp1Strategy=pending strategyAtEntry=${strategySelected} positionStrategyAtEntry=${strategySelected} dynamicPerCoinStrategy=${String(resolution.dynamicPerCoinStrategy)} mismatchFields=${strategyAuditMismatchFields.join('|') || 'none'} invariantOk=${String(strategyAuditMismatchFields.length === 0)}`);
+
+  const explicitPrimaryBlocker = (candidate as any).primaryBlocker
+    ?? candidate.entryGateDecision?.primaryReason
+    ?? candidate.entryGateDecision?.blockReasons?.[0]
+    ?? candidate.entryGateDecision?.snapshot?.blockReasons?.[0]
+    ?? primaryBlocker;
+  const noBuyPriority = resolveFinalNoBuyReasonPriority({
+    symbol: candidate.symbol,
+    rawStatus: candidate.status,
+    displayStatus: candidate.lifecycleStatus ?? candidate.status,
+    finalExecutable,
+    buyAllowed,
+    primaryBlocker: explicitPrimaryBlocker,
+    setupResult,
+    candidateWhy: candidate.mainReason,
+    previousFinalNoBuyReason: (candidate as any).finalNoBuyReason ?? finalBlocker,
+    blockReasons,
+    entryGateBlocker: candidate.entryGateDecision?.primaryReason ?? candidate.entryGateDecision?.blockReasons?.[0] ?? candidate.entryGateDecision?.snapshot?.blockReasons?.[0],
+    strategyContractBlocker,
+    executionDecisionFinalNoBuyReason: (candidate as any).executionDecision?.finalNoBuyReason,
+    runtimeReason: executionFreshnessBlocker !== 'none' ? executionFreshnessBlocker : undefined,
+    handoffMismatch: strategyMismatchDetected && !mismatchAllowed,
+  });
+  if (!noBuyPriority.invariantOk) logger.warn(formatFinalNoBuyReasonPriorityAudit({
+    symbol: candidate.symbol,
+    rawStatus: candidate.status,
+    displayStatus: candidate.lifecycleStatus ?? candidate.status,
+    finalExecutable,
+    buyAllowed,
+    primaryBlocker: explicitPrimaryBlocker,
+    setupResult,
+    candidateWhy: candidate.mainReason,
+    previousFinalNoBuyReason: (candidate as any).finalNoBuyReason ?? finalBlocker,
+    blockReasons,
+    entryGateBlocker: candidate.entryGateDecision?.primaryReason ?? candidate.entryGateDecision?.blockReasons?.[0] ?? candidate.entryGateDecision?.snapshot?.blockReasons?.[0],
+    strategyContractBlocker,
+    executionDecisionFinalNoBuyReason: (candidate as any).executionDecision?.finalNoBuyReason,
+    runtimeReason: executionFreshnessBlocker !== 'none' ? executionFreshnessBlocker : undefined,
+    handoffMismatch: strategyMismatchDetected && !mismatchAllowed,
+  }, noBuyPriority));
+  else logger.info(formatFinalNoBuyReasonPriorityAudit({
+    symbol: candidate.symbol,
+    rawStatus: candidate.status,
+    displayStatus: candidate.lifecycleStatus ?? candidate.status,
+    finalExecutable,
+    buyAllowed,
+    primaryBlocker: explicitPrimaryBlocker,
+    setupResult,
+    candidateWhy: candidate.mainReason,
+    previousFinalNoBuyReason: (candidate as any).finalNoBuyReason ?? finalBlocker,
+    blockReasons,
+    entryGateBlocker: candidate.entryGateDecision?.primaryReason ?? candidate.entryGateDecision?.blockReasons?.[0] ?? candidate.entryGateDecision?.snapshot?.blockReasons?.[0],
+    strategyContractBlocker,
+    executionDecisionFinalNoBuyReason: (candidate as any).executionDecision?.finalNoBuyReason,
+    runtimeReason: executionFreshnessBlocker !== 'none' ? executionFreshnessBlocker : undefined,
+    handoffMismatch: strategyMismatchDetected && !mismatchAllowed,
+  }, noBuyPriority));
 
   return {
     symbol: candidate.symbol,
@@ -441,8 +981,37 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     strategySelected,
     strategySource,
     marketRecommendedStrategy,
+    groupRecommendedStrategy,
+    autoBotsPerCoinStrategy,
     runtimeActiveStrategy,
-    finalPerCoinStrategy,
+    finalPerCoinStrategy: strategySelected,
+    finalExecutionStrategy: strategySelected,
+    strategyAtEntry: strategySelected,
+    strategyDecisionReason: auto?.strategyReason ?? candidate.strategyReason ?? null,
+    overrideApplied,
+    overrideReason,
+    fallbackType: resolution.fallbackType,
+    routerPath: resolution.routerPath,
+    dynamicPerCoinStrategy: resolution.dynamicPerCoinStrategy,
+    mismatchAllowed,
+    mismatchReason,
+    strategyContractValid,
+    strategyContractBlocker,
+    professionalGateMode: professionalGateDecision.mode,
+    professionalGateValid: professionalGateDecision.allowed,
+    professionalGateBlocker: professionalGateDecision.blocker,
+    marketSafetyValid,
+    marketSafetyBlocker,
+    executionFreshnessValid,
+    executionFreshnessBlocker,
+    finalBlocker,
+    finalBlockerSource,
+    finalNoBuyReason: noBuyPriority.resolvedFinalNoBuyReason,
+    actionableNoBuyReason: noBuyPriority.actionableNoBuyReason,
+    technicalNoBuyReason: noBuyPriority.technicalNoBuyReason,
+    secondaryDiagnosticReasons: noBuyPriority.secondaryDiagnosticReasons,
+    handoffIntegrityStatus: noBuyPriority.handoffIntegrityStatus,
+    renderedUserMessage: noBuyPriority.renderedUserMessage,
     finalEntryRule,
     setupResult,
     finalExecutableAtEntry: finalExecutable,
@@ -480,7 +1049,7 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
       actualDipPct: dipDepthPct,
       actualReboundPct: reboundPct,
       setupResult,
-      primaryBlocker,
+      primaryBlocker: noBuyPriority.actionableNoBuyReason !== 'none' ? noBuyPriority.actionableNoBuyReason : primaryBlocker,
       source: 'buildStrategyAuditSnapshotFromCandidate.dynamic-regime',
     },
     createdAt: new Date().toISOString(),

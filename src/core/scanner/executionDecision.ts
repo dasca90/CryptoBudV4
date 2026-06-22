@@ -1,6 +1,7 @@
 import type { ScannerCandidate } from '../types';
 import { buildStrategyAuditSnapshotFromCandidate } from '../strategy-audit/strategy-audit-builder';
 import { logger } from '../../utils/logger';
+import { resolveFinalNoBuyReasonPriority } from './finalNoBuyReasonPriority';
 
 export type FinalNoBuyReason =
   | 'PRICE_STALE'
@@ -62,6 +63,14 @@ export interface ExecutionDecisionParams {
   banned: boolean;
   buySpacingOk: boolean;
   runtimeExecutionEnabled: boolean;
+  primaryBlocker?: string | null;
+  blockReasons?: string[];
+  candidateWhy?: string | null;
+  previousFinalNoBuyReason?: string | null;
+  entryGateBlocker?: string | null;
+  strategyContractBlocker?: string | null;
+  runtimeReason?: string | null;
+  handoffMismatch?: boolean | null;
 }
 
 export interface ExecutionDecision {
@@ -102,7 +111,11 @@ export interface ExecutionDecision {
   journalPersisted: boolean;
   telegramSent: boolean;
   finalDecision: FinalDecision;
-  finalNoBuyReason: FinalNoBuyReason;
+  finalNoBuyReason: string;
+  actionableNoBuyReason: string;
+  technicalNoBuyReason: string;
+  secondaryDiagnosticReasons: string[];
+  renderedUserMessage: string;
   finalNoBuyReasonSource: string;
   reasonPriorityTrace: ReasonPriorityTrace[];
   invariantOk: boolean;
@@ -125,10 +138,6 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
     finalNoBuyReason = 'MISSING_RISK_GROUP';
     finalNoBuyReasonSource = 'riskGroup missing';
     addTrace('MISSING_RISK_GROUP', false, `riskGroup=${params.riskGroup}`);
-  } else if (!params.finalExecutable || !params.buyAllowed) {
-    finalNoBuyReason = 'STRATEGY_HANDOFF_INTEGRITY_FAILED';
-    finalNoBuyReasonSource = 'finalExecutable/buyAllowed false';
-    addTrace('STRATEGY_HANDOFF_INTEGRITY_FAILED', false, `finalExecutable=${params.finalExecutable} buyAllowed=${params.buyAllowed}`);
   } else if (params.banned) {
     finalNoBuyReason = 'BANNED_SYMBOL';
     finalNoBuyReasonSource = 'banned=true';
@@ -177,11 +186,58 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
     finalNoBuyReason = 'TP_ROOM_NOT_OK';
     finalNoBuyReasonSource = 'tpRoomOk=false';
     addTrace('TP_ROOM_NOT_OK', false, 'TP room not OK');
+  } else if (!params.finalExecutable || !params.buyAllowed) {
+    finalNoBuyReason = 'STRATEGY_HANDOFF_INTEGRITY_FAILED';
+    finalNoBuyReasonSource = 'finalExecutable/buyAllowed false';
+    addTrace('STRATEGY_HANDOFF_INTEGRITY_FAILED', false, `finalExecutable=${params.finalExecutable} buyAllowed=${params.buyAllowed}`);
   } else {
     finalNoBuyReason = 'none';
     finalNoBuyReasonSource = 'all_checks_passed';
     addTrace('ALL_CHECKS_PASSED', true, 'All execution gates passed');
   }
+
+  const previousExecutionDecisionFinalNoBuyReason = finalNoBuyReason;
+  const canonicalExecutableForReasonPriority = params.finalExecutable && params.buyAllowed && previousExecutionDecisionFinalNoBuyReason === 'none';
+  const priority = resolveFinalNoBuyReasonPriority({
+    symbol: params.symbol,
+    rawStatus: params.status,
+    displayStatus: params.status,
+    finalExecutable: canonicalExecutableForReasonPriority,
+    buyAllowed: canonicalExecutableForReasonPriority,
+    primaryBlocker: params.primaryBlocker,
+    setupResult: params.setupResult,
+    candidateWhy: params.candidateWhy,
+    previousFinalNoBuyReason: params.previousFinalNoBuyReason ?? previousExecutionDecisionFinalNoBuyReason,
+    blockReasons: params.blockReasons,
+    entryGateBlocker: params.entryGateBlocker,
+    strategyContractBlocker: params.strategyContractBlocker,
+    executionDecisionFinalNoBuyReason: previousExecutionDecisionFinalNoBuyReason,
+    runtimeReason: params.runtimeReason,
+    handoffMismatch: params.handoffMismatch,
+  });
+  finalNoBuyReason = priority.resolvedFinalNoBuyReason as FinalNoBuyReason;
+  finalNoBuyReasonSource = priority.prioritySource;
+  const reasonPriorityInvariantOk = finalNoBuyReason === priority.resolvedFinalNoBuyReason;
+  logger.info(
+    `EXECUTION_DECISION_REASON_PRIORITY_AUDIT: ` +
+    `symbol=${params.symbol} ` +
+    `scanId=${params.scanId} ` +
+    `candidateStatus=${params.status} ` +
+    `displayStatus=${params.status} ` +
+    `finalExecutable=${String(params.finalExecutable)} ` +
+    `buyAllowed=${String(params.buyAllowed)} ` +
+    `primaryBlocker=${params.primaryBlocker ?? 'none'} ` +
+    `setupResult=${params.setupResult ?? 'none'} ` +
+    `previousExecutionDecisionFinalNoBuyReason=${previousExecutionDecisionFinalNoBuyReason} ` +
+    `resolvedFinalNoBuyReason=${priority.resolvedFinalNoBuyReason} ` +
+    `actionableNoBuyReason=${priority.actionableNoBuyReason} ` +
+    `technicalNoBuyReason=${priority.technicalNoBuyReason} ` +
+    `secondaryDiagnosticReasons=${priority.secondaryDiagnosticReasons.join('|') || 'none'} ` +
+    `prioritySource=${priority.prioritySource} ` +
+    `executionDecisionFinalNoBuyReason=${finalNoBuyReason} ` +
+    `invariantOk=${String(reasonPriorityInvariantOk && priority.invariantOk)} ` +
+    `failureReason=${reasonPriorityInvariantOk ? priority.failureReason : 'EXECUTION_DECISION_REASON_NOT_CANONICAL'}`
+  );
 
   const generateFinalDecision = (): FinalDecision => {
     if (finalNoBuyReason === 'none') return 'EXECUTE';
@@ -213,12 +269,20 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
     finalNoBuyReasonSource = `invariant_fallback_from_MAX_OPEN_POSITIONS_REACHED:${fallbackReason}`;
   }
 
+  const selfConsistencyFailure = finalNoBuyReason !== 'none' && canonicalExecutableForReasonPriority
+    ? 'FINAL_NO_BUY_WITH_EXECUTABLE_TRUE'
+    : 'none';
+  const selfConsistentFinalExecutable = finalNoBuyReason === 'none' ? params.finalExecutable : false;
+  const selfConsistentBuyAllowed = finalNoBuyReason === 'none' ? params.buyAllowed : false;
+  const selfConsistencyOk = selfConsistencyFailure === 'none';
+  logger.info(`EXECUTION_DECISION_SELF_CONSISTENCY_AUDIT: symbol=${params.symbol} scanId=${params.scanId} finalExecutable=${String(selfConsistentFinalExecutable)} buyAllowed=${String(selfConsistentBuyAllowed)} finalNoBuyReason=${finalNoBuyReason} selectedForExecution=false submitAttempted=false adapterCalled=false invariantOk=${String(selfConsistencyOk)} failureReason=${selfConsistencyFailure}`);
+
   return {
     symbol: params.symbol,
     scanId: params.scanId,
     candidateRank: params.candidateRank,
-    finalExecutable: params.finalExecutable,
-    buyAllowed: params.buyAllowed,
+    finalExecutable: selfConsistentFinalExecutable,
+    buyAllowed: selfConsistentBuyAllowed,
     setupResult: params.setupResult,
     finalExecutionStrategy: params.finalExecutionStrategy,
     riskGroup: params.riskGroup,
@@ -252,9 +316,13 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
     telegramSent: false,
     finalDecision,
     finalNoBuyReason,
+    actionableNoBuyReason: priority.actionableNoBuyReason,
+    technicalNoBuyReason: priority.technicalNoBuyReason,
+    secondaryDiagnosticReasons: priority.secondaryDiagnosticReasons,
+    renderedUserMessage: priority.renderedUserMessage,
     finalNoBuyReasonSource,
     reasonPriorityTrace: trace,
-    invariantOk,
+    invariantOk: invariantOk && reasonPriorityInvariantOk && priority.invariantOk,
   };
 }
 
@@ -296,6 +364,10 @@ export function emitCanonicalExecutionDecisionAudit(decision: ExecutionDecision)
     `telegramSent=${String(decision.telegramSent)} ` +
     `finalDecision=${decision.finalDecision} ` +
     `finalNoBuyReason=${decision.finalNoBuyReason} ` +
+    `actionableNoBuyReason=${decision.actionableNoBuyReason} ` +
+    `technicalNoBuyReason=${decision.technicalNoBuyReason} ` +
+    `secondaryDiagnosticReasons=${decision.secondaryDiagnosticReasons.join('|') || 'none'} ` +
+    `renderedUserMessage=${decision.renderedUserMessage} ` +
     `finalNoBuyReasonSource=${decision.finalNoBuyReasonSource} ` +
     `reasonPriorityTrace=${decision.reasonPriorityTrace.map(t => `${t.reason}:${t.passed}`).join('|')} ` +
     `invariantOk=${String(decision.invariantOk)}`

@@ -57,10 +57,10 @@ function makeCandidate(overrides: Partial<ScannerCandidate> & { symbol: string }
     reboundConfirmed: true,
     momentumConfirmed: true,
     dipPercent: 0,
-    reboundPercent: 0,
-    m5Change: 0,
-    m15Change: 0,
-    h1Change: 0,
+    reboundPercent: 0.9,
+    m5Change: 0.4,
+    m15Change: 0.4,
+    h1Change: 0.5,
     change24h: 0,
     mlBadEntryRisk: false,
     mlWinProbability: 80,
@@ -71,6 +71,20 @@ function makeCandidate(overrides: Partial<ScannerCandidate> & { symbol: string }
     filtersOk: true,
     isTradable: true,
     minNotional: 10,
+    runtimeSnapshot: { invariantOk: true } as any,
+    strategyDecision: { invariantOk: true, finalExecutionStrategy: overrides.selectedStrategy ?? 'momentum' } as any,
+    executionPrecheckSnapshot: {
+      invariantOk: true,
+      priceFresh: true,
+      bookFresh: true,
+      spreadOk: true,
+      tpRoomOk: true,
+      riskGroupResolved: true,
+      entryContractResolved: true,
+      entryContractValid: true,
+      professionalGateResolved: true,
+      failureReason: 'none',
+    } as any,
     ...overrides,
   };
 }
@@ -270,11 +284,35 @@ console.log('\n── 11. No-buy summary includes SPREAD_TOO_HIGH ──\n');
 {
   const plan = buildExecutionPlan({
     ...BASE_PLAN_INPUT,
-    executionPool: [makeCandidate({ symbol: 'SPREADBTC', rank: 10, spreadPct: 1.0 })],
+    executionPool: [makeCandidate({
+      symbol: 'SPREADBTC',
+      rank: 10,
+      spreadPct: 1.0,
+      entryGateDecision: {
+        decision: 'BLOCK',
+        primaryReason: 'SPREAD_TOO_HIGH',
+        blockReasons: ['SPREAD_TOO_HIGH'],
+        warnings: [],
+        requiredNextActions: ['WAIT_SPREAD'],
+        explanation: 'spread too high',
+        snapshot: {
+          decision: 'BLOCK',
+          primaryReason: 'SPREAD_TOO_HIGH',
+          blockReasons: ['SPREAD_TOO_HIGH'],
+          confidenceResult: { input: 80, required: 0, passed: true },
+          spreadResult: { input: 1.0, required: 0.35, passed: false },
+          slippageResult: { input: 0, required: 1, passed: true },
+          totalCostResult: { input: 0, required: 1, passed: true },
+          confirmationResult: { input: 1, required: 1, passed: true },
+          tpRoomResult: { input: 1, required: 1, passed: true },
+        } as any,
+      } as any,
+    })],
     watchPool: [],
     nearMissPool: [],
   });
-  const hasSpreadReason = plan.noBuyReasons.some(r => r.includes('SPREAD') || r.includes('finalExecutable_false') || r.includes('strategy_setup_not_met'));
+  const hasSpreadReason = plan.noBuyReasons.some(r => r.includes('SPREAD') || r.includes('finalExecutable_false') || r.includes('strategy_setup_not_met'))
+    || plan.skippedCandidates.some(c => String(c.reason).includes('SPREAD') || String(c.finalNoBuyReason).includes('SPREAD'));
   // SPREAD_TOO_HIGH from the skipped candidate plus the watch/near-miss pool reasons
   assert(hasSpreadReason, '11 SPREAD in noBuyReasons');
 }
@@ -355,6 +393,65 @@ console.log('\n── 13. No-buy summary includes MAX_POSITIONS ──\n');
   });
   const hasMaxReason = plan.noBuyReasons.some(r => r.includes('MAX') || r.includes('POSITION'));
   assert(hasMaxReason, '13 MAX_POSITIONS in noBuyReasons');
+}
+
+console.log('\n-- 14. Planner preserves actionable no-buy reason --\n');
+{
+  const plan = buildExecutionPlan({
+    ...BASE_PLAN_INPUT,
+    executionPool: [makeCandidate({
+      symbol: 'CAKEUSDT',
+      status: 'WAIT_ENTRY_CONTRACT' as any,
+      selectedStrategy: 'balanced',
+      finalExecutionStrategy: 'balanced',
+      finalExecutable: false,
+      buyAllowed: false,
+      primaryBlocker: 'dip_not_confirmed',
+      finalNoBuyReason: 'STRATEGY_HANDOFF_INTEGRITY_FAILED',
+      mainReason: 'WAITING_FOR_REBOUND',
+      blockReasons: ['dip_not_confirmed'],
+      reboundConfirmed: false,
+      entryGateDecision: {
+        decision: 'BLOCK',
+        primaryReason: 'dip_not_confirmed',
+        blockReasons: ['dip_not_confirmed'],
+        warnings: [],
+        requiredNextActions: ['WAITING_FOR_REBOUND'],
+        explanation: 'waiting',
+        snapshot: {
+          decision: 'BLOCK',
+          primaryReason: 'dip_not_confirmed',
+          blockReasons: ['dip_not_confirmed'],
+          confidenceResult: { input: 80, required: 0, passed: true },
+          spreadResult: { input: 0.1, required: 0.35, passed: true },
+          slippageResult: { input: 0, required: 1, passed: true },
+          totalCostResult: { input: 0, required: 1, passed: true },
+          confirmationResult: { input: 0, required: 1, passed: false },
+          tpRoomResult: { input: 1, required: 1, passed: true },
+        } as any,
+      } as any,
+      runtimeSnapshot: { invariantOk: true } as any,
+      strategyDecision: { invariantOk: true, finalExecutionStrategy: 'balanced' } as any,
+      executionPrecheckSnapshot: {
+        invariantOk: true,
+        priceFresh: true,
+        bookFresh: true,
+        spreadOk: true,
+        tpRoomOk: true,
+        riskGroupResolved: true,
+        entryContractResolved: true,
+        entryContractValid: false,
+        professionalGateResolved: true,
+        failureReason: 'none',
+      } as any,
+    })],
+    watchPool: [],
+    nearMissPool: [],
+  });
+  assert(plan.selectedCandidates.length === 0, '14 non-executable setup candidate is not selected');
+  assert(plan.skippedCandidates.length > 0, '14 non-executable setup candidate is skipped');
+  assert(plan.skippedCandidates[0].finalNoBuyReason !== 'STRATEGY_HANDOFF_INTEGRITY_FAILED', '14 handoff does not mask concrete blocker');
+  assert(String(plan.skippedCandidates[0].finalNoBuyReason).includes('dip_not_confirmed') || String(plan.skippedCandidates[0].finalNoBuyReason).includes('rebound'), '14 skip reason is actionable');
 }
 
 // ── Summary ──

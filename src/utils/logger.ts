@@ -1,4 +1,5 @@
 import { sanitizeExecutionDisplayText } from '../lib/execution/executionDisplay';
+import { RingBuffer, getMemoryPressureState, isNonCriticalUiAudit } from '../core/diagnostics/memoryLifecycle';
 
 type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'TRADE';
 
@@ -21,17 +22,22 @@ export interface LoggerStats {
   totalSuppressed: number;
   currentLogCount: number;
   maxLogCount: number;
+  currentInternalAuditCount: number;
+  maxInternalAuditCount: number;
   byLevel: Record<LogLevel, { logged: number; suppressed: number }>;
   throttledKeys: number;
 }
 
 class Logger {
-  private logs: LogEntry[] = [];
+  private logs = new RingBuffer<LogEntry>(2000);
+  private internalAuditLogs = new RingBuffer<LogEntry>(5000);
   private maxLogs = 2000;
+  private maxInternalAuditLogs = 5000;
   private listeners: Set<(entry: LogEntry) => void> = new Set();
 
   private totalLogged = 0;
   private totalSuppressed = 0;
+  private lastBufferTrimAuditAt = 0;
   private byLevel: Record<LogLevel, { logged: number; suppressed: number }> = {
     INFO: { logged: 0, suppressed: 0 },
     WARN: { logged: 0, suppressed: 0 },
@@ -80,15 +86,37 @@ class Logger {
   }
 
   private push(level: LogLevel, message: string, data?: unknown) {
+    if (level === 'INFO' && getMemoryPressureState().active && isNonCriticalUiAudit(message)) {
+      this.totalSuppressed++;
+      this.byLevel[level].suppressed++;
+      return;
+    }
     const source = this.detectSource(message);
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),
       level, message, data, source,
     };
-    this.logs.push(entry);
-    if (this.logs.length > this.maxLogs) this.logs.shift();
+    const visibleTrim = this.logs.push(entry).trimmed;
+    let auditTrim = 0;
+    if (message.includes('_AUDIT') || message.includes('MEMORY_')) {
+      auditTrim = this.internalAuditLogs.push(entry).trimmed;
+    }
     this.totalLogged++;
     this.byLevel[level].logged++;
+    const now = Date.now();
+    if ((visibleTrim > 0 || auditTrim > 0) && now - this.lastBufferTrimAuditAt > 30000) {
+      this.lastBufferTrimAuditAt = now;
+      const trimEntry: LogEntry = {
+        timestamp: new Date().toISOString(),
+        level: 'INFO',
+        message: `MEMORY_BUFFER_TRIM_AUDIT: visibleTrimmed=${visibleTrim} internalAuditTrimmed=${auditTrim} visibleLogCount=${this.logs.length} visibleLogMax=${this.maxLogs} internalAuditCount=${this.internalAuditLogs.length} internalAuditMax=${this.maxInternalAuditLogs}`,
+        source: 'Diagnostics',
+      };
+      if (!message.startsWith('MEMORY_BUFFER_TRIM_AUDIT')) {
+        this.logs.push(trimEntry);
+        this.internalAuditLogs.push(trimEntry);
+      }
+    }
     console.log(`[${entry.timestamp}] [${level}] ${sanitizeExecutionDisplayText(message)}`, data ?? '');
     for (const cb of this.listeners) cb(entry);
   }
@@ -139,17 +167,27 @@ class Logger {
     return () => this.listeners.delete(cb);
   }
 
-  getLogs(): LogEntry[] { return [...this.logs]; }
+  getListenerCount(): number {
+    return this.listeners.size;
+  }
+
+  getLogs(): LogEntry[] { return this.logs.toArray(); }
 
   getRecentLogs(n = 50): LogEntry[] {
-    return this.logs.slice(-n);
+    return this.logs.recent(n);
+  }
+
+  getInternalAuditLogs(): LogEntry[] {
+    return this.internalAuditLogs.toArray();
   }
 
   clear() {
-    this.logs = [];
+    this.logs.clear();
+    this.internalAuditLogs.clear();
     this.totalLogged = 0;
     this.totalSuppressed = 0;
     this.throttleMap.clear();
+    this.lastBufferTrimAuditAt = 0;
     for (const l of Object.keys(this.byLevel) as LogLevel[]) {
       this.byLevel[l] = { logged: 0, suppressed: 0 };
     }
@@ -157,7 +195,7 @@ class Logger {
   }
 
   export() {
-    return JSON.stringify(this.logs.map(entry => ({
+    return JSON.stringify(this.logs.toArray().map(entry => ({
       ...entry,
       message: sanitizeExecutionDisplayText(entry.message),
     })), null, 2);
@@ -169,14 +207,21 @@ class Logger {
       totalSuppressed: this.totalSuppressed,
       currentLogCount: this.logs.length,
       maxLogCount: this.maxLogs,
+      currentInternalAuditCount: this.internalAuditLogs.length,
+      maxInternalAuditCount: this.maxInternalAuditLogs,
       byLevel: { ...this.byLevel },
       throttledKeys: this.throttleMap.size,
     };
   }
 
   setMaxLogs(max: number): void {
-    this.maxLogs = max;
-    while (this.logs.length > this.maxLogs) this.logs.shift();
+    this.maxLogs = Math.max(0, max);
+    this.logs.trimTo(this.maxLogs);
+  }
+
+  setMaxInternalAuditLogs(max: number): void {
+    this.maxInternalAuditLogs = Math.max(0, max);
+    this.internalAuditLogs.trimTo(this.maxInternalAuditLogs);
   }
 }
 

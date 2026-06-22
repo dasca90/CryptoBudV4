@@ -29,7 +29,16 @@ const plan1 = buildExecutionPlan({ scannerSnapshot:snapshot, executionPool:[bloc
 ok(plan1.selectedCandidates.length===0, '1 finalExecutable false excluded from execution pool selection');
 ok(plan1.noBuyReasons.some(r=>r.includes('strategy_setup_not_met') || r.includes('dip_missing') || r.includes('rebound_missing') || r.includes('finalExecutable_false')), '2 noBuyReasons contains exact final gate blockers');
 
-const tp1Invalid = cand('BANANAS31USDT', { selectedStrategy: 'momentum', tradingTargetOwnership:{ tp1Value:0, tp2Value:0, slValue:1.5, dynamicTrailingEnabled:false, trailingStartsAt:'TP1', trailPullbackValue:0.25, tp1Source:'unknown' } as any });
+const tp1Invalid = cand('BANANAS31USDT', {
+  selectedStrategy: 'momentum',
+  effectiveStrategy: 'momentum',
+  reboundPercent: 1.2,
+  m5Change: 0.4,
+  m15Change: 0.4,
+  h1Change: 0.5,
+  autoStrategyDecision: { strategySource:'autobots', effectiveStrategy:'momentum', groupTrend:'bullish', groupRecommendedStrategy:'momentum', reason:'x', warnings:[], confidenceTier:'high' } as any,
+  tradingTargetOwnership:{ tp1Value:0, tp2Value:0, slValue:1.5, dynamicTrailingEnabled:false, trailingStartsAt:'TP1', trailPullbackValue:0.25, tp1Source:'unknown' } as any,
+});
 const plan2 = buildExecutionPlan({ scannerSnapshot:snapshot, executionPool:[tp1Invalid], watchPool:[], nearMissPool:[], openSymbols:[], pendingOrderSymbols:[], capital:1000, usedCapital:0, maxPositions:10, maxEntriesPerCycle:5, capitalPerTrade:100, maxSpreadPct:0.35, decisionMode:'unified', executionAdapter:'paper_simulated', enabledRiskGroups:{mid_caps:true} as any });
 ok(plan2.selectedCandidates.length===0, '3 tp1=0 blocked before execution selection');
 ok(plan2.noBuyReasons.includes('tp1_missing_or_zero'), '4 tp1 missing reason propagated');

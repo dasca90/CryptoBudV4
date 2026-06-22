@@ -1,9 +1,16 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { execSync } from "child_process";
 
 const host = process.env.TAURI_DEV_HOST;
+const gitCommit = execSync("git rev-parse --short HEAD", { encoding: "utf-8" }).trim();
+const buildTimestamp = new Date().toISOString();
 
 export default defineConfig(async () => ({
+  define: {
+    __GIT_COMMIT__: JSON.stringify(gitCommit),
+    __BUILD_TIMESTAMP__: JSON.stringify(buildTimestamp),
+  },
   plugins: [react()],
   clearScreen: false,
   build: {

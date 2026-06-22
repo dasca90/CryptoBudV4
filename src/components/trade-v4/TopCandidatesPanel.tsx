@@ -2,8 +2,17 @@
 import type { TradeV4CandidateView, TradeV4PageModel } from "./types";
 import { getTrendTone } from "../../lib/ui/trendColorHelper";
 import { logger } from "../../utils/logger";
+import { formatFinalNoBuyReasonPriorityAudit, resolveFinalNoBuyReasonPriority } from "../../core/scanner/finalNoBuyReasonPriority";
 
 type SourceFilter = 'All' | 'Dipper' | 'Scalper';
+type TopCandidateDisplay = {
+  status: string;
+  statusColor: string;
+  whyLabel: string;
+  whyColor: string;
+  reasonText: string;
+  exactSkipReason: string;
+};
 
 const TREND_ARROW: Record<string, string> = {
   bullish: '\u2191',
@@ -40,6 +49,12 @@ function renderTrendLabel(t: string | null | undefined): { text: string; color: 
   return { text: label, color, arrow: TREND_ARROW[tone] };
 }
 
+function formatStrategyLabel(value: string | null | undefined): string {
+  const raw = String(value ?? "").trim();
+  if (!raw || /^n\/a$|^none$|^unknown$/i.test(raw)) return "n/a";
+  return raw.replace(/_/g, " ").replace(/\s+/g, " ").trim().toLowerCase().replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 function resolveWhyNoBuy(candidate: TradeV4CandidateView): { label: string; color: string } {
   if (candidate.finalExecutable === true) return { label: 'BUY_READY', color: '#2ea043' };
   const setupResult = String(candidate.strategyAudit?.dynamicSetupContext?.setupResult ?? '').toUpperCase();
@@ -54,6 +69,7 @@ function resolveWhyNoBuy(candidate: TradeV4CandidateView): { label: string; colo
   if (blocker.includes('overextended') || blocker.includes('over_extension')) return { label: 'OVEREXTENDED', color: '#f85149' };
   if (blocker.includes('spread')) return { label: 'SPREAD_TOO_HIGH', color: '#f85149' };
   if (blocker.includes('slippage')) return { label: 'BLOCKED_BY_SLIPPAGE', color: '#f85149' };
+  if (blocker.includes('market_data_offline') || blocker.includes('market data') || blocker.includes('data offline')) return { label: 'MARKET_DATA_UNAVAILABLE', color: '#f85149' };
   if (blocker.includes('tp_room') || blocker.includes('no_tp_room') || blocker.includes('tp room')) return { label: 'TP_ROOM_MISSING', color: '#f85149' };
   if (blocker.includes('price_stale') || blocker.includes('stale') || blocker.includes('price_not_fresh')) return { label: 'PRICE_NOT_FRESH', color: '#f85149' };
   if (blocker.includes('falling_knife')) return { label: 'FALLING_KNIFE', color: '#f85149' };
@@ -68,17 +84,218 @@ function resolveWhyNoBuy(candidate: TradeV4CandidateView): { label: string; colo
   return { label: 'UNKNOWN_LEGACY', color: '#8b949e' };
 }
 
+export function mapExactExecutionSkipReason(reason: string | null | undefined): { code: string; label: string; human: string } {
+  const normalized = String(reason ?? '').trim().toUpperCase();
+  const compact = !normalized || normalized === 'EXECUTION_NOT_TRIGGERED' || normalized === 'EXECUTION WAS NOT TRIGGERED'
+    ? 'UNKNOWN_EXECUTION_SELECTION_BUG'
+    : normalized;
+  if (compact.includes('PRICE_STALE') || compact.includes('BLOCK_PRICE_STALE') || compact.includes('PRICE_NOT_FRESH')) return { code: 'PRICE_STALE', label: 'EXECUTION SKIPPED — PRICE STALE', human: 'Price became stale before execution' };
+  if (compact.includes('DUPLICATE_OPEN_POSITION') || compact.includes('BLOCK_DUPLICATE_POSITION') || compact.includes('DUPLICATE')) return { code: 'DUPLICATE_OPEN_POSITION', label: 'EXECUTION SKIPPED - ALREADY OPEN', human: 'Already open' };
+  if (compact.includes('PENDING_ORDER')) return { code: 'PENDING_ORDER', label: 'EXECUTION SKIPPED - PENDING ORDER', human: 'Pending order exists' };
+  if (compact.includes('CAPITAL_NOT_OK') || compact.includes('CAPITAL')) return { code: 'CAPITAL_NOT_OK', label: 'EXECUTION SKIPPED - CAPITAL', human: 'Not enough capital' };
+  if (compact.includes('MAX_POSITIONS_REACHED') || (compact.includes('MAX') && compact.includes('POSITION'))) return { code: 'MAX_POSITIONS_REACHED', label: 'EXECUTION SKIPPED - MAX POSITIONS', human: 'Max positions reached' };
+  if (compact.includes('GROUP_CAP_REACHED') || compact.includes('GROUP_POSITION')) return { code: 'GROUP_CAP_REACHED', label: 'EXECUTION SKIPPED - GROUP CAP', human: 'Risk group cap reached' };
+  if (compact.includes('BANNED_SYMBOL') || compact.includes('BANNED')) return { code: 'BANNED_SYMBOL', label: 'EXECUTION SKIPPED - BANNED', human: 'Symbol is banned' };
+  if (compact.includes('BLOCK_MARKET_DATA_OFFLINE') || compact.includes('MARKET_DATA_OFFLINE')) return { code: 'BLOCK_MARKET_DATA_OFFLINE', label: 'EXECUTION SKIPPED - MARKET DATA', human: 'BUY-ready, but market data unavailable. Waiting for fresh price.' };
+
+  const r = compact.toLowerCase();
+  if (r.includes('candle_exhaustion')) return { code: 'CANDLE_EXHAUSTION', label: 'EXECUTION SKIPPED - CANDLE', human: 'Candle exhaustion blocked execution' };
+  if (r.includes('overextended') || r.includes('over_extension')) return { code: 'OVEREXTENDED', label: 'EXECUTION SKIPPED - OVEREXTENDED', human: 'Candidate became overextended' };
+  if (r.includes('tp1_missing_or_zero') || r.includes('tp1_invalid')) return { code: 'TP1_INVALID', label: 'EXECUTION SKIPPED - TP1', human: 'TP1 was invalid' };
+  if (r.includes('entry') && r.includes('gate')) return { code: 'ENTRY_GATE_BLOCKED', label: 'EXECUTION SKIPPED - ENTRY GATE', human: 'Entry gate blocked execution' };
+  if (r.includes('market') && r.includes('data')) return { code: 'BLOCK_MARKET_DATA_OFFLINE', label: 'EXECUTION SKIPPED - MARKET DATA', human: 'BUY-ready, but market data unavailable. Waiting for fresh price.' };
+  if (r.includes('spread')) return { code: 'SPREAD_TOO_HIGH', label: 'EXECUTION SKIPPED - SPREAD', human: 'Spread became too high' };
+  if (r.includes('tp') && r.includes('room')) return { code: 'TP_ROOM_MISSING', label: 'EXECUTION SKIPPED - TP ROOM', human: 'TP room was not available' };
+  if (r.includes('fresh') || r.includes('stale')) return { code: 'PRICE_STALE', label: 'EXECUTION SKIPPED — PRICE STALE', human: 'Price became stale before execution' };
+  if (compact.includes('UNKNOWN_EXECUTION_SELECTION_BUG')) return { code: 'UNKNOWN_EXECUTION_SELECTION_BUG', label: 'EXECUTION SKIPPED - UNKNOWN BUG', human: 'Unclassified execution-selection failure' };
+  return { code: compact, label: 'EXECUTION SKIPPED', human: compact.toLowerCase().replace(/_/g, ' ') };
+}
+
 function mapExecutionSkipReason(reason: string): string {
-  const r = reason.toLowerCase();
-  if (r.includes('candle_exhaustion')) return 'CANDLE_EXHAUSTION';
-  if (r.includes('overextended') || r.includes('over_extension')) return 'OVEREXTENDED';
-  if (r.includes('tp1_missing_or_zero') || r.includes('tp1_invalid')) return 'TP1_INVALID';
-  if (r.includes('max') && r.includes('position')) return 'MAX_POSITIONS_REACHED';
-  if (r.includes('entry') && r.includes('gate')) return 'ENTRY_GATE_BLOCKED';
-  if (r.includes('spread')) return 'SPREAD_TOO_HIGH';
-  if (r.includes('tp') && r.includes('room')) return 'TP_ROOM_MISSING';
-  if (r.includes('fresh') || r.includes('stale')) return 'PRICE_NOT_FRESH';
-  return 'EXECUTION_NOT_TRIGGERED';
+  return mapExactExecutionSkipReason(reason).code;
+}
+
+function normalizeFinalNoBuyReason(reason: string | null | undefined): string {
+  const raw = String(reason ?? '').trim();
+  if (!raw || raw === 'none') return '';
+  if (raw === ['STRATEGY', 'PARITY', 'INTEGRITY', 'FAILED'].join('_')) return 'STRATEGY_HANDOFF_INTEGRITY_FAILED';
+  if (/price.*stale|price_not_fresh|block_price_stale/i.test(raw)) return 'PRICE_STALE';
+  if (/book.*stale|block_book_stale/i.test(raw)) return 'BOOK_STALE';
+  if (/spread/i.test(raw)) return 'SPREAD_TOO_HIGH';
+  if (/tp.*room|tp_room/i.test(raw)) return 'TP_ROOM_NOT_OK';
+  return raw.toUpperCase();
+}
+
+function getCanonicalExecutionReason(candidate: TradeV4CandidateView, fallback?: string | null): string {
+  const decisionReason = normalizeFinalNoBuyReason(candidate.executionDecision?.finalNoBuyReason);
+  if (candidate.finalExecutable === true && candidate.buyAllowed === true && decisionReason) return decisionReason;
+  const priority = resolveFinalNoBuyReasonPriority({
+    symbol: candidate.symbol,
+    rawStatus: candidate.status,
+    displayStatus: candidate.lifecycleStatus ?? candidate.canonicalDisplayStatus?.canonicalStatus ?? candidate.status,
+    finalExecutable: candidate.finalExecutable,
+    buyAllowed: candidate.buyAllowed,
+    primaryBlocker: candidate.primaryBlocker ?? candidate.strategyAudit?.dynamicSetupContext?.primaryBlocker,
+    setupResult: candidate.strategyAudit?.setupResult ?? candidate.strategyAudit?.dynamicSetupContext?.setupResult,
+    candidateWhy: candidate.mainReason,
+    previousFinalNoBuyReason: candidate.finalNoBuyReason ?? fallback,
+    blockReasons: [...(candidate.blockReasons ?? []), ...(candidate.strategyAudit?.blockReasons ?? [])],
+    entryGateBlocker: candidate.gateAudit?.blocker,
+    strategyContractBlocker: candidate.strategyAudit?.strategyContractBlocker,
+    executionDecisionFinalNoBuyReason: candidate.executionDecision?.finalNoBuyReason,
+    handoffMismatch: candidate.handoffIntegrityStatus === 'failed' || candidate.strategyAudit?.handoffIntegrityStatus === 'failed',
+  });
+  return priority.resolvedFinalNoBuyReason === 'UNKNOWN' ? normalizeFinalNoBuyReason(fallback) : normalizeFinalNoBuyReason(priority.resolvedFinalNoBuyReason);
+}
+
+function getCanonicalDisplayParams(input: {
+  candidate: TradeV4CandidateView;
+  selectedSymbols?: ReadonlySet<string>;
+  skippedReasons?: ReadonlyMap<string, string>;
+  fallbackFinalNoBuyReason?: string | null;
+}): { executionSelected: boolean; executionSkipped: boolean; executionSkipReason: string; finalNoBuyReason: string } {
+  const c = input.candidate;
+  const decisionReason = normalizeFinalNoBuyReason(c.executionDecision?.finalNoBuyReason);
+  const skippedReason = normalizeFinalNoBuyReason(input.skippedReasons?.get(c.symbol));
+  const fallbackReason = normalizeFinalNoBuyReason(input.fallbackFinalNoBuyReason);
+  const priority = resolveFinalNoBuyReasonPriority({
+    symbol: c.symbol,
+    rawStatus: c.status,
+    displayStatus: c.lifecycleStatus ?? c.canonicalDisplayStatus?.canonicalStatus ?? c.status,
+    finalExecutable: c.finalExecutable,
+    buyAllowed: c.buyAllowed,
+    primaryBlocker: c.primaryBlocker ?? c.strategyAudit?.dynamicSetupContext?.primaryBlocker,
+    setupResult: c.strategyAudit?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult,
+    candidateWhy: c.mainReason,
+    previousFinalNoBuyReason: fallbackReason || skippedReason,
+    blockReasons: [...(c.blockReasons ?? []), ...(c.strategyAudit?.blockReasons ?? [])],
+    entryGateBlocker: c.gateAudit?.blocker,
+    strategyContractBlocker: c.strategyAudit?.strategyContractBlocker,
+    executionDecisionFinalNoBuyReason: decisionReason,
+    handoffMismatch: c.handoffIntegrityStatus === 'failed' || c.strategyAudit?.handoffIntegrityStatus === 'failed',
+  });
+  const finalNoBuyReason = priority.resolvedFinalNoBuyReason === 'UNKNOWN'
+    ? decisionReason || skippedReason || fallbackReason
+    : priority.resolvedFinalNoBuyReason;
+  logger.info(formatFinalNoBuyReasonPriorityAudit({
+    symbol: c.symbol,
+    rawStatus: c.status,
+    displayStatus: c.lifecycleStatus ?? c.canonicalDisplayStatus?.canonicalStatus ?? c.status,
+    finalExecutable: c.finalExecutable,
+    buyAllowed: c.buyAllowed,
+    primaryBlocker: c.primaryBlocker ?? c.strategyAudit?.dynamicSetupContext?.primaryBlocker,
+    setupResult: c.strategyAudit?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult,
+    candidateWhy: c.mainReason,
+    previousFinalNoBuyReason: fallbackReason || skippedReason,
+    blockReasons: [...(c.blockReasons ?? []), ...(c.strategyAudit?.blockReasons ?? [])],
+    entryGateBlocker: c.gateAudit?.blocker,
+    strategyContractBlocker: c.strategyAudit?.strategyContractBlocker,
+    executionDecisionFinalNoBuyReason: decisionReason,
+    handoffMismatch: c.handoffIntegrityStatus === 'failed' || c.strategyAudit?.handoffIntegrityStatus === 'failed',
+  }, priority));
+  const selectedByDecision = c.executionDecision?.selectedForExecution === true || c.executionDecision?.finalDecision === 'EXECUTE';
+  const selectedByPlan = input.selectedSymbols?.has(c.symbol) === true;
+  return {
+    executionSelected: selectedByDecision || selectedByPlan,
+    executionSkipped: Boolean(finalNoBuyReason && finalNoBuyReason !== 'none'),
+    executionSkipReason: finalNoBuyReason,
+    finalNoBuyReason,
+  };
+}
+
+function getStatusColor(status: string): string {
+  return status === 'BUY' ? '#2ea043'
+    : status === 'WAIT' ? '#d29922'
+      : status === 'BLOCKED' || status === 'BLOCK' ? '#f85149'
+        : status.startsWith('EXECUTION SKIPPED') ? '#d29922'
+          : '#8b949e';
+}
+
+function deriveExactSkipReason(params: {
+  candidate: TradeV4CandidateView;
+  executionSkipReason?: string;
+  finalNoBuyReason?: string;
+  primaryBlocker: string;
+  executionSkipped: boolean;
+  executionSelected: boolean;
+}): string {
+  const canonical = getCanonicalExecutionReason(params.candidate, params.executionSkipReason ?? params.finalNoBuyReason);
+  if (canonical) return canonical;
+  const direct = params.executionSkipReason && params.executionSkipReason !== 'none'
+    ? params.executionSkipReason
+    : (params.executionSkipped && !params.executionSelected ? (params.primaryBlocker !== 'none' ? params.primaryBlocker : params.candidate.mainReason || 'execution_not_triggered') : '');
+  if (direct) return direct;
+  return params.finalNoBuyReason || 'UNKNOWN_EXECUTION_SELECTION_BUG';
+}
+
+export function resolveTopCandidateDisplay(params: {
+  candidate: TradeV4CandidateView;
+  executionSelected?: boolean;
+  executionSkipped?: boolean;
+  executionSkipReason?: string;
+  finalNoBuyReason?: string;
+}): TopCandidateDisplay {
+  const c = params.candidate;
+  const canonicalReason = getCanonicalExecutionReason(c, params.executionSkipReason ?? params.finalNoBuyReason);
+  const primaryBlocker = c.primaryBlocker || c.gateAudit?.blocker || c.mainReason || 'none';
+  const isNotExecutable = c.finalExecutable === false || c.buyAllowed === false;
+  const canonicalStatus = String((c as any).canonicalDisplayStatus?.canonicalStatus ?? c.lifecycleStatus ?? c.status);
+  const finalizedAsNonBuy = canonicalStatus !== 'BUY' && canonicalStatus !== 'BUY_READY';
+  const baseWhy = resolveWhyNoBuy(c);
+  const exactSkipReason = deriveExactSkipReason({
+    candidate: c,
+    executionSkipReason: params.executionSkipReason,
+    finalNoBuyReason: params.finalNoBuyReason,
+    primaryBlocker,
+    executionSkipped: params.executionSkipped === true,
+    executionSelected: params.executionSelected === true,
+  });
+  const mappedSkip = mapExactExecutionSkipReason(exactSkipReason);
+
+  if (isNotExecutable || finalizedAsNonBuy) {
+    const blockerLabel = baseWhy.label === 'UNKNOWN_LEGACY' ? 'ENTRY_GATE_BLOCKED' : baseWhy.label;
+    const waitLike = blockerLabel.startsWith('WAITING_') || canonicalStatus.startsWith('WAIT_');
+    const marketDataBlocked = String(primaryBlocker).toUpperCase().includes('BLOCK_MARKET_DATA_OFFLINE') || blockerLabel === 'MARKET_DATA_UNAVAILABLE';
+    return {
+      status: waitLike ? 'WAIT' : 'BLOCKED',
+      statusColor: waitLike ? '#d29922' : '#f85149',
+      whyLabel: blockerLabel,
+      whyColor: waitLike ? '#d29922' : '#f85149',
+      reasonText: marketDataBlocked ? 'BUY-ready, but market data unavailable. Waiting for fresh price.' : (primaryBlocker !== 'none' ? primaryBlocker : 'Entry gate blocked / final executable false'),
+      exactSkipReason,
+    };
+  }
+
+  if (c.executionDecision && canonicalReason && canonicalReason !== 'none') {
+    return {
+      status: mappedSkip.label,
+      statusColor: '#d29922',
+      whyLabel: mappedSkip.code === 'PRICE_STALE' ? 'BUY-ready, but execution skipped because price became stale during final revalidation.' : mappedSkip.human,
+      whyColor: '#d29922',
+      reasonText: mappedSkip.human,
+      exactSkipReason: canonicalReason,
+    };
+  }
+
+  if (c.finalExecutable === true && c.buyAllowed === true && params.executionSelected !== true) {
+    return {
+      status: mappedSkip.label,
+      statusColor: '#d29922',
+      whyLabel: mappedSkip.code === 'PRICE_STALE' ? 'BUY-ready, but execution skipped because price became stale during final revalidation.' : mappedSkip.human,
+      whyColor: '#d29922',
+      reasonText: mappedSkip.human,
+      exactSkipReason,
+    };
+  }
+
+  return {
+    status: c.status,
+    statusColor: getStatusColor(c.status),
+    whyLabel: baseWhy.label,
+    whyColor: baseWhy.color,
+    reasonText: primaryBlocker !== 'none' ? primaryBlocker : c.mainReason || baseWhy.label,
+    exactSkipReason,
+  };
 }
 
 export function getVisibleTopCandidates(candidates: TradeV4CandidateView[], sourceFilter: SourceFilter): TradeV4CandidateView[] {
@@ -153,7 +370,7 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
     : props.candidates.filter(c => c.source === sourceFilter.toLowerCase()), [props.candidates, sourceFilter]);
 
   const top = useMemo(() => getVisibleTopCandidates(props.candidates, sourceFilter), [props.candidates, sourceFilter]);
-  const hasBuy = filtered.some(c => c.status === 'BUY');
+  const hasBuy = filtered.some(c => c.status === 'BUY' && c.finalExecutable === true && c.buyAllowed === true);
 
   const poolLabel = !hasBuy && props.noBuyDisplay
     ? `Watch Pool (${props.noBuyDisplay.watchPoolSize} non-BUY)`
@@ -180,10 +397,14 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
 
   useEffect(() => {
     const executionSelected = new Set((props.executionPlan?.selectedCandidates ?? []).map((s) => s.symbol));
-    const skippedMap = new Map((props.executionPlan?.skippedCandidates ?? []).map((s) => [s.symbol, s.reason]));
-    const displaySig = top.map((c) => `${c.symbol}:${c.status}:${String(c.finalExecutable)}:${resolveWhyNoBuy(c).label}`).join('|');
+    const skippedMap = new Map((props.executionPlan?.skippedCandidates ?? []).map((s) => [s.symbol, s.finalNoBuyReason || s.reason]));
+    const displaySig = top.map((c) => {
+      const params = getCanonicalDisplayParams({ candidate: c, selectedSymbols: executionSelected, skippedReasons: skippedMap, fallbackFinalNoBuyReason: props.noBuyDisplay?.finalNoBuyReason });
+      const display = resolveTopCandidateDisplay({ candidate: c, ...params });
+      return `${c.symbol}:${c.status}:${String(c.finalExecutable)}:${display.status}:${display.whyLabel}:${params.finalNoBuyReason || 'none'}`;
+    }).join('|');
     logger.info(`TOP_CANDIDATE_DISPLAY_AUDIT: mode=${viewMode} count=${top.length} compact=${String(viewMode === 'compact')} detailed=${String(viewMode === 'detailed')} signature=${displaySig || 'none'}`);
-    const buyReadyCount = top.filter((c) => c.status === 'BUY' && c.finalExecutable).length;
+    const buyReadyCount = top.filter((c) => c.status === 'BUY' && c.finalExecutable === true && c.buyAllowed === true).length;
     const selectedCount = props.executionPlan?.selectedCandidates?.length ?? 0;
     const attemptedCount = 0; // not available in UI — we use handoffEmitted as proxy
     const handoffEmitted = selectedCount > 0 || props.executionPlan?.canExecute === false;
@@ -191,37 +412,77 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
       logger.warn(`TOP_CANDIDATE_BUY_READY_NO_HANDOFF: buyReadyCount=${buyReadyCount} selectedCount=${selectedCount} reason=buy_ready_candidates_visible_but_no_execution_handoff_in_same_snapshot`);
     }
     for (const c of top) {
-      const baseWhy = resolveWhyNoBuy(c);
-      const selectedForExecution = executionSelected.has(c.symbol);
-      const skipReason = skippedMap.get(c.symbol) ?? '';
-      const resolvedWhy = c.finalExecutable && !selectedForExecution
-        ? mapExecutionSkipReason(skipReason || props.noBuyDisplay?.finalNoBuyReason || 'execution_not_triggered')
-        : baseWhy.label;
-      logger.info(`TOP_CANDIDATE_STATUS_REASON_AUDIT: symbol=${c.symbol} status=${c.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} why=${resolvedWhy} primaryBlocker=${c.primaryBlocker ?? 'none'} setupResult=${c.strategyAudit?.dynamicSetupContext?.setupResult ?? 'none'}`);
+      const displayParams = getCanonicalDisplayParams({ candidate: c, selectedSymbols: executionSelected, skippedReasons: skippedMap, fallbackFinalNoBuyReason: props.noBuyDisplay?.finalNoBuyReason });
+      const selectedForExecution = displayParams.executionSelected;
+      const skipReason = displayParams.executionSkipReason;
+      const executionSkipped = displayParams.executionSkipped;
+      const display = resolveTopCandidateDisplay({
+        candidate: c,
+        ...displayParams,
+      });
+      logger.info(`TOP_CANDIDATE_STATUS_REASON_AUDIT: symbol=${c.symbol} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} why=${display.whyLabel} finalNoBuyReason=${display.exactSkipReason || displayParams.finalNoBuyReason || 'none'} primaryBlocker=${c.primaryBlocker ?? 'none'} setupResult=${c.executionDecision?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult ?? 'none'}`);
+      const canonicalStatus = String((c as any).canonicalDisplayStatus?.canonicalStatus ?? c.lifecycleStatus ?? c.status);
+      const displayBuyWithNonExecutable = display.status === 'BUY' && (c.finalExecutable === false || c.buyAllowed === false);
+      const rawBuyIntentCanonicalWait = c.status === 'BUY' && canonicalStatus !== 'BUY' && display.status !== 'BUY';
+      const canonicalFailureReason = displayBuyWithNonExecutable
+        ? 'RAW_BUY_WITH_NON_EXECUTABLE_CANDIDATE'
+        : 'none';
+      logger.info(`TOP_CANDIDATE_CANONICAL_STATUS_AUDIT: symbol=${c.symbol} scanId=${c.executionDecision?.scanId ?? (c as any).scanId ?? c.candidateId ?? 'n/a'} canonicalStatus=${canonicalStatus} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} primaryBlocker=${c.primaryBlocker ?? 'none'} finalNoBuyReason=${display.exactSkipReason || displayParams.finalNoBuyReason || 'none'} setupResult=${c.executionDecision?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult ?? 'none'} statusSource=${(c as any).canonicalDisplayStatus?.statusSource ?? 'TopCandidatesPanel.canonical_consumer'} normalizedBy=${(c as any).canonicalDisplayStatus?.normalizedBy ?? 'upstream'} rawBuyIntentCanonicalWait=${String(rawBuyIntentCanonicalWait)} invariantOk=${String(!displayBuyWithNonExecutable)} failureReason=${canonicalFailureReason}`);
+      logger.info(`TOP_CANDIDATE_STATUS_INTEGRITY_AUDIT: symbol=${c.symbol} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} rawBuyIntentCanonicalWait=${String(rawBuyIntentCanonicalWait)} invariantOk=${String(!displayBuyWithNonExecutable)} reason=${displayBuyWithNonExecutable ? 'RAW_BUY_WITH_NON_EXECUTABLE_CANDIDATE' : 'status_consistent'}`);
       if (c.finalExecutable && !selectedForExecution) {
-        const perCandidateFinalReason = skipReason || props.noBuyDisplay?.finalNoBuyReason || 'execution_not_triggered';
-        logger.warn(`TOP_CANDIDATE_BUY_READY_NOT_EXECUTED_AUDIT: symbol=${c.symbol} status=${c.status} why=${resolvedWhy} skipReason=${skipReason || 'none'} finalNoBuyReason=${perCandidateFinalReason}`);
-        const gate = c.gateAudit;
-        const dup = (gate?.blocker ?? '').toLowerCase().includes('duplicate') || c.blockReasons?.some(r => String(r).toLowerCase().includes('duplicate'));
-        const pending = (gate?.blocker ?? '').toLowerCase().includes('pending') || c.blockReasons?.some(r => String(r).toLowerCase().includes('pending'));
-        const banned = (gate?.blocker ?? '').toLowerCase().includes('ban');
-        const spreadOk = (c.spreadPct ?? 0) <= 0.35;
-        const tpRoomOk = (c as any).tpRoomOk !== false;
-        const priceFresh = (c as any).priceAgeMs != null && (c as any).priceAgeMs < 10000;
-        const exactReason = dup ? 'DUPLICATE_OPEN_POSITION' : pending ? 'PENDING_ORDER_LOCK' : banned ? 'BANNED_SYMBOL' : !spreadOk ? 'SPREAD_TOO_HIGH' : !tpRoomOk ? 'TP_ROOM_INVALID' : !priceFresh ? 'PRICE_STALE' : (skipReason || perCandidateFinalReason);
-        logger.warn(`BUY_READY_NOT_SELECTED_REASON_AUDIT: symbol=${c.symbol} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} setupResult=SETUP_OK selectedForExecution=false executionSubmitted=false adapterCalled=false duplicateOpenPosition=${String(dup)} pendingOrder=${String(pending)} banned=${String(banned)} spreadOk=${String(spreadOk)} tpRoomOk=${String(tpRoomOk)} priceFresh=${String(priceFresh)} capitalOk=true maxOpenPositionsOk=true maxGroupPositionsOk=n/a maxGroupExposureOk=n/a groupName=n/a groupOpenCount=n/a groupMaxOpen=n/a groupExposure=n/a groupMaxExposure=n/a exactNotSelectedReason=${exactReason}`);
+        const perCandidateFinalReason = display.exactSkipReason || displayParams.finalNoBuyReason || 'UNKNOWN_SKIP_REASON_BUG';
+        const unknownSkipReason = perCandidateFinalReason === 'UNKNOWN_SKIP_REASON_BUG' || perCandidateFinalReason === 'UNKNOWN_EXECUTION_SELECTION_BUG' || perCandidateFinalReason === 'execution_not_triggered' || perCandidateFinalReason === 'Execution was not triggered';
+        const auditLine = `TOP_CANDIDATE_BUY_READY_NOT_EXECUTED_AUDIT: symbol=${c.symbol} status=${display.status} why=${display.whyLabel} skipReason=${skipReason || perCandidateFinalReason} finalNoBuyReason=${perCandidateFinalReason}`;
+        if (unknownSkipReason) logger.warn(`${auditLine} candidateSnapshot=${JSON.stringify({ symbol: c.symbol, rank: c.rank, status: c.status, finalExecutable: c.finalExecutable, buyAllowed: c.buyAllowed, primaryBlocker: c.primaryBlocker, blockReasons: c.blockReasons })}`);
+        else logger.info(auditLine);
+        const skipAuditLine = `BUY_READY_EXECUTION_SKIP_UI_AUDIT: symbol=${c.symbol} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} selectedForExecution=false finalNoBuyReason=${display.exactSkipReason || perCandidateFinalReason} userMessage=${display.whyLabel}`;
+        if (unknownSkipReason) logger.warn(skipAuditLine);
+        else logger.info(skipAuditLine);
+        const d = c.executionDecision;
+        logger.warn(`BUY_READY_NOT_SELECTED_REASON_AUDIT: symbol=${c.symbol} finalExecutable=${String(d?.finalExecutable ?? c.finalExecutable)} buyAllowed=${String(d?.buyAllowed ?? c.buyAllowed)} setupResult=${d?.setupResult ?? 'SETUP_OK'} selectedForExecution=false submitAttempted=false adapterCalled=${String(d?.adapterCalled ?? false)} duplicateOpenPosition=${String(d?.duplicateOpenPosition ?? false)} pendingOrder=${String(d?.pendingOrderExists ?? false)} banned=${String(d?.banned ?? false)} spreadOk=${String(d?.spreadOk ?? true)} tpRoomOk=${String(d?.tpRoomOk ?? true)} priceFresh=${String(d?.priceFresh ?? true)} capitalOk=${String(d?.capitalOk ?? true)} maxOpenPositionsOk=${String(d?.maxOpenPositionsOk ?? true)} maxGroupPositionsOk=${String(d?.maxGroupPositionsOk ?? true)} maxGroupExposureOk=${String(d?.maxGroupExposureOk ?? true)} groupName=${d?.groupName ?? c.riskGroup ?? 'unknown'} groupOpenCount=${d?.groupOpenCount ?? 0} groupMaxOpen=${d?.groupMaxOpen ?? 0} groupExposure=${d?.groupExposure ?? 0} groupMaxExposure=${d?.groupMaxExposure ?? 0} finalNoBuyReason=${perCandidateFinalReason}`);
       }
+      const decisionReason = normalizeFinalNoBuyReason(c.executionDecision?.finalNoBuyReason);
+      const skippedReason = normalizeFinalNoBuyReason(skippedMap.get(c.symbol));
+      const displayReason = normalizeFinalNoBuyReason(display.exactSkipReason || displayParams.finalNoBuyReason);
+      const mismatchFields = [
+        decisionReason && displayReason && decisionReason !== displayReason ? 'row.finalNoBuyReason' : '',
+        decisionReason && skippedReason && decisionReason !== skippedReason ? 'skippedCandidate.finalNoBuyReason' : '',
+      ].filter(Boolean);
+      logger.info(`EXECUTION_DECISION_CONSUMER_INTEGRITY_AUDIT: symbol=${c.symbol} scanId=${c.executionDecision?.scanId ?? 'n/a'} rowSource=TopCandidatesPanel decisionSource=${c.executionDecision ? 'ExecutionDecision' : 'legacy_fallback'} rowDisplayStatus=${display.status} rowWhy=${display.whyLabel} rowFinalNoBuyReason=${displayReason || 'none'} executionDecisionFinalNoBuyReason=${decisionReason || 'none'} skippedCandidateFinalNoBuyReason=${skippedReason || 'none'} buyReadyNotSelectedFinalNoBuyReason=${displayReason || 'none'} renderedUserMessage=${display.whyLabel} mismatchFields=${mismatchFields.join('|') || 'none'} invariantOk=${String(mismatchFields.length === 0)}`);
       const integrityViolation = c.status === 'BUY' && !c.finalExecutable && c.buyAllowed === true;
       if (integrityViolation) {
         logger.error(`BUY_STATUS_INTEGRITY_AUDIT: symbol=${c.symbol} status=${c.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} integrityViolation=true reason=finalExecutable_false_but_buyAllowed_true`);
       }
     }
-    const buystatus = top.filter(c => c.status === 'BUY');
-    const execBuyReady = buystatus.filter(c => c.finalExecutable && c.buyAllowed).length;
-    const waitMarkedBuy = buystatus.filter(c => !c.finalExecutable || !c.buyAllowed).length;
-    const entryGateAllowButNotExec = buystatus.filter(c => !c.finalExecutable && c.gateAudit?.blocker === undefined).length;
-    const invariantOk = waitMarkedBuy === 0 || entryGateAllowButNotExec === 0;
-    logger.info(`BUY_STATUS_INTEGRITY_AUDIT: totalCandidateBuyStatus=${buystatus.length} executableBuyReadyCount=${execBuyReady} waitButMarkedBuyCount=${waitMarkedBuy} finalExecutableFalseButBuyAllowedCount=${buystatus.filter(c => !c.finalExecutable && c.buyAllowed).length} entryGateAllowButFinalExecutableFalseCount=${entryGateAllowButNotExec} invariantOk=${String(invariantOk)}`);
+    const displayRows = top.map(c => {
+      const params = getCanonicalDisplayParams({ candidate: c, selectedSymbols: executionSelected, skippedReasons: skippedMap, fallbackFinalNoBuyReason: props.noBuyDisplay?.finalNoBuyReason });
+      return { candidate: c, display: resolveTopCandidateDisplay({ candidate: c, ...params }) };
+    });
+    const rawBuyStatus = top.filter(c => c.status === 'BUY');
+    const displayBuyStatus = displayRows.filter(row => row.display.status === 'BUY');
+    const uiBuyReadyRows = displayBuyStatus;
+    const execBuyReady = uiBuyReadyRows.length;
+    const waitMarkedBuy = displayBuyStatus.filter(row => !row.candidate.finalExecutable || !row.candidate.buyAllowed).length;
+    const rawBuyIntentCanonicalWaitCount = displayRows.filter(row => row.candidate.status === 'BUY' && row.display.status !== 'BUY').length;
+    const rawWaitMarkedBuy = displayRows.filter(row => row.candidate.status === 'BUY' && row.display.status === 'BUY' && (!row.candidate.finalExecutable || !row.candidate.buyAllowed)).length;
+    const entryGateAllowButNotExec = displayBuyStatus.filter(row => !row.candidate.finalExecutable && row.candidate.gateAudit?.blocker === undefined).length;
+    const canonicalSet = (props.executionPlan as any)?.canonicalExecutableSet ?? {};
+    const canonicalExecutableSymbols = ((canonicalSet.executableCandidates ?? []) as any[]).map((c) => String(c.symbol));
+    const canonicalSkipped = ((canonicalSet.skippedCandidates ?? []) as any[]);
+    const skippedWithReasonCount = canonicalSkipped.filter((c) => c.finalNoBuyReason && c.finalNoBuyReason !== 'UNKNOWN_EXECUTION_SELECTION_BUG').length;
+    const skippedWithoutReasonCount = canonicalSkipped.filter((c) => !c.finalNoBuyReason || c.finalNoBuyReason === 'UNKNOWN_EXECUTION_SELECTION_BUG').length;
+    const selectedSymbols = new Set((props.executionPlan?.selectedCandidates ?? []).map((c) => c.symbol));
+    const mismatchSymbols = uiBuyReadyRows
+      .map((row) => row.candidate.symbol)
+      .filter((symbol) => !canonicalExecutableSymbols.includes(symbol) && !canonicalSkipped.some((c) => String(c.symbol) === symbol && c.finalNoBuyReason));
+    const rawBuyExecutableMismatch = displayBuyStatus.length !== execBuyReady || displayBuyStatus.length > canonicalExecutableSymbols.length;
+    const buyStatusFailureReason = rawBuyExecutableMismatch ? 'RAW_BUY_WITHOUT_CANONICAL_EXECUTABLE'
+      : waitMarkedBuy > 0 ? 'RAW_BUY_WITH_NON_EXECUTABLE_CANDIDATE'
+        : skippedWithoutReasonCount > 0 ? 'SKIPPED_WITHOUT_EXACT_REASON'
+          : mismatchSymbols.length > 0 ? 'UI_BUY_READY_NOT_IN_CANONICAL_SET'
+            : 'none';
+    const invariantOk = waitMarkedBuy === 0 && rawWaitMarkedBuy === 0 && skippedWithoutReasonCount === 0 && mismatchSymbols.length === 0 && !rawBuyExecutableMismatch;
+    logger.info(`BUY_STATUS_INTEGRITY_AUDIT: rawBuyStatusCount=${rawBuyStatus.length} uiBuyReadyCount=${execBuyReady} uiBuyReadySymbols=${uiBuyReadyRows.map(row => row.candidate.symbol).join('|') || 'none'} canonicalExecutableCount=${canonicalExecutableSymbols.length} executionSelectedCount=${selectedSymbols.size} submitAttemptedCount=${displayRows.filter(row => row.candidate.executionDecision?.submitAttempted === true).length} rawBuyIntentCanonicalWaitCount=${rawBuyIntentCanonicalWaitCount} rawWaitButMarkedBuyCount=${rawWaitMarkedBuy} blockedDisplayCount=${displayRows.filter(row => row.display.status === 'BLOCK' || row.display.status === 'BLOCKED').length} waitDisplayCount=${displayRows.filter(row => row.display.status === 'WAIT').length} skippedWithReasonCount=${skippedWithReasonCount} skippedWithoutReasonCount=${skippedWithoutReasonCount} mismatchSymbols=${mismatchSymbols.join('|') || 'none'} totalCandidateBuyStatus=${displayBuyStatus.length} rawCandidateBuyStatus=${rawBuyStatus.length} executableBuyReadyCount=${execBuyReady} waitButMarkedBuyCount=${waitMarkedBuy} finalExecutableFalseButBuyAllowedCount=${displayBuyStatus.filter(row => !row.candidate.finalExecutable && row.candidate.buyAllowed).length} entryGateAllowButFinalExecutableFalseCount=${entryGateAllowButNotExec} failureReason=${buyStatusFailureReason} invariantOk=${String(invariantOk)}`);
   }, [top, props.executionPlan, props.noBuyDisplay, viewMode]);
 
   useEffect(() => {
@@ -420,35 +681,43 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
                 const confDisplay = c.confidence > 0 ? `${c.confidence.toFixed(0)}%` : 'n/a';
                 const confColor = c.confidence >= 70 ? '#2ea043' : c.confidence >= 45 ? '#d29922' : c.confidence > 0 ? '#f85149' : '#8b949e';
                 const primaryBlocker = c.primaryBlocker || c.gateAudit?.blocker || c.mainReason || 'none';
-                const intendedStrategy = c.strategyAudit?.dynamicSetupContext?.intendedStrategy ?? c.strategy;
-                const finalStrategy = c.strategyAudit?.dynamicSetupContext?.finalStrategy ?? c.strategy;
+                const marketSetup = c.strategyAudit?.marketRecommendedStrategy ?? c.strategyAudit?.dynamicSetupContext?.intendedStrategy ?? c.groupRecommendedStrategy ?? c.strategy;
+                const runtimeMode = c.strategyAudit?.runtimeActiveStrategy ?? c.strategyAudit?.strategyRequested ?? c.effectiveStrategy ?? c.strategy;
+                const finalStrategy = c.strategyAudit?.finalPerCoinStrategy ?? c.strategyAudit?.strategySelected ?? c.strategy;
                 const spreadVsMax = c.gateAudit ? `${c.gateAudit.spreadPct.toFixed(2)}%/${c.gateAudit.maxSpreadUsedByEntryGate.toFixed(2)}%` : (c.spreadPct != null ? `${c.spreadPct.toFixed(2)}%` : 'n/a');
                 const executionSelected = !!props.executionPlan?.selectedCandidates?.some((s) => s.symbol === c.symbol);
                 const executionSkipped = !!props.executionPlan?.skippedCandidates?.some((s) => s.symbol === c.symbol);
-                const executionSkipReason = props.executionPlan?.skippedCandidates?.find((s) => s.symbol === c.symbol)?.reason ?? '';
-                const isNotExecutable = c.finalExecutable === false || c.buyAllowed === false;
-                const displayStatus = c.status;
-                const statusColor = c.status === 'BUY' ? '#2ea043' : c.status === 'WAIT' ? '#d29922' : c.status === 'BLOCK' ? '#f85149' : '#8b949e';
-                const baseWhy = resolveWhyNoBuy(c);
-                const effectiveSkipReason = executionSkipReason && executionSkipReason !== 'none'
-                  ? executionSkipReason
-                  : (executionSkipped && !executionSelected ? (primaryBlocker !== 'none' ? primaryBlocker : c.mainReason || 'execution_not_triggered') : '');
-                const isBlockedBuyCandidate = (c.status === 'BUY' && !executionSelected && c.finalExecutable !== false) || (isNotExecutable && c.status === 'BUY');
-                const skipMapped = mapExecutionSkipReason(effectiveSkipReason || props.noBuyDisplay?.finalNoBuyReason || 'execution_not_triggered');
-                const whyLabel = isBlockedBuyCandidate
-                  ? `BLOCKED: ${skipMapped}`
-                  : (c.finalExecutable && !executionSelected
-                    ? skipMapped
-                    : baseWhy.label);
-                const whyColor = isBlockedBuyCandidate ? '#f85149' : whyLabel.startsWith('BLOCKED') ? '#f85149' : whyLabel === 'BUY_READY' ? '#2ea043' : whyLabel.startsWith('WAITING_') ? '#d29922' : whyLabel === 'EXECUTION_NOT_TRIGGERED' ? '#d29922' : '#f85149';
-                const reasonText = primaryBlocker !== 'none' ? primaryBlocker : c.mainReason || whyLabel;
+                const skippedReasons = new Map((props.executionPlan?.skippedCandidates ?? []).map((s) => [s.symbol, s.finalNoBuyReason || s.reason]));
+                const canonicalDisplayParams = getCanonicalDisplayParams({
+                  candidate: c,
+                  selectedSymbols: new Set((props.executionPlan?.selectedCandidates ?? []).map((s) => s.symbol)),
+                  skippedReasons,
+                  fallbackFinalNoBuyReason: props.noBuyDisplay?.finalNoBuyReason,
+                });
+                const executionSkipReason = canonicalDisplayParams.executionSkipReason;
+                const display = resolveTopCandidateDisplay({
+                  candidate: c,
+                  executionSelected: canonicalDisplayParams.executionSelected || executionSelected,
+                  executionSkipped: canonicalDisplayParams.executionSkipped || executionSkipped,
+                  executionSkipReason,
+                  finalNoBuyReason: canonicalDisplayParams.finalNoBuyReason,
+                });
+                const displayStatus = display.status;
+                const strategyCellTitle = `Market setup: ${formatStrategyLabel(marketSetup)} | Runtime mode: ${formatStrategyLabel(runtimeMode)} | Final strategy: ${formatStrategyLabel(finalStrategy)} | Decision: ${display.status}`;
+                const statusColor = display.statusColor;
+                const whyLabel = display.whyLabel;
+                const whyColor = display.whyColor;
+                const reasonText = display.reasonText;
 
                 return (
                   <div key={c.candidateId} className={`top-cand-row ${props.selectedSymbol === c.symbol ? 'selected' : ''}`} onClick={() => props.onSelectSymbol(c.symbol)}>
                     <div style={{ display: 'grid', gridTemplateColumns: gridCols, gap: 4, alignItems: 'center', fontSize: 9, width: '100%' }}>
                       <span style={{ fontWeight: 600, color: '#d8e6ff', fontFamily: '"JetBrains Mono", monospace', fontSize: 10 }}>{c.symbol.replace("USDT", "")}</span>
                       <span style={{ color: trend.color, fontWeight: 600, fontSize: 9, whiteSpace: 'nowrap' }}>{trend.arrow} {trend.text}</span>
-                      <span style={{ color: '#58a6ff', fontSize: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{finalStrategy}{finalStrategy !== intendedStrategy ? ` (${intendedStrategy})` : ''}</span>
+                      <span title={strategyCellTitle} style={{ color: '#58a6ff', fontSize: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {formatStrategyLabel(marketSetup)}
+                        {String(finalStrategy).toLowerCase() !== String(marketSetup).toLowerCase() ? ` -> ${formatStrategyLabel(finalStrategy)}` : ''}
+                      </span>
                       <span style={{ color: confColor, fontFamily: '"JetBrains Mono", monospace', fontSize: 9, fontWeight: 700 }}>{confDisplay}</span>
                       {viewMode === 'compact' && (
                         <>

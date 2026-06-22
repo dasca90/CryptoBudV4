@@ -409,6 +409,9 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
     riskGroup: candidate.riskGroup ?? "unknown",
     strategy: candidate.selectedStrategy,
     status: candidate.status,
+    runtimeSnapshotPresent: Boolean(candidate.runtimeSnapshot) && candidate.runtimeSnapshot?.invariantOk !== false,
+    strategyDecisionPresent: Boolean(candidate.strategyDecision) && candidate.strategyDecision?.invariantOk !== false,
+    executionPrecheckSnapshotPresent: Boolean(candidate.executionPrecheckSnapshot) && candidate.executionPrecheckSnapshot?.invariantOk !== false,
     engineState: visualState,
     confidence: hasRealConfidence ? Math.round(rawConf * 100) : 0,
     spreadPct: Number.isFinite(candidate.spreadPct) ? candidate.spreadPct : null,
@@ -451,6 +454,12 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
     primaryBlocker: strategyAudit.dynamicSetupContext?.primaryBlocker
       ?? strategyAudit.blockReasons[0]
       ?? (strategyAudit.finalExecutable ? null : 'finalExecutable_false'),
+    finalNoBuyReason: strategyAudit.finalNoBuyReason ?? candidate.finalNoBuyReason ?? null,
+    actionableNoBuyReason: strategyAudit.actionableNoBuyReason ?? candidate.actionableNoBuyReason ?? null,
+    technicalNoBuyReason: strategyAudit.technicalNoBuyReason ?? candidate.technicalNoBuyReason ?? null,
+    secondaryDiagnosticReasons: strategyAudit.secondaryDiagnosticReasons ?? candidate.secondaryDiagnosticReasons ?? [],
+    handoffIntegrityStatus: strategyAudit.handoffIntegrityStatus ?? candidate.handoffIntegrityStatus,
+    renderedUserMessage: strategyAudit.renderedUserMessage ?? null,
     gateAudit: candidate.gateAudit,
     professionalScore: (candidate as any).professionalAnalysis?.professionalScore,
     professionalVerdict: (candidate as any).professionalAnalysis?.professionalVerdict,
@@ -463,11 +472,20 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
     ethFresh: (candidate as any).professionalAnalysis?.ethFresh,
     anchorDecision: (candidate as any).professionalAnalysis?.anchorDecision,
     anchorBlockApplied: (candidate as any).professionalAnalysis?.anchorBlockApplied,
-    executionDecision: decisionsBySymbol?.get(candidate.symbol) ? (() => {
-      const d = decisionsBySymbol.get(candidate.symbol)!;
+    executionDecision: (() => {
+      const scanKey = `${(candidate as any).scanId ?? (candidate as any).scannerScanId ?? ''}:${candidate.symbol}`;
+      const d = decisionsBySymbol?.get(scanKey) ?? decisionsBySymbol?.get(candidate.symbol);
+      if (!d) return undefined;
       return {
+        scanId: d.scanId,
+        candidateRank: d.candidateRank,
         selectedForExecution: d.selectedForExecution,
         finalNoBuyReason: d.finalNoBuyReason,
+        actionableNoBuyReason: d.actionableNoBuyReason,
+        technicalNoBuyReason: d.technicalNoBuyReason,
+        secondaryDiagnosticReasons: d.secondaryDiagnosticReasons,
+        renderedUserMessage: d.renderedUserMessage,
+        finalNoBuyReasonSource: d.finalNoBuyReasonSource,
         finalDecision: d.finalDecision,
         submitAttempted: d.submitAttempted,
         adapterCalled: d.adapterCalled,
@@ -487,12 +505,22 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
         tpRoomOk: d.tpRoomOk,
         capitalOk: d.capitalOk,
         maxOpenPositionsOk: d.maxOpenPositionsOk,
+        maxGroupPositionsOk: d.maxGroupPositionsOk,
+        maxGroupExposureOk: d.maxGroupExposureOk,
         duplicateOpenPosition: d.duplicateOpenPosition,
+        pendingOrderExists: d.pendingOrderExists,
+        banned: d.banned,
         runtimeExecutionEnabled: d.runtimeExecutionEnabled,
         setupResult: d.setupResult,
         finalExecutionStrategy: d.finalExecutionStrategy,
+        riskGroup: d.riskGroup,
+        groupName: d.groupName,
+        groupOpenCount: d.groupOpenCount,
+        groupMaxOpen: d.groupMaxOpen,
+        groupExposure: d.groupExposure,
+        groupMaxExposure: d.groupMaxExposure,
       };
-    })() : undefined,
+    })(),
   };
 }
 
@@ -1089,7 +1117,10 @@ export function buildTradeV4PageModel(input: {
   const rawCandidates = input.scannerSnapshot?.candidates ?? [];
   const planDecisions = input.scannerSnapshot?.executionPlan?.decisions;
   const decisionsBySymbol: ReadonlyMap<string, import('../../core/scanner/executionDecision').ExecutionDecision> | undefined = planDecisions
-    ? new Map(planDecisions.map(d => [d.symbol, d as import('../../core/scanner/executionDecision').ExecutionDecision]))
+    ? new Map(planDecisions.flatMap(d => {
+        const decision = d as import('../../core/scanner/executionDecision').ExecutionDecision;
+        return [[decision.symbol, decision], [`${decision.scanId}:${decision.symbol}`, decision]] as const;
+      }))
     : undefined;
   const candidates = rawCandidates.map((c, index) =>
     mapScannerCandidateToTradeV4View(

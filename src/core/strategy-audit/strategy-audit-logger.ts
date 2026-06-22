@@ -1,10 +1,11 @@
 import type { StrategyAuditSnapshot } from './strategy-audit-types';
+import { resolveActionableFinalBlocker } from './strategy-audit-builder';
 import { logger } from '../../utils/logger';
 
 let lastSig = '';
 let lastAt = 0;
 
-export function logStrategyAudit(snapshot: StrategyAuditSnapshot): void {
+export function logStrategyAudit(snapshot: StrategyAuditSnapshot, options: { detailLevel?: 'summary' | 'full' } = {}): void {
   const sig = `${snapshot.symbol}|${snapshot.strategySelected}|${snapshot.finalEntryRule}|${snapshot.finalExecutable}|${snapshot.buyAllowed}|${snapshot.setupMissing.map((s) => s.key).join(',')}`;
   const now = Date.now();
   if (sig === lastSig && now - lastAt < 10000) return;
@@ -16,23 +17,50 @@ export function logStrategyAudit(snapshot: StrategyAuditSnapshot): void {
   const reboundMetric = snapshot.setupMetrics.find(m => m.key === 'actualReboundPct');
   const momMetric = snapshot.setupMetrics.find(m => m.key === 'momentumConfirmed');
   const setupMissingKeys = snapshot.setupMissing.map((s) => s.key);
+  const exactFallbackBlocker = resolveActionableFinalBlocker({
+    finalExecutable: snapshot.finalExecutable,
+    status: snapshot.finalExecutable ? 'BUY' : 'WAIT',
+    strategySelected: snapshot.strategySelected,
+    setupResult: snapshot.setupResult ?? snapshot.dynamicSetupContext?.setupResult,
+    finalBlocker: snapshot.finalBlocker,
+    strategyContractBlocker: snapshot.strategyContractBlocker,
+    marketSafetyBlocker: snapshot.marketSafetyBlocker,
+    executionFreshnessBlocker: snapshot.executionFreshnessBlocker,
+    professionalGateBlocker: snapshot.professionalGateBlocker,
+    primaryBlocker: snapshot.dynamicSetupContext?.primaryBlocker,
+    blockReasons: snapshot.blockReasons,
+    setupMissingKeys,
+  });
+  const finalBlocker = snapshot.finalBlocker && snapshot.finalBlocker !== 'none'
+    ? snapshot.finalBlocker
+    : snapshot.finalNoBuyReason && snapshot.finalNoBuyReason !== 'none'
+      ? snapshot.finalNoBuyReason
+      : exactFallbackBlocker;
+  const finalBlockerSource = snapshot.finalBlockerSource ?? 'strategy_contract';
   const effectiveBlockReasons = Array.from(new Set([
-    ...snapshot.blockReasons,
+    ...snapshot.blockReasons.map((reason) => reason === 'finalExecutable_false' ? exactFallbackBlocker : reason),
     ...(setupMissingKeys.includes('dipConfirmed') ? ['dip_not_confirmed'] : []),
     ...(setupMissingKeys.includes('reboundConfirmed') ? ['rebound_not_confirmed'] : []),
-    ...(snapshot.finalExecutable ? [] : ['strategy_setup_not_met', 'finalExecutable_false']),
+    ...(snapshot.finalExecutable ? [] : [finalBlocker]),
+    ...(!snapshot.finalExecutable && finalBlockerSource === 'strategy_contract' ? ['strategy_setup_not_met'] : []),
   ]));
-  const primaryBlocker = snapshot.dynamicSetupContext?.primaryBlocker
+  const primaryBlocker = snapshot.finalBlocker && snapshot.finalBlocker !== 'none'
+    ? snapshot.finalBlocker
+    : snapshot.dynamicSetupContext?.primaryBlocker
+    ?? snapshot.actionableNoBuyReason
     ?? effectiveBlockReasons[0]
-    ?? (snapshot.finalExecutable ? 'none' : 'finalExecutable_false');
+    ?? exactFallbackBlocker;
   const dipConfirmedLabel = isWaitStrategy ? 'observed_only' : String(snapshot.setupMetrics.find(m => m.key === 'dipConfirmed')?.passed ?? false);
   const reboundConfirmedLabel = isWaitStrategy ? 'observed_only' : String(snapshot.setupMetrics.find(m => m.key === 'reboundConfirmed')?.passed ?? false);
 
-  logger.info(`STRATEGY_SELECTION_AUDIT: symbol=${snapshot.symbol} strategyRequested=${snapshot.strategyRequested} strategySelected=${snapshot.strategySelected} strategySource=${snapshot.strategySource} marketRecommendedStrategy=${snapshot.marketRecommendedStrategy ?? 'none'} runtimeActiveStrategy=${snapshot.runtimeActiveStrategy} finalPerCoinStrategy=${snapshot.finalPerCoinStrategy} finalEntryRule=${snapshot.finalEntryRule}`);
-  logger.info(`STRATEGY_SETUP_REQUIREMENTS_AUDIT: symbol=${snapshot.symbol} required=${snapshot.setupRequired.map((s) => s.key).join('|') || 'none'} passed=${snapshot.setupPassed.map((s) => s.key).join('|') || 'none'} missing=${snapshot.setupMissing.map((s) => s.key).join('|') || 'none'}`);
-  logger.info(`STRATEGY_SETUP_METRICS_AUDIT: symbol=${snapshot.symbol} selectedStrategy=${snapshot.strategySelected} actualDipPct=${String(snapshot.setupMetrics.find(m => m.key === 'actualDipPct')?.actualValue ?? 'n/a')} requiredDipPct=${String(snapshot.setupMetrics.find(m => m.key === 'requiredDipPct')?.requiredValue ?? 'n/a')} dipConfirmed=${dipConfirmedLabel} actualReboundPct=${String(snapshot.setupMetrics.find(m => m.key === 'actualReboundPct')?.actualValue ?? 'n/a')} requiredReboundPct=${String(snapshot.setupMetrics.find(m => m.key === 'requiredReboundPct')?.requiredValue ?? 'n/a')} reboundConfirmed=${reboundConfirmedLabel} momentumConfirmed=${String(snapshot.setupMetrics.find(m => m.key === 'momentumConfirmed')?.passed ?? false)} conservativeSafetyScore=${String(snapshot.setupMetrics.find(m => m.key === 'conservativeSafetyScore')?.actualValue ?? 'n/a')} safePullbackConfirmed=${String(snapshot.setupMetrics.find(m => m.key === 'safePullbackConfirmed')?.passed ?? false)} spreadPct=${String(snapshot.spreadPct ?? 'n/a')} tpRoomOk=${String(snapshot.tpRoomOk)} finalExecutable=${String(snapshot.finalExecutable)} setupPassed=${snapshot.setupPassed.map((s) => s.key).join('|') || 'none'} setupMissing=${snapshot.setupMissing.map((s) => s.key).join('|') || 'none'}`);
-  logger.info(`STRATEGY_DIP_REBOUND_VALUES_AUDIT: symbol=${snapshot.symbol} selectedStrategy=${snapshot.strategySelected} actualDipPct=${String(snapshot.setupMetrics.find(m => m.key === 'actualDipPct')?.actualValue ?? 'n/a')} requiredDipPct=${String(snapshot.setupMetrics.find(m => m.key === 'requiredDipPct')?.requiredValue ?? 'n/a')} actualReboundPct=${String(snapshot.setupMetrics.find(m => m.key === 'actualReboundPct')?.actualValue ?? 'n/a')} requiredReboundPct=${String(snapshot.setupMetrics.find(m => m.key === 'requiredReboundPct')?.requiredValue ?? 'n/a')} dipConfirmed=${dipConfirmedLabel} reboundConfirmed=${reboundConfirmedLabel}`);
-  logger.info(`STRATEGY_METRIC_ROLE_AUDIT: symbol=${snapshot.symbol} selectedStrategy=${snapshot.strategySelected} metricRoles=${snapshot.setupMetrics.map((m) => `${m.key}:${m.role}:${m.usedByStrategy ? 'used' : 'unused'}:${m.sourceLayer}`).join('|')}`);
+  const fullDetail = options.detailLevel !== 'summary';
+  if (fullDetail) {
+    logger.info(`STRATEGY_SELECTION_AUDIT: symbol=${snapshot.symbol} strategyRequested=${snapshot.strategyRequested} strategySelected=${snapshot.strategySelected} strategySource=${snapshot.strategySource} marketRecommendedStrategy=${snapshot.marketRecommendedStrategy ?? 'none'} runtimeActiveStrategy=${snapshot.runtimeActiveStrategy} finalPerCoinStrategy=${snapshot.finalPerCoinStrategy} finalEntryRule=${snapshot.finalEntryRule}`);
+    logger.info(`STRATEGY_SETUP_REQUIREMENTS_AUDIT: symbol=${snapshot.symbol} required=${snapshot.setupRequired.map((s) => s.key).join('|') || 'none'} passed=${snapshot.setupPassed.map((s) => s.key).join('|') || 'none'} missing=${snapshot.setupMissing.map((s) => s.key).join('|') || 'none'}`);
+    logger.info(`STRATEGY_SETUP_METRICS_AUDIT: symbol=${snapshot.symbol} selectedStrategy=${snapshot.strategySelected} actualDipPct=${String(snapshot.setupMetrics.find(m => m.key === 'actualDipPct')?.actualValue ?? 'n/a')} requiredDipPct=${String(snapshot.setupMetrics.find(m => m.key === 'requiredDipPct')?.requiredValue ?? 'n/a')} dipConfirmed=${dipConfirmedLabel} actualReboundPct=${String(snapshot.setupMetrics.find(m => m.key === 'actualReboundPct')?.actualValue ?? 'n/a')} requiredReboundPct=${String(snapshot.setupMetrics.find(m => m.key === 'requiredReboundPct')?.requiredValue ?? 'n/a')} reboundConfirmed=${reboundConfirmedLabel} momentumConfirmed=${String(snapshot.setupMetrics.find(m => m.key === 'momentumConfirmed')?.passed ?? false)} conservativeSafetyScore=${String(snapshot.setupMetrics.find(m => m.key === 'conservativeSafetyScore')?.actualValue ?? 'n/a')} safePullbackConfirmed=${String(snapshot.setupMetrics.find(m => m.key === 'safePullbackConfirmed')?.passed ?? false)} spreadPct=${String(snapshot.spreadPct ?? 'n/a')} tpRoomOk=${String(snapshot.tpRoomOk)} finalExecutable=${String(snapshot.finalExecutable)} setupPassed=${snapshot.setupPassed.map((s) => s.key).join('|') || 'none'} setupMissing=${snapshot.setupMissing.map((s) => s.key).join('|') || 'none'}`);
+    logger.info(`STRATEGY_DIP_REBOUND_VALUES_AUDIT: symbol=${snapshot.symbol} selectedStrategy=${snapshot.strategySelected} actualDipPct=${String(snapshot.setupMetrics.find(m => m.key === 'actualDipPct')?.actualValue ?? 'n/a')} requiredDipPct=${String(snapshot.setupMetrics.find(m => m.key === 'requiredDipPct')?.requiredValue ?? 'n/a')} actualReboundPct=${String(snapshot.setupMetrics.find(m => m.key === 'actualReboundPct')?.actualValue ?? 'n/a')} requiredReboundPct=${String(snapshot.setupMetrics.find(m => m.key === 'requiredReboundPct')?.requiredValue ?? 'n/a')} dipConfirmed=${dipConfirmedLabel} reboundConfirmed=${reboundConfirmedLabel}`);
+    logger.info(`STRATEGY_METRIC_ROLE_AUDIT: symbol=${snapshot.symbol} selectedStrategy=${snapshot.strategySelected} metricRoles=${snapshot.setupMetrics.map((m) => `${m.key}:${m.role}:${m.usedByStrategy ? 'used' : 'unused'}:${m.sourceLayer}`).join('|')}`);
+  }
   logger.info(`STRATEGY_FINAL_EXECUTABLE_AUDIT: symbol=${snapshot.symbol} finalExecutable=${String(snapshot.finalExecutable)} buyAllowed=${String(snapshot.buyAllowed)} blockReasons=${effectiveBlockReasons.join('|') || 'none'} warningReasons=${snapshot.warningReasons.join('|') || 'none'}`);
   if (snapshot.dynamicSetupContext) {
     logger.info(`DYNAMIC_ENTRY_SETUP_AUDIT: symbol=${snapshot.symbol} intendedStrategy=${snapshot.dynamicSetupContext.intendedStrategy} finalStrategy=${snapshot.dynamicSetupContext.finalStrategy} marketRegimeBucket=${snapshot.dynamicSetupContext.marketRegimeBucket} requiredDipPctMin=${String(snapshot.dynamicSetupContext.requiredDipPctMin ?? 'n/a')} requiredDipPctMax=${String(snapshot.dynamicSetupContext.requiredDipPctMax ?? 'n/a')} requiredReboundPctMin=${String(snapshot.dynamicSetupContext.requiredReboundPctMin ?? 'n/a')} requiredReboundPctMax=${String(snapshot.dynamicSetupContext.requiredReboundPctMax ?? 'n/a')} actualDipPct=${String(snapshot.dynamicSetupContext.actualDipPct ?? 'n/a')} actualReboundPct=${String(snapshot.dynamicSetupContext.actualReboundPct ?? 'n/a')} setupResult=${snapshot.dynamicSetupContext.setupResult} primaryBlocker=${snapshot.dynamicSetupContext.primaryBlocker} source=${snapshot.dynamicSetupContext.source}`);

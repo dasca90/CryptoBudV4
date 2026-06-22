@@ -7,7 +7,7 @@ import type {
   ScannerCandidate, ScannerSnapshot, ScalperCandidate, ScalperSnapshot, MarketPrice,
   ManualAnalysisSnapshot, ManualBuyRequest, ManualSellRequest,
   RiskInput, RiskDecision, RiskConfig, PaperExecutionResult, PlannedCandidate,
-  ScannerAutoEntryConfigSnapshot,
+  ScannerAutoEntryConfigSnapshot, TradingMode,
 } from '../types';
 
 import { TraderBrain } from './TraderBrain';
@@ -79,6 +79,13 @@ export class TradingEngine {
   private lastRiskBlockReason: string | null = null;
   private lastPreAdapterBlockReason: string | null = null;
   private emittedBuyTradeAuditPositionIds = new Set<string>();
+  private _hydratedAt = 0;
+  private _exitCyclesSinceHydration = 0;
+  private _resumeGuardActive = true;
+  private _settingsLastRefresh = 0;
+  private _cachedTimeBasedExitEnabled = false;
+  private _cachedDefaultMaxHoldHours = 48;
+  private _cachedMaxTimeBasedExitsPerCycle = 2;
   private _winRate = 0.5;
   private _maxDrawdownPercent = 0;
   private scannerBrainService: ScannerBrainService;
@@ -537,12 +544,17 @@ export class TradingEngine {
     await this.executeEntry(action, brain, decision, gateResult, candidate, scannerSnapshot, undefined, undefined, undefined, rejectedNearCandidates, { executionPath: 'scanner_auto', plannedScannerBuy: true, scannerAutoEntryConfigSnapshot });
   }
 
+  private feedUnsubs = new Map<string, () => void>();
+
   addBrain(config: TraderBrainConfig): TraderBrain {
     const brain = new TraderBrain(config, this.adapter, this.ml);
     brain.setAnchorSettings(this.btcAnchorEnabled, this.ethAnchorEnabled);
     this.brains.set(config.coin, brain);
 
-    this.feed.subscribe(config.coin, (price) => {
+    // Unsubscribe previous feed subscription for this coin if any (prevents leak)
+    this.feedUnsubs.get(config.coin)?.();
+
+    const unsub = this.feed.subscribe(config.coin, (price) => {
       this.ml.feedPrice(price);
       if (price.last > 0 && this.positionManager.hasOpenPosition(config.coin)) {
         const pos = this.positionManager.getPositionBySymbol(config.coin);
@@ -570,12 +582,15 @@ export class TradingEngine {
         }
       }
     });
+    this.feedUnsubs.set(config.coin, unsub);
 
     return brain;
   }
 
   removeBrain(coin: string): void {
     this.brains.delete(coin);
+    this.feedUnsubs.get(coin)?.();
+    this.feedUnsubs.delete(coin);
   }
 
   getBrain(coin: string): TraderBrain | undefined {
@@ -586,9 +601,22 @@ export class TradingEngine {
     return this.positionManager.getOpenPositions();
   }
 
+  resumeGuardReset(): void {
+    this._hydratedAt = Date.now();
+    this._exitCyclesSinceHydration = 0;
+    this._resumeGuardActive = true;
+  }
+
+  refreshExitSettingsFromSettings(settings: { timeBasedExitEnabled?: boolean; defaultMaxHoldHours?: number; maxTimeBasedExitsPerCycle?: number }): void {
+    this._cachedTimeBasedExitEnabled = settings.timeBasedExitEnabled ?? false;
+    this._cachedDefaultMaxHoldHours = settings.defaultMaxHoldHours ?? 48;
+    this._cachedMaxTimeBasedExitsPerCycle = settings.maxTimeBasedExitsPerCycle ?? 2;
+  }
+
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    this.resumeGuardReset();
 
     await this.adapter.connect();
     this.orderLockManager.cleanupStaleLocks();
@@ -597,6 +625,44 @@ export class TradingEngine {
       await this.processDecisions();
       this.orderLockManager.cleanupStaleLocks();
     }, 5000);
+  }
+
+  private getSettingTimeBasedExitEnabled(): boolean { return this._cachedTimeBasedExitEnabled; }
+  private getSettingMaxHoldSec(): number { return this._cachedDefaultMaxHoldHours * 3600; }
+  private getSettingMaxTimeBasedExitsPerCycle(): number { return this._cachedMaxTimeBasedExitsPerCycle; }
+
+  private buildExitInput(pos: Position, exitPrice: number, priceRes: any, mode?: TradingMode): ExitInput {
+    const evaluationTimestamp = Date.now();
+    const priceCapturedAt = priceRes.capturedAt ?? evaluationTimestamp;
+    const priceAgeMs = Math.max(0, evaluationTimestamp - priceCapturedAt);
+    return {
+      coin: pos.coin,
+      entryPrice: pos.avgEntryPrice,
+      quantity: pos.quantity,
+      currentPrice: exitPrice,
+      bidPrice: priceRes.bidPrice,
+      askPrice: priceRes.askPrice,
+      lastPrice: priceRes.lastPrice,
+      priceTimestamp: priceRes.capturedAt,
+      openedAt: pos.openedAt,
+      highestPrice: pos.highestPrice,
+      highestPriceSinceTp: pos.highestPriceSinceTp,
+      tpArmed: pos.tpArmed,
+      tp1Hit: pos.tp1Hit,
+      tp2Hit: pos.tp2Hit,
+      stopLossPercent: pos.stopLossPercent,
+      tp1Percent: pos.tp1Percent,
+      tp2Percent: pos.tp2Percent,
+      trailFromPeakPercent: pos.trailFromPeakPercent,
+      maxHoldSec: this.getSettingTimeBasedExitEnabled() ? this.getSettingMaxHoldSec() : pos.maxHoldSec,
+      mode: mode ?? 'AUTO',
+      isLive: this.adapter.isLive,
+      timeBasedExitEnabled: this.getSettingTimeBasedExitEnabled(),
+      resumeGuardActive: this._resumeGuardActive,
+      exitCyclesSinceHydration: this._exitCyclesSinceHydration,
+      maxTimeBasedExitsPerCycle: this.getSettingMaxTimeBasedExitsPerCycle(),
+      priceAgeMs,
+    };
   }
 
   async stop(): Promise<void> {
@@ -610,8 +676,38 @@ export class TradingEngine {
 
   private async processDecisions(): Promise<void> {
     const now = Date.now();
+    const cycleId = now;
     let exitEvalCount = 0;
     let exitSellCount = 0;
+
+    // Resume guard: deactivate after 6 cycles (30 seconds) with fresh prices
+    this._exitCyclesSinceHydration++;
+    if (this._resumeGuardActive && this._exitCyclesSinceHydration >= 6) {
+      this._resumeGuardActive = false;
+      logger.info(
+        `RESUME_EXIT_GUARD_AUDIT: ` +
+        `openPositionsHydrated=${String(this._hydratedAt > 0)} ` +
+        `exitEnginePausedUntilFreshPrices=n/a ` +
+        `firstExitCycleSkipped=true ` +
+        `cyclesSinceHydration=${this._exitCyclesSinceHydration} ` +
+        `resumeGuardActive=false ` +
+        `action=guard_released ` +
+        `logCategory=INFO`
+      );
+    }
+    if (this._resumeGuardActive) {
+      logger.info(
+        `RESUME_EXIT_GUARD_AUDIT: ` +
+        `openPositionsHydrated=${String(this._hydratedAt > 0)} ` +
+        `exitEnginePausedUntilFreshPrices=true ` +
+        `firstExitCycleSkipped=true ` +
+        `cyclesSinceHydration=${this._exitCyclesSinceHydration} ` +
+        `resumeGuardActive=true ` +
+        `action=time_based_exit_blocked ` +
+        `logCategory=INFO`
+      );
+    }
+    this.exitEngine.startCycle(cycleId);
     // Update live prices for all open positions
     for (const pos of this.positionManager.getOpenPositions()) {
       const price = this.feed.getLastPrice(pos.coin);
@@ -696,30 +792,14 @@ export class TradingEngine {
         logger.info(`EXIT_EVALUATION_AUDIT: symbol=${pos.coin} positionId=${pos.tradeId ?? 'none'} strategyAtEntry=${pos.buySnapshot?.selectedStrategy ?? 'n/a'} entryPrice=${pos.avgEntryPrice} markPrice=${markPrice > 0 ? markPrice : exitPrice} markPriceSource=${markPrice > 0 ? 'feed' : priceRes.source} priceAgeMs=${normalizedPriceAgeMs} rawPriceAgeMs=${rawPriceAgeMs} qty=${pos.quantity} unrealizedPnlUsd=${((markPrice > 0 ? markPrice : exitPrice) - pos.avgEntryPrice) * pos.quantity} unrealizedPnlPct=${pnlPct.toFixed(2)} stopLossPct=${pos.stopLossPercent} stopLossSource=position stopTriggerPrice=${stopTriggerPrice.toFixed(4)} tp1Pct=${pos.tp1Percent} tp1TriggerPrice=${(pos.avgEntryPrice * (1 + pos.tp1Percent / 100)).toFixed(4)} tp2Pct=${pos.tp2Percent} trailingEnabled=${String(pos.trailFromPeakPercent > 0)} trailingActive=${String(pos.tpArmed)} trailingStopPrice=n/a shouldStopLossSell=${String(shouldStopLossSell)} shouldTakeProfitSell=${String(shouldTakeProfitSell)} shouldTrailingSell=false finalExitDecision=${shouldStopLossSell ? 'STOP_LOSS' : shouldTakeProfitSell ? 'TAKE_PROFIT' : 'HOLD'} noExitReason=${(!shouldStopLossSell && !shouldTakeProfitSell) ? (markPrice > 0 ? 'price_above_sl_and_below_tp' : 'no_live_price') : 'none'}`);
         if (shouldStopLossSell) {
           logger.warn(`STOP_LOSS_TRIGGER_AUDIT: symbol=${pos.coin} positionId=${pos.tradeId ?? 'none'} entryPrice=${pos.avgEntryPrice} markPrice=${markPrice} stopLossPct=${pos.stopLossPercent} stopTriggerPrice=${stopTriggerPrice.toFixed(4)} unrealizedPnlPct=${pnlPct.toFixed(2)} triggerMethod=price exitReason=STOP_LOSS_HIT adapterWillBeCalled=true`);
-          const exitInput: ExitInput = {
-            coin: pos.coin, entryPrice: pos.avgEntryPrice, quantity: pos.quantity,
-            currentPrice: exitPrice, bidPrice: priceRes.bidPrice, askPrice: priceRes.askPrice, lastPrice: priceRes.lastPrice,
-            priceTimestamp: priceRes.capturedAt, openedAt: pos.openedAt, highestPrice: pos.highestPrice,
-            highestPriceSinceTp: pos.highestPriceSinceTp, tpArmed: pos.tpArmed, tp1Hit: pos.tp1Hit, tp2Hit: pos.tp2Hit,
-            stopLossPercent: pos.stopLossPercent, tp1Percent: pos.tp1Percent, tp2Percent: pos.tp2Percent,
-            trailFromPeakPercent: pos.trailFromPeakPercent, maxHoldSec: pos.maxHoldSec, mode: (brain.config.mode as any) ?? 'AUTO',
-            isLive: this.adapter.isLive,
-          };
+          const exitInput = this.buildExitInput(pos, exitPrice, priceRes, brain.config.mode);
           const decision = this.exitEngine.evaluateExit(exitInput);
           if (decision.shouldClosePosition) {
             exitSellCount++;
             await this.executeExitWithSnapshot(brain, pos, decision, priceRes);
           }
         } else if (shouldTakeProfitSell) {
-          const exitInput: ExitInput = {
-            coin: pos.coin, entryPrice: pos.avgEntryPrice, quantity: pos.quantity,
-            currentPrice: exitPrice, bidPrice: priceRes.bidPrice, askPrice: priceRes.askPrice, lastPrice: priceRes.lastPrice,
-            priceTimestamp: priceRes.capturedAt, openedAt: pos.openedAt, highestPrice: pos.highestPrice,
-            highestPriceSinceTp: pos.highestPriceSinceTp, tpArmed: pos.tpArmed, tp1Hit: pos.tp1Hit, tp2Hit: pos.tp2Hit,
-            stopLossPercent: pos.stopLossPercent, tp1Percent: pos.tp1Percent, tp2Percent: pos.tp2Percent,
-            trailFromPeakPercent: pos.trailFromPeakPercent, maxHoldSec: pos.maxHoldSec, mode: (brain.config.mode as any) ?? 'AUTO',
-            isLive: this.adapter.isLive,
-          };
+          const exitInput = this.buildExitInput(pos, exitPrice, priceRes, brain.config.mode);
           const decision = this.exitEngine.evaluateExit(exitInput);
           if (decision.shouldClosePosition) {
             exitSellCount++;
@@ -1994,29 +2074,7 @@ export class TradingEngine {
       exitPriceUnavailableReason: 'none',
     });
 
-    const exitInput: ExitInput = {
-      coin: brain.coin,
-      entryPrice: pos.avgEntryPrice,
-      quantity: pos.quantity,
-      currentPrice: exitPrice,
-      bidPrice: priceRes.bidPrice,
-      askPrice: priceRes.askPrice,
-      lastPrice: priceRes.lastPrice,
-      priceTimestamp: priceRes.capturedAt,
-      openedAt: pos.openedAt,
-      highestPrice: pos.highestPrice,
-      highestPriceSinceTp: pos.highestPriceSinceTp,
-      tpArmed: pos.tpArmed,
-      tp1Hit: pos.tp1Hit,
-      tp2Hit: pos.tp2Hit,
-      stopLossPercent: pos.stopLossPercent,
-      tp1Percent: pos.tp1Percent,
-      tp2Percent: pos.tp2Percent,
-      trailFromPeakPercent: pos.trailFromPeakPercent,
-      maxHoldSec: pos.maxHoldSec,
-      mode: brain.mode,
-      isLive: this.adapter.isLive,
-    };
+    const exitInput = this.buildExitInput(pos, exitPrice, priceRes, brain.mode);
 
     const decision = this.exitEngine.evaluateExit(exitInput);
 

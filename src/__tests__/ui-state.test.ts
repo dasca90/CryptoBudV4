@@ -8,6 +8,7 @@
  */
 
 import type { MainTab, TradeMode } from '../state/ui-store';
+import { buildPaperBalancePositionIntegrityAudit } from '../lib/execution/equityDisplayAudit';
 
 type UIState = {
   activeMainTab: MainTab;
@@ -148,6 +149,49 @@ function main() {
     store.addEquityPoint(3000 + i, 10000 + i);
   }
   assert(store.equityHistory.length === 500, 'Equity history capped at 500 points');
+
+  // Test 7: DEMO equity initializes from configured paper balance.
+  console.log('\n-- Test 7: DEMO equity integrity audit --\n');
+  const initializedAudit = buildPaperBalancePositionIntegrityAudit({
+    executionMode: 'DEMO',
+    dbStatus: 'OK',
+    uiHeaderEquity: 10000,
+    paperCashBalance: 10000,
+    paperEquity: 10000,
+    configuredDemoStartingCapital: 10000,
+    configuredTradingCapital: 10000,
+    openPositionsCount: 0,
+    openPositionsMarketValue: 0,
+    positionManagerEquity: 10000,
+    persistenceBalanceLoaded: false,
+    persistenceSource: 'configured_demo_starting_capital',
+    resetStateActive: false,
+    resetVersion: 'none',
+    resetAt: 'none',
+    balanceInitializedFromConfig: true,
+  });
+  assert(initializedAudit.invariantOk === true, 'Configured demo capital initializes paper equity cleanly');
+  assert(initializedAudit.balanceInitializedFromConfig === true, 'Initialization source is audited');
+
+  const mismatchAudit = buildPaperBalancePositionIntegrityAudit({
+    ...initializedAudit,
+    uiHeaderEquity: 0,
+    paperCashBalance: 0,
+    paperEquity: 0,
+    positionManagerEquity: 0,
+    balanceInitializedFromConfig: false,
+  });
+  assert(mismatchAudit.invariantOk === false, 'Zero DEMO equity with configured capital fails audit');
+  assert(mismatchAudit.failureReason === 'DEMO_EQUITY_ZERO_WITH_CONFIGURED_CAPITAL', 'Zero DEMO equity failure reason is canonical');
+
+  const intentionalZeroAudit = buildPaperBalancePositionIntegrityAudit({
+    ...mismatchAudit,
+    configuredDemoStartingCapital: 0,
+    configuredTradingCapital: 0,
+    intentionalZeroBalance: true,
+  });
+  assert(intentionalZeroAudit.invariantOk === true, 'Intentional zero balance is allowed when configured capital is zero');
+  assert(intentionalZeroAudit.failureReason === 'none', 'Intentional zero balance has no failure reason');
 
   // ── Summary ──
   console.log('\n══════════════════════════════════════════════');

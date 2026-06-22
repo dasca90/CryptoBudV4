@@ -1,8 +1,10 @@
 import { strict as assert } from 'node:assert';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { PerspectiveCamera, Vector3 } from 'three';
 import { getBlockedPushFrame, getOpenPositionTransferPosition, acquireBuyLightningLock, releaseBuyLightningLock, resetAnimationLocksForTests } from '../features/air-scanner-lab/utils/animationTimelines';
 import { BUY_TRANSFER_HERO_POSITION, MAX_RENDERED_COINS } from '../features/air-scanner-lab/state/airScannerVisualState';
+import { FOCUSED_COIN_FRONT_POSITION } from '../features/air-scanner-lab/components/ScannerScene';
 import { mockScannerCoins } from '../features/air-scanner-lab/state/mockScannerFeed';
 import { auditOrbLabelOrientation, badgeLabelIsMirrored, calculateFrontFacingLabelOffset } from '../features/air-scanner-lab/utils/orbLabelOrientation';
 import { createOpenPositionTransferAudit, createTransferBeamPath, getOpenPositionRowAnchor, shouldStartOpenPositionTransfer } from '../features/air-scanner-lab/utils/openPositionTransfer';
@@ -325,6 +327,15 @@ assert.equal(selectedWaitCoin?.isSelectedBuy, false, 'focused coin does not hija
 assert.notDeepEqual(selectedWaitCoin?.position, [0, 0.78, 5.2], 'focused non-BUY selection stays in the scanner field instead of being pinned to the front-center slot');
 assert.notDeepEqual(selectedWaitCoin?.position, BUY_TRANSFER_HERO_POSITION, 'focused non-BUY selection does not occupy the BUY center slot');
 assert.ok(Math.hypot(selectedWaitCoin?.position[0] ?? 0, selectedWaitCoin?.position[2] ?? 0) >= 3.5, 'focused non-BUY selection still floats outside the reserved scanner center');
+assert.deepEqual(FOCUSED_COIN_FRONT_POSITION, [0, 1.18, 5.2], 'clicked/focused sphere has a centered front-of-camera visual anchor');
+assert.notDeepEqual(FOCUSED_COIN_FRONT_POSITION, BUY_TRANSFER_HERO_POSITION, 'clicked/focused sphere does not reuse the active BUY transfer core slot');
+assert.ok(Math.hypot(FOCUSED_COIN_FRONT_POSITION[0], FOCUSED_COIN_FRONT_POSITION[2]) >= 3.5, 'clicked/focused sphere remains outside the reserved scanner core');
+const productionCamera = new PerspectiveCamera(54, 16 / 9, 0.1, 100);
+productionCamera.position.set(0, 5.35, 10.7);
+productionCamera.updateMatrixWorld();
+productionCamera.updateProjectionMatrix();
+const projectedFocus = new Vector3(...FOCUSED_COIN_FRONT_POSITION).project(productionCamera);
+assert.ok(Math.abs(projectedFocus.x) < 0.0001, `clicked/focused sphere projects to screen center instead of left; projectedX=${projectedFocus.x}`);
 const queuedBuyView = mapProductionModelToAirScannerLab({
   ...productionModel,
   candidates: [
@@ -403,7 +414,7 @@ assert.equal(productionOverlaySource.includes('onManualBuy'), false, 'production
 
 const scannerSceneSource = readFileSync(join(process.cwd(), 'src', 'features', 'air-scanner-lab', 'components', 'ScannerScene.tsx'), 'utf8');
 assert.ok(scannerSceneSource.includes('BUY_TRANSFER_HERO_POSITION'), 'scanner scene uses the shared lower/front BUY hero position');
-assert.equal(scannerSceneSource.includes('FOCUSED_COIN_POSITION'), false, 'scanner scene does not pin user-selected non-transfer coins to the center/front slot');
+assert.ok(scannerSceneSource.includes('FOCUSED_COIN_FRONT_POSITION') && scannerSceneSource.includes('position = FOCUSED_COIN_FRONT_POSITION'), 'scanner scene pins clicked non-transfer coins to the centered front-of-camera slot');
 assert.ok(scannerSceneSource.includes('getRoamingCoinPosition') && scannerSceneSource.includes('coin.isFocused !== true'), 'scanner scene keeps roaming disabled for the user-selected focused coin');
 assert.ok(scannerSceneSource.includes('LightningArc') && scannerSceneSource.includes('buyPullSource'), 'scanner scene draws a magenta pull lightning only during the active BUY transfer');
 assert.ok(scannerSceneSource.includes('BUY_TRANSFER_VISIBLE_OPACITY_MIN = 0.9'), 'scanner scene keeps the center transfer sphere visible while the transfer beam remains active');
@@ -419,7 +430,7 @@ assert.ok(scannerSceneSource.includes('velocityRef') && scannerSceneSource.inclu
 const adapterSource = readFileSync(join(process.cwd(), 'src', 'features', 'air-scanner-lab', 'airScannerAdapter.ts'), 'utf8');
 assert.ok(adapterSource.includes('orderCandidatesForScene'), 'production adapter reorders scene candidates for a more even spread before positioning');
 assert.ok(adapterSource.includes("if (candidate.status === 'BUY') return 'buy_candidate';"), 'adapter only paints BUY-ready coins green from canonical BUY status, not from permissive flags alone');
-assert.equal(adapterSource.includes('FOCUSED_COIN_POSITION'), false, 'production adapter does not pin merely selected coins to a center/front focus slot');
+assert.equal(adapterSource.includes('FOCUSED_COIN_FRONT_POSITION'), false, 'production adapter does not own the local visual focus slot');
 
 const tradeV4PageSource = readFileSync(join(process.cwd(), 'src', 'components', 'trade-v4', 'TradeV4Page.tsx'), 'utf8');
 const openPositionsPanelSource = readFileSync(join(process.cwd(), 'src', 'components', 'trade-v4', 'OpenPositionsPanel.tsx'), 'utf8');

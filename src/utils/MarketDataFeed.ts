@@ -37,6 +37,10 @@ export class MarketDataFeed {
     return this.prices.get(coin)?.last ?? 0;
   }
 
+  getCachedPrice(coin: string): MarketPrice | null {
+    return this.prices.get(coin) ?? null;
+  }
+
   getPriceAgeMs(coin: string): number {
     const p = this.prices.get(coin);
     return p ? Date.now() - p.timestamp : 999999;
@@ -102,9 +106,23 @@ export class MarketDataFeed {
     };
   }
 
-  setManualPrice(coin: string, price: number) {
+  getActiveSubscriptionCount(): number {
+    let count = 0;
+    for (const callbacks of this.listeners.values()) count += callbacks.size;
+    return count;
+  }
+
+  getActiveIntervalCount(): number {
+    return this.intervals.size;
+  }
+
+  getListenerCount(coin: string): number {
+    return this.listeners.get(coin)?.size ?? 0;
+  }
+
+  setManualPrice(coin: string, price: number, timestamp = Date.now()) {
     this.prices.set(coin, {
-      coin, bid: price * 0.999, ask: price * 1.001, last: price, timestamp: Date.now(),
+      coin, bid: price * 0.999, ask: price * 1.001, last: price, timestamp,
     });
   }
 
@@ -133,7 +151,12 @@ export class MarketDataFeed {
       this.exchangeInfoFetchedAt = Date.now();
       this.symbolFiltersCache.clear();
 
-      const symbols = this.exchangeInfo.symbols as Record<string, unknown>[];
+      const symbols = Array.isArray(this.exchangeInfo.symbols)
+        ? this.exchangeInfo.symbols as Record<string, unknown>[]
+        : [];
+      if (symbols.length === 0) {
+        logger.warn('EXCHANGE_INFO_SYMBOLS_UNAVAILABLE: exchangeInfo response missing symbols array; symbol filters remain cached/empty');
+      }
       for (const sym of symbols) {
         const symbolName = sym.symbol as string;
         const filters = parseSymbolFilters(symbolName, this.exchangeInfo);

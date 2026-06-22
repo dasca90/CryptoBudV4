@@ -1,9 +1,9 @@
 ﻿import type { AirCoinView } from "../../components/trade-v4/types";
 
 const SELECTED_FOCUS_TARGET = {
-  x: -185,
-  y: -64,
-  z: 265,
+  x: 0,
+  y: -72,
+  z: 285,
 };
 
 export function updateAirCoinMotion(coin: AirCoinView, nowMs: number): AirCoinView {

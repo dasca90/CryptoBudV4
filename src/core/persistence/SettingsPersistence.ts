@@ -14,11 +14,16 @@ const sharedFallbackStore: Map<string, string> = new Map();
 export class SettingsPersistence {
   private store: Map<string, string> = sharedFallbackStore;
   private useTauri = false;
+  private initPromise: Promise<void>;
   private lastSaveTimestamps: Map<string, number> = new Map();
   private readonly SAVE_DEDUP_MS = 500;
 
   constructor() {
-    this.init();
+    this.initPromise = this.init();
+  }
+
+  async ready(): Promise<void> {
+    await this.initPromise;
   }
 
   private isDupLog(key: string): boolean {
@@ -38,6 +43,7 @@ export class SettingsPersistence {
   }
 
   private async setItem(key: string, value: string): Promise<void> {
+    await this.ready();
     this.store.set(key, value);
     if (typeof window !== 'undefined' && window.localStorage) {
       try { window.localStorage.setItem(FALLBACK_PREFIX + key, value); } catch { /* fallback */ }
@@ -48,6 +54,7 @@ export class SettingsPersistence {
   }
 
   private async getItem(key: string): Promise<string | null> {
+    await this.ready();
     if (this.useTauri) {
       try {
         const tauriValue = await tauriDb.getAppState(key);
@@ -71,6 +78,7 @@ export class SettingsPersistence {
   }
 
   private async removeItem(key: string): Promise<void> {
+    await this.ready();
     this.store.delete(key);
     if (typeof window !== 'undefined' && window.localStorage) {
       try { window.localStorage.removeItem(FALLBACK_PREFIX + key); } catch { /* fallback */ }
@@ -82,6 +90,37 @@ export class SettingsPersistence {
 
   // ── App Settings ──────────────────────────────────────
 
+  getPersistenceBackend(): 'tauri_app_state' | 'local_fallback' {
+    return this.useTauri ? 'tauri_app_state' : 'local_fallback';
+  }
+
+  private normalizeRuntimeSettings(settings: AppSettings, source: 'defaults' | 'persisted' | 'save'): AppSettings {
+    const previousVersion = (settings as any).settingsVersion ?? 'legacy_or_missing';
+    const currentVersion = 'runtime-settings-parity-v2';
+    const autoBotsUserSet = (settings as any).autoBotsUserSet === true;
+    const hasAutoBotsField = Object.prototype.hasOwnProperty.call(settings as any, 'paperAutoExecutionEnabled');
+    const badInstallerDefaultAutoBotsOff = source !== 'save'
+      && settings.paperAutoExecutionEnabled === false
+      && settings.strategySource === 'autobots'
+      && autoBotsUserSet !== true;
+    const effectiveAutoBots = hasAutoBotsField
+      ? (settings.paperAutoExecutionEnabled === true || badInstallerDefaultAutoBotsOff)
+      : true;
+    const invalidAutoBotsManualStateFound = effectiveAutoBots === true && settings.strategySource === 'manual_override';
+    const normalized: AppSettings = {
+      ...settings,
+      strategySource: invalidAutoBotsManualStateFound ? 'autobots' : (settings.strategySource ?? 'autobots'),
+      paperAutoExecutionEnabled: effectiveAutoBots,
+    };
+    (normalized as any).settingsVersion = currentVersion;
+    if (invalidAutoBotsManualStateFound || badInstallerDefaultAutoBotsOff || previousVersion !== currentVersion) {
+      logger.warn(`SETTINGS_MIGRATION_INTEGRITY_AUDIT: previousVersion=${previousVersion} currentVersion=${currentVersion} migrationApplied=true invalidAutoBotsManualStateFound=${String(invalidAutoBotsManualStateFound)} correctedAutoBotsManualState=${String(invalidAutoBotsManualStateFound || badInstallerDefaultAutoBotsOff)} preservedFields=trading_parameters|scanner_config|capital|banlist resetFields=${invalidAutoBotsManualStateFound ? 'strategySource' : badInstallerDefaultAutoBotsOff ? 'paperAutoExecutionEnabled' : 'none'} migrationOk=true source=${source} badInstallerDefaultAutoBotsOff=${String(badInstallerDefaultAutoBotsOff)} autoBotsUserSet=${String(autoBotsUserSet)}`);
+    } else {
+      logger.info(`SETTINGS_MIGRATION_INTEGRITY_AUDIT: previousVersion=${previousVersion} currentVersion=${currentVersion} migrationApplied=false invalidAutoBotsManualStateFound=false correctedAutoBotsManualState=false preservedFields=all resetFields=none migrationOk=true source=${source}`);
+    }
+    return normalized;
+  }
+
   async saveSettings(settings: AppSettings): Promise<void> {
     const resolvedMaxSelected = resolveMaxSelectedPerScanConfig({
       uiValue: (settings as any).maxSelectedPerScan,
@@ -91,7 +130,7 @@ export class SettingsPersistence {
       reason: 'settings_save_canonicalized',
     });
     const maxSelectedPerScan = resolvedMaxSelected.value;
-    const updated = {
+    const updated = this.normalizeRuntimeSettings({
       ...settings,
       maxSelectedPerScan,
       maxEntriesPerCycle: maxSelectedPerScan,
@@ -99,7 +138,7 @@ export class SettingsPersistence {
       graphicsQuality: normalizePerformanceSettings(settings).graphicsQuality,
       autoPerformanceMode: normalizeAutoPerformanceMode((settings as any).autoPerformanceMode) === 'on',
       updatedAt: new Date().toISOString(),
-    };
+    } as AppSettings, 'save');
     logger.info(`USER_SETTINGS_SAVE_REQUESTED: tradingCapital=${(updated as any).autoTradingCapital ?? 1000} capitalPerCoin=${(updated as any).capitalPerCoin ?? updated.capitalPerTrade ?? 100} maxOpenPositions=${updated.maxPositions ?? 10} bannedCoinsCount=${(updated.scannerBanlist ?? []).length} source=persistence storageKey=${SETTINGS_KEY} hydrationComplete=true`);
     await this.setItem(SETTINGS_KEY, JSON.stringify(updated));
     savePerformanceSettings({
@@ -112,6 +151,7 @@ export class SettingsPersistence {
   }
 
   async loadSettings(): Promise<AppSettings> {
+    await this.ready();
     logger.info(`USER_SETTINGS_PERSISTENCE_BOOT_START: storageKey=${SETTINGS_KEY}`);
     const raw = await this.getItem(SETTINGS_KEY);
     if (!raw) {
@@ -119,7 +159,7 @@ export class SettingsPersistence {
       resolveMaxSelectedPerScanConfig({
         reason: 'settings_storage_empty_default_10',
       });
-      return createDefaultAppSettings();
+      return this.normalizeRuntimeSettings(createDefaultAppSettings(), 'defaults');
     }
     try {
       const parsed = JSON.parse(raw) as AppSettings;
@@ -134,7 +174,7 @@ export class SettingsPersistence {
         reason: hasCanonical ? 'settings_load_persisted_canonical' : ((parsed as any).maxEntriesPerCycle != null ? 'settings_load_legacy_migrated_to_default_10' : 'settings_load_default_10'),
       });
       const maxSelectedPerScan = resolvedMaxSelected.value;
-      const normalized = {
+      const normalized = this.normalizeRuntimeSettings({
         ...defaults,
         ...parsed,
         maxSelectedPerScan,
@@ -142,7 +182,7 @@ export class SettingsPersistence {
         maxSelectedPerScanUserSet: (parsed as any).maxSelectedPerScanUserSet === true,
         graphicsQuality: normalizePerformanceSettings(parsed).graphicsQuality,
         autoPerformanceMode: normalizeAutoPerformanceMode((parsed as any).autoPerformanceMode) === 'on',
-      };
+      } as AppSettings, 'persisted');
       savePerformanceSettings({
         graphicsQuality: normalized.graphicsQuality,
         autoPerformanceMode: normalized.autoPerformanceMode ? 'on' : 'off',
@@ -150,7 +190,7 @@ export class SettingsPersistence {
       logger.info(`USER_SETTINGS_STORAGE_FOUND: storageKey=${SETTINGS_KEY} tradingCapital=${(parsed as any).autoTradingCapital ?? 1000} capitalPerCoin=${(parsed as any).capitalPerCoin ?? parsed.capitalPerTrade ?? 100} maxOpenPositions=${parsed.maxPositions ?? 10} bannedCoinsCount=${(parsed.scannerBanlist ?? []).length}`);
       return normalized;
     } catch {
-      return createDefaultAppSettings();
+      return this.normalizeRuntimeSettings(createDefaultAppSettings(), 'defaults');
     }
   }
 

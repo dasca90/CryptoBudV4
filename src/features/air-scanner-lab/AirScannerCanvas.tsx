@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useThree } from '@react-three/fiber';
 import type { AirScannerQuality, AnimationDebugState, CoinVisualState, MockScannerCoin, ScannerToggles, ScreenPoint } from './state/airScannerVisualState';
 import { getGraphicsQualityConfig } from './state/airScannerVisualState';
 import { ScannerScene } from './components/ScannerScene';
+import { buildAirScannerMemoryAuditSnapshot, disposeAirScannerRenderLists, disposeAirScannerSceneResources, formatAirScannerMemoryAudit, recordAirScannerCleanup } from './utils/airScannerMemoryAudit';
 
 const IS_DEV = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV);
 
@@ -17,6 +18,40 @@ interface AirScannerCanvasProps {
   onOpenPositionConfirmed: () => void;
   onTransferSourceUpdate: (point: ScreenPoint | null) => void;
   onCoinSelect: (coin: MockScannerCoin) => void;
+}
+
+function AirScannerCanvasMemoryLifecycle({ visible }: { visible: boolean }) {
+  const { gl, scene } = useThree();
+
+  useEffect(() => {
+    return () => {
+      recordAirScannerCleanup();
+      disposeAirScannerSceneResources(scene);
+      disposeAirScannerRenderLists(gl);
+      if (IS_DEV) {
+        console.info(formatAirScannerMemoryAudit(buildAirScannerMemoryAuditSnapshot({
+          root: scene,
+          renderer: gl,
+          lightningEffectCount: 0,
+          pulseImpactCount: 0,
+          rafActive: false,
+        })));
+      }
+    };
+  }, [gl, scene]);
+
+  useEffect(() => {
+    if (!IS_DEV) return;
+    console.info(formatAirScannerMemoryAudit(buildAirScannerMemoryAuditSnapshot({
+      root: scene,
+      renderer: gl,
+      lightningEffectCount: 0,
+      pulseImpactCount: 0,
+      rafActive: visible,
+    })));
+  }, [gl, scene, visible]);
+
+  return null;
 }
 
 export function AirScannerCanvas(props: AirScannerCanvasProps) {
@@ -50,6 +85,7 @@ export function AirScannerCanvas(props: AirScannerCanvasProps) {
       camera={{ position: [0, 5.35, 10.7], fov: 54, near: 0.1, far: 100 }}
       gl={{ antialias: props.quality !== 'low', powerPreference: 'high-performance', alpha: false }}
     >
+      <AirScannerCanvasMemoryLifecycle visible={visible} />
       <ScannerScene {...props} />
     </Canvas>
   );

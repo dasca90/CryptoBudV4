@@ -31,6 +31,7 @@ import type { RefMode } from './core/scanner/ReferencePriceCalculator';
 import { SettingsPersistence } from './core/persistence/SettingsPersistence';
 import { TelegramNotifier } from './core/notifications/TelegramNotifier';
 import { buildEquityDisplayAudit, buildPaperBalancePositionIntegrityAudit, formatEquityDisplaySourceAudit, formatEquityZeroWithActiveRuntimeWarning, formatPaperBalancePositionIntegrityAudit } from './lib/execution/equityDisplayAudit';
+import { formatMemoryHealthAudit, getBrowserHeap, updateMemoryPressure } from './core/diagnostics/memoryLifecycle';
 import type { MainTab } from './state/ui-store';
 import packageJson from '../package.json';
 
@@ -42,6 +43,13 @@ declare const __GIT_COMMIT__: string;
 declare const __BUILD_TIMESTAMP__: string;
 const BUILD_GIT_COMMIT = typeof __GIT_COMMIT__ !== 'undefined' ? __GIT_COMMIT__ : 'unknown';
 const BUILD_TIMESTAMP = typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : RENDERER_BUILD_TIME;
+const DEBUG_UI_AUDITS = (() => {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem('cryptobud_v4:debug_ui_audits') === 'true';
+  } catch {
+    return false;
+  }
+})();
 
 function stableHash(value: unknown): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value ?? null);
@@ -70,6 +78,8 @@ export default function App() {
   const [exporter] = useState(() => new JsonExporter(engine['journal'] as Journal));
 
   const store = createUIStore();
+  const storeRef = useRef(store);
+  storeRef.current = store;
 
   const [diagnosticsEngine] = useState(() => {
     const de = new DiagnosticsEngine();
@@ -77,6 +87,9 @@ export default function App() {
     de.setOrderLockManager(engine.getOrderLockManager());
     return de;
   });
+  useEffect(() => {
+    return () => diagnosticsEngine.destroy();
+  }, [diagnosticsEngine]);
   useEffect(() => {
     const isTauri = typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' || window.location.protocol === 'tauri:';
     const settingsRaw = (() => {
@@ -87,10 +100,20 @@ export default function App() {
     logger.info(`APP_BUILD_VERSION_AUDIT: buildTime=${BUILD_TIMESTAMP} gitHashIfAvailable=${BUILD_GIT_COMMIT} packageVersion=${packageJson.version} rendererVersion=${RENDERER_BUILD_ID}`);
     logger.info(`INSTALLED_BUILD_METADATA_AUDIT: appVersion=${packageJson.version} gitCommit=${BUILD_GIT_COMMIT} buildTimestamp=${BUILD_TIMESTAMP} buildMode=${(import.meta as any).env?.MODE ?? 'unknown'} tauriMode=${isTauri ? 'installed_or_tauri' : 'browser'} isTauri=${String(isTauri)} binaryPath=unavailable_in_renderer appPath=${window.location.href} storageRoot=${isTauri ? 'tauri_appdata' : window.location.origin} settingsHash=${stableHash(settingsRaw)} runtimeConfigHash=${stableHash(runtimeState ?? {})}`);
   }, [engine]);
+  const lastPositionRenderAuditRef = useRef(0);
+  const lastPositionUpdateRenderAtRef = useRef(0);
   useEffect(() => {
     return engine.getPositionManager().subscribe((positions, reason, symbol) => {
-      logger.info(`POSITION_MANAGER_REACTIVE_RENDER_AUDIT: target=App reason=${reason} symbol=${symbol ?? 'none'} openCount=${positions.length} symbols=${positions.map(p => p.coin).join('|') || 'none'}`);
-      forceUpdate(n => n + 1);
+      const structuralChange = reason !== 'update';
+      const now = Date.now();
+      if (DEBUG_UI_AUDITS || structuralChange || now - lastPositionRenderAuditRef.current > 30000) {
+        lastPositionRenderAuditRef.current = now;
+        logger.info(`POSITION_MANAGER_REACTIVE_RENDER_AUDIT: target=App reason=${reason} symbol=${symbol ?? 'none'} openCount=${positions.length} symbols=${positions.map(p => p.coin).join('|') || 'none'} debugMode=${String(DEBUG_UI_AUDITS)} rateLimited=${String(!DEBUG_UI_AUDITS && !structuralChange)}`);
+      }
+      if (structuralChange || now - lastPositionUpdateRenderAtRef.current > 1000) {
+        lastPositionUpdateRenderAtRef.current = now;
+        forceUpdate(n => n + 1);
+      }
     });
   }, [engine]);
   const [perfGuard] = useState(() => new PerformanceGuard());
@@ -100,6 +123,8 @@ export default function App() {
   const [liveState, setLiveState] = useState<LiveSafetyState>(INITIAL_SAFETY_STATE);
   const [liveCheckResult, setLiveCheckResult] = useState<LiveSafetyCheckResult | null>(null);
   const [totalEquity, setTotalEquity] = useState(() => (engine.getAdapter() as PaperExchangeAdapter).getTotalEquity());
+  const totalEquityRef = useRef(totalEquity);
+  totalEquityRef.current = totalEquity;
   const [, forceUpdate] = useState(0);
 
   const [brain, setBrain] = useState<MLBrainModel | null>(null);
@@ -164,6 +189,18 @@ export default function App() {
     startupGuardRef.current = true;
 
     (async () => {
+      const recovery = (() => {
+        try {
+          const previousBoot = localStorage.getItem('cryptobud_v4:renderer_boot_state');
+          const previousReason = localStorage.getItem('cryptobud_v4:last_crash_reason') ?? (previousBoot === 'running' ? 'WEBVIEW_OOM_OR_UNGRACEFUL_SHUTDOWN' : 'none');
+          localStorage.setItem('cryptobud_v4:renderer_boot_state', 'running');
+          localStorage.setItem('cryptobud_v4:last_boot_id', APP_BOOT_ID);
+          return { previousBoot, previousReason };
+        } catch {
+          return { previousBoot: 'storage_unavailable', previousReason: 'unknown_storage_unavailable' };
+        }
+      })();
+      logger.warn(`STARTUP_RECOVERY_AUDIT: appBootId=${APP_BOOT_ID} previousBootState=${recovery.previousBoot ?? 'none'} previousCrashReason=${recovery.previousReason} scannerAutoResume=false scannerRunning=false action=verify_open_positions_before_restart`);
       logger.info(`APP_RELOAD_DETECTED_AUDIT: reloadType=F5_browser_reload wasExplicitReset=false hydrationStarted=false hydrationComplete=false openPositionsLoaded=0 closedTradesLoaded=0 journalTradesLoaded=0 mlRecordsLoaded=0 settingsLoaded=false attemptedEmptyOverwrite=false emptyOverwriteBlocked=false sourceUsed=localStorage storageKey=cryptobud_v4 backupKey=cryptobud_v4_critical resetMarkerPresent=false resetMarkerConsumed=false`);
       logger.info(`STORAGE_CONTEXT_AUDIT: runtimeMode=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'desktop' : 'browser'} isDesktop=${String(typeof (window as any).__TAURI_INTERNALS__ !== 'undefined')} storageOrigin=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri_sqlite' : 'browser_localStorage'} localStorageAvailable=${String(typeof localStorage !== 'undefined')} tauriStoreAvailable=${String(typeof (window as any).__TAURI_INTERNALS__ !== 'undefined')} positionStorageKey=cryptobud_v4:open_positions_primary backupStorageKey=cryptobud_v4:open_positions_critical loadedFrom=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri_then_localStorage' : 'localStorage'}`);
       logger.info(`RESET_MARKER_AUDIT: resetMarkerPresent=false wasExplicitReset=false resetScope=none resetAt=none reason=normal_boot_no_reset_marker`);
@@ -250,6 +287,7 @@ export default function App() {
           }
         }
         engine.getPositionManager().restorePositions(restored);
+        engine.resumeGuardReset();
         if (restored.length > 0) {
           logger.info(`RESTORED_POSITION_PRICE_WARMUP_START: symbols=${restored.map((p) => p.coin).join('|')} scannerRunning=${store.state.scannerRunning} cacheAvailable=true`);
           for (const p of restored) {
@@ -317,6 +355,7 @@ export default function App() {
       const settings = await settingsPersistence.loadSettings();
       const telegramSettings = await settingsPersistence.loadTelegramSettings();
       telegramNotifierRef.current.updateSettings(telegramSettings);
+      engine.refreshExitSettingsFromSettings(settings);
       banlistRef.current = [...new Set((settings.scannerBanlist ?? settings.manualScannerBanlist ?? []).map((x) => String(x).toUpperCase().trim()).filter(Boolean))];
       const scanner = engine.getAutoRuntime().getScanner();
       const bootUniverseMode = (settings.scannerUniverseMode === 'TOP_100' ? 'BINANCE_TOP_250' : settings.scannerUniverseMode ?? 'BINANCE_TOP_250') as UniverseMode;
@@ -570,6 +609,12 @@ export default function App() {
     const handleBeforeUnload = () => {
       const openPositions = engine.getPositionManager().getOpenPositions();
       const flushStarted = Date.now();
+      try {
+        localStorage.setItem('cryptobud_v4:renderer_boot_state', 'clean_shutdown');
+        localStorage.setItem('cryptobud_v4:last_crash_reason', 'none');
+      } catch {
+        // best-effort recovery marker only
+      }
       if (openPositions.length > 0) {
         try {
           const rows = openPositions.map(p => ({
@@ -671,20 +716,20 @@ export default function App() {
       await appStatePersistence.save({
         ...appState,
         selectedCoins: Array.from(engine.brains.keys()),
-        activeTradeMode: store.state.activeTradeMode,
+        activeTradeMode: storeRef.current.state.activeTradeMode,
         paperStartingBalance: 10000,
-        equityHistory: store.state.equityHistory,
+        equityHistory: storeRef.current.state.equityHistory,
       });
     }, 30000);
     return () => clearInterval(interval);
-  }, [engine.brains.size, store.state.activeTradeMode, store.state.equityHistory]);
+  }, [engine]);
 
   useEffect(() => {
     const interval = setInterval(() => {
       const equity = paperAdapter.getTotalEquity();
       setTotalEquity(equity);
       const now = Date.now();
-      store.addEquityPoint(now, equity);
+      storeRef.current.addEquityPoint(now, equity);
       const paperBal = paperAdapter.getCashBalance('USDT');
       const posCount = engine.getPositionManager().getOpenPositions().length;
       const totalExposure = engine.getPositionManager().getExposureSummary().totalExposure;
@@ -707,7 +752,7 @@ export default function App() {
         storeOpenCount,
         mode: 'PAPER',
       });
-      if (audit.mismatchDetected || equity !== (totalEquity as any)) {
+      if (audit.mismatchDetected || equity !== (totalEquityRef.current as any)) {
         logger.info(formatEquityDisplaySourceAudit(audit));
       }
       if (audit.zeroWithActiveRuntime) {
@@ -754,17 +799,59 @@ export default function App() {
       forceUpdate(n => n + 1);
     }, 3000);
     return () => clearInterval(interval);
-  }, [engine, journal, paperAdapter, positionBootRestoring, store, totalEquity]);
+  }, [engine, journal, paperAdapter]);
 
   // Periodic diagnostics snapshot
   useEffect(() => {
     const interval = setInterval(() => {
+      const feed = MarketDataFeed.getInstance();
+      const scannerMemory = engine.getAutoRuntime().getScanner().getRuntimeMemoryStats();
       setDiagSnapshot(diagnosticsEngine.snapshot({
-        chartPointCount: store.state.chartData.length,
+        chartPointCount: storeRef.current.state.chartData.length,
+        scannerSnapshotCount: scannerMemory.scannerSnapshotCount,
+        activeIntervals: feed.getActiveIntervalCount() + (scannerMemory.revalidationLoopActive ? 1 : 0),
+        activeSubscriptions: feed.getActiveSubscriptionCount(),
       }));
     }, 10000);
     return () => clearInterval(interval);
-  }, [diagnosticsEngine, store]);
+  }, [diagnosticsEngine, engine]);
+
+  useEffect(() => {
+    const emitMemoryHealth = () => {
+      const heap = getBrowserHeap();
+      const logStats = logger.getStats();
+      const feed = MarketDataFeed.getInstance();
+      const scannerMemory = engine.getAutoRuntime().getScanner().getRuntimeMemoryStats();
+      const openPositions = engine.getPositionManager().getOpenPositions();
+      const activeIntervalsCount = feed.getActiveIntervalCount() + (scannerMemory.revalidationLoopActive ? 1 : 0);
+      const pressure = updateMemoryPressure({
+        heapRatio: heap.ratio,
+        visibleLogCount: logStats.currentLogCount,
+        visibleLogMax: logStats.maxLogCount,
+        internalAuditCount: logStats.currentInternalAuditCount,
+        internalAuditMax: logStats.maxInternalAuditCount,
+      });
+      logger.info(formatMemoryHealthAudit({
+        jsHeapUsed: heap.used,
+        jsHeapLimit: heap.limit,
+        visibleLogCount: logStats.currentLogCount,
+        internalAuditCount: logStats.currentInternalAuditCount,
+        scannerCandidateCount: scannerMemory.scannerCandidateCount,
+        scannerSnapshotCount: scannerMemory.scannerSnapshotCount,
+        activeIntervalsCount,
+        activeSubscriptionsCount: feed.getActiveSubscriptionCount(),
+        airScannerObjectCount: Math.min(24, storeRef.current.state.scannerSnapshot?.candidates.length ?? 0),
+        openPositionsCount: openPositions.length,
+        closedPositionsCount: journal.getClosedTrades().length,
+      }));
+      if (pressure.active) {
+        logger.throttled('WARN', `MEMORY_PRESSURE_WARNING: level=${pressure.level} reason=${pressure.reason} heapRatio=${pressure.heapRatio != null ? pressure.heapRatio.toFixed(3) : 'n/a'} visibleLogCount=${logStats.currentLogCount}/${logStats.maxLogCount} internalAuditCount=${logStats.currentInternalAuditCount}/${logStats.maxInternalAuditCount} action=disable_non_critical_ui_audits_and_pause_extra_effects tradingLogicStopped=false`, 'memory-pressure-warning', 60000);
+      }
+    };
+    emitMemoryHealth();
+    const interval = setInterval(emitMemoryHealth, 30000);
+    return () => clearInterval(interval);
+  }, [engine, journal]);
 
   // Periodic ML guard/events refresh
   useEffect(() => {
@@ -861,6 +948,7 @@ export default function App() {
     }
     try {
       const settings = await settingsPersistence.loadSettings();
+      engine.refreshExitSettingsFromSettings(settings);
       const effectiveAutoBots = settings.paperAutoExecutionEnabled ?? true;
       const effectiveStrategySource = effectiveAutoBots ? 'autobots' : (settings.strategySource ?? 'autobots');
       banlistRef.current = [...new Set((settings.scannerBanlist ?? settings.manualScannerBanlist ?? []).map((x) => String(x).toUpperCase().trim()).filter(Boolean))];
@@ -1126,6 +1214,11 @@ export default function App() {
     setGuardState(mlRuntimeGuard.getGuardState(brain !== null, brain?.enabled ?? false));
   }, [brain]);
 
+  const handleMlExitsEnabledChange = useCallback((enabled: boolean) => {
+    mlRuntimeGuard.setMlExitsEnabled(enabled);
+    setGuardState(mlRuntimeGuard.getGuardState(brain !== null, brain?.enabled ?? false));
+  }, [brain]);
+
   const handleImportedRowsUpdate = useCallback((rows: import('./core/types').ImportedMLRow[]) => {
     setImportedRows(rows);
   }, []);
@@ -1180,6 +1273,7 @@ export default function App() {
             guardState={guardState}
             events={mlEvents}
             onRuntimeModeChange={handleRuntimeModeChange}
+            onMlExitsEnabledChange={handleMlExitsEnabledChange}
           />
         );
       case 'logs':

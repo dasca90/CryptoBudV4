@@ -6,10 +6,23 @@ let p = 0;
 let f = 0;
 const ok = (c: boolean, m: string) => { if (c) p++; else { f++; console.error('FAIL', m); } };
 
+const runtimeReady = {
+  executionMode: 'paper_simulated',
+  buildMode: 'dev',
+  tauriMode: 'tauri',
+  autoBotsUiOn: true,
+  autoBotsResolvedOn: true,
+  scannerAutoEnabled: true,
+  paperAutoExecutionEnabled: true,
+  manualOverrideRequested: false,
+};
+
 const waitCandidate: any = {
   symbol: 'WAITUSDT',
   selectedStrategy: 'wait',
   strategySource: 'autobots',
+  runtimeSnapshot: runtimeReady,
+  strategyDecision: { invariantOk: true },
   status: 'WAIT',
   spreadPct: 0.62,
   dipPercent: -0.9,
@@ -23,11 +36,32 @@ const waitSnap = buildStrategyAuditSnapshotFromCandidate(waitCandidate);
 ok(waitSnap.strategySelected === 'wait', '1 wait strategy kept');
 ok(waitSnap.finalEntryRule === 'WAITING_FOR_SETUP', '2 wait entry rule normalized');
 ok(waitSnap.finalExecutable === false, '3 wait remains blocked finalExecutable=false');
+ok(waitSnap.finalPerCoinStrategy === 'wait', '3b finalPerCoinStrategy reflects final WAIT decision');
+
+const marketSetupWaitCandidate: any = {
+  ...waitCandidate,
+  symbol: 'DIPWAITUSDT',
+  selectedStrategy: 'wait',
+  groupRecommendedStrategy: 'dip_and_rebound',
+  autoStrategyDecision: {
+    effectiveStrategy: 'balanced',
+    groupRecommendedStrategy: 'dip_and_rebound',
+    strategySource: 'AutoBots',
+    reason: 'market best fit dip/rebound, runtime balanced',
+  },
+};
+const marketSetupWaitSnap = buildStrategyAuditSnapshotFromCandidate(marketSetupWaitCandidate);
+ok(marketSetupWaitSnap.marketRecommendedStrategy === 'dip_and_rebound', '3c market setup preserves dip_and_rebound while final waits');
+ok(marketSetupWaitSnap.runtimeActiveStrategy === 'balanced', '3d runtime strategy remains balanced');
+ok(marketSetupWaitSnap.finalPerCoinStrategy === 'wait', '3e final per-coin strategy is wait after gates');
 
 const conservativeCandidate: any = {
   ...waitCandidate,
   symbol: 'CONSUSDT',
   selectedStrategy: 'conservative',
+  riskGroup: 'mid_caps',
+  groupRecommendedStrategy: 'conservative',
+  autoStrategyDecision: { effectiveStrategy: 'conservative', groupRecommendedStrategy: 'conservative', strategySource: 'AutoBots' },
   spreadPct: 0.1,
   dipPercent: -2.2,
   reboundPercent: 1.1,
@@ -76,8 +110,8 @@ const position: any = {
   },
 };
 const openView = mapPositionToOpenPositionView(position);
-ok(String(openView.strategySetupDipReqLabel).includes('observed'), '6 wait dip label observed-only');
-ok(String(openView.strategySetupReboundReqLabel).includes('observed'), '7 wait rebound label observed-only');
+ok(/observed|entry snapshot/i.test(String(openView.strategySetupDipReqLabel)), '6 wait dip label stays non-required display-only');
+ok(/observed|entry snapshot/i.test(String(openView.strategySetupReboundReqLabel)), '7 wait rebound label stays non-required display-only');
 
 const loggerSource = readFileSync('src/core/strategy-audit/strategy-audit-logger.ts', 'utf8');
 ok(loggerSource.includes('WAIT_STRATEGY_AUDIT'), '8 wait strategy audit log added');

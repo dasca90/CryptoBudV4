@@ -1,4 +1,5 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useState, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import type { TradingParametersView } from "./types";
 import { normalizeBannedCoinInput } from "../../core/trading/banned-symbols";
 import { logger } from "../../utils/logger";
@@ -15,6 +16,36 @@ function ensureAllGroups(rg: Record<string, boolean>): Record<string, boolean> {
 
 const AUTO_HELPER = "Auto Trader controls this value. Turn Auto OFF to edit manually.";
 
+const REF_MODE_HELPERS: Record<TradingParametersView["refMode"], { label: string; short: string; detail: string }> = {
+  AUTO: {
+    label: 'Auto',
+    short: 'Scanner chooses the best reference mode.',
+    detail: 'Uses the scanner default for market context. Best when you want AutoBots to keep the reference logic conservative.',
+  },
+  SMA: {
+    label: 'SMA',
+    short: 'Simple Moving Average.',
+    detail: 'Smooth average of recent candles. Slower to react, useful as a stable dip/rebound reference.',
+  },
+  EMA: {
+    label: 'EMA',
+    short: 'Exponential Moving Average.',
+    detail: 'Weights recent candles more. Reacts faster to fresh momentum than SMA.',
+  },
+  VWAP: {
+    label: 'VWAP',
+    short: 'Volume Weighted Average Price.',
+    detail: 'Average price weighted by volume. Useful for judging fair value around active intraday trading.',
+  },
+  BOLLINGER: {
+    label: 'Bollinger',
+    short: 'Moving average with volatility bands.',
+    detail: 'Uses bands around the average to detect squeeze, overextension, and possible breakout context.',
+  },
+};
+
+const REF_MODE_OPTIONS = Object.keys(REF_MODE_HELPERS) as TradingParametersView["refMode"][];
+
 const disableStyle: React.CSSProperties = {
   opacity: 0.55,
   cursor: 'not-allowed',
@@ -26,6 +57,18 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
   scannerRunning?: boolean;
   scannerConfigDirty?: boolean;
   paperAutoEnabled?: boolean;
+  runtimeStatus?: {
+    autoBotsRuntimeEnabled: boolean;
+    manualOverrideActive: boolean;
+    effectiveStrategySource: 'AutoBots' | 'Manual' | 'SafeFallback';
+    hydration: 'pending' | 'complete' | 'error';
+    mismatch: boolean;
+    executionMode?: string;
+    scannerAutoEnabled?: boolean;
+    paperAutoExecutionEnabled?: boolean;
+    blockerReason?: string;
+  };
+  onExportRuntimeDiagnostics?: () => void;
   onApply?: () => void;
 }) {
   const v = props.value;
@@ -48,6 +91,12 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
   const [bansExpanded, setBansExpanded] = useState(false);
   const [banFeedback, setBanFeedback] = useState("");
   const [manualSetupError, setManualSetupError] = useState("");
+  const [refModeOpen, setRefModeOpen] = useState(false);
+  const [refModeHover, setRefModeHover] = useState<TradingParametersView["refMode"] | null>(null);
+  const refModeTriggerRef = useRef<HTMLButtonElement>(null);
+  const [entryConfirmOpen, setEntryConfirmOpen] = useState(false);
+  const entryConfirmTriggerRef = useRef<HTMLSpanElement>(null);
+  const entryConfirmPortalRef = useRef<HTMLDivElement>(null);
   const numStyle: React.CSSProperties = { width: 70, padding: '2px 4px', fontSize: 10, background: 'rgba(9,15,32,0.85)', color: '#cfe2ff', border: '1px solid rgba(0,234,255,0.15)', borderRadius: 4 };
 
   const addBan = () => {
@@ -70,11 +119,11 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
       {p.children}
     </div>
   );
-  const manualDipperLocked = v.strategySource === 'autobots' && !!auto;
+  const manualDipperLocked = v.strategySource === 'autobots';
   const manualFieldsEditable = !manualDipperLocked;
-  const conflictDetected = manualOverrideActive && !!auto && manualDipperLocked;
+  const conflictDetected = manualOverrideActive && !!auto;
   const lockReason = manualDipperLocked
-    ? 'strategySource_autobots_and_auto_enabled'
+    ? 'strategySource_autobots'
     : manualOverrideActive
       ? 'manual_override_priority'
       : (!auto ? 'autobots_off' : 'manual_mode');
@@ -82,13 +131,47 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
   useEffect(() => {
     logger.info(`MANUAL_DIPPER_MODE_STATE_AUDIT: strategySource=${v.strategySource} autoBotsEnabled=${String(!!auto)} manualSetupLocked=${String(manualDipperLocked)} manualFieldsEditable=${String(manualFieldsEditable)} reason=${lockReason} conflictDetected=${String(conflictDetected)}`);
     if (conflictDetected) {
-      logger.warn(`MANUAL_DIPPER_AUTOBOTS_LOCK_CONFLICT: strategySource=${v.strategySource} autoBotsEnabled=${String(!!auto)} manualSetupLocked=${String(manualDipperLocked)} resolution=manual_override_unlock_fields`);
+      logger.warn(`MANUAL_DIPPER_AUTOBOTS_LOCK_CONFLICT: strategySource=${v.strategySource} autoBotsEnabled=${String(!!auto)} manualSetupLocked=${String(manualDipperLocked)} resolution=autobots_wins_manual_fields_locked`);
     }
   }, [v.strategySource, auto, manualDipperLocked, manualFieldsEditable, lockReason, conflictDetected]);
 
   useEffect(() => {
     logger.info(`MANUAL_DIPPER_SETUP_RESTORED: momentumMinReboundPct=${v.manualDipperSetup.momentumMinReboundPct} balancedMinDipPct=${v.manualDipperSetup.balancedMinDipPct} balancedMinReboundPct=${v.manualDipperSetup.balancedMinReboundPct} dipReboundMinDipPct=${v.manualDipperSetup.dipReboundMinDipPct} dipReboundMinReboundPct=${v.manualDipperSetup.dipReboundMinReboundPct} conservativeMinDipPct=${v.manualDipperSetup.conservativeMinDipPct} conservativeMinReboundPct=${v.manualDipperSetup.conservativeMinReboundPct}`);
   }, []);
+
+  useEffect(() => {
+    if (!refModeOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        refModeTriggerRef.current &&
+        !refModeTriggerRef.current.contains(target) &&
+        !target.closest('[data-portal="ref-mode"]')
+      ) {
+        setRefModeOpen(false);
+        setRefModeHover(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [refModeOpen]);
+
+  useEffect(() => {
+    if (!entryConfirmOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        entryConfirmTriggerRef.current &&
+        !entryConfirmTriggerRef.current.contains(target) &&
+        entryConfirmPortalRef.current &&
+        !entryConfirmPortalRef.current.contains(target)
+      ) {
+        setEntryConfirmOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [entryConfirmOpen]);
   const patchManualSetup = (key: keyof TradingParametersView["manualDipperSetup"], raw: string, fallback: number) => {
     const n = Number(raw);
     if (!Number.isFinite(n) || n < 0) {
@@ -100,11 +183,95 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
     logger.info(`MANUAL_DIPPER_SETUP_SAVE_SUCCESS: field=${String(key)} value=${n} strategySource=${v.strategySource} autoBotsEnabled=${String(!!auto)} manualSetupLocked=${String(manualDipperLocked)}`);
   };
 
+  const getRefModePortalPos = (): React.CSSProperties => {
+    const el = refModeTriggerRef.current;
+    if (!el) return { position: 'fixed', zIndex: 50, left: 0, top: 0 };
+    const rect = el.getBoundingClientRect();
+    const gap = 4;
+    const w = Math.max(230, rect.width);
+    let left = rect.left;
+    let top = rect.bottom + gap;
+    if (left + w > window.innerWidth - 8) {
+      left = Math.max(8, window.innerWidth - w - 8);
+    }
+    const estH = 220;
+    if (top + estH > window.innerHeight - 8) {
+      top = Math.max(8, rect.top - gap - estH);
+    }
+    return {
+      position: 'fixed', zIndex: 50,
+      left, top,
+      minWidth: w,
+      maxWidth: 320,
+      maxHeight: 'min(400px, calc(100vh - 32px))',
+      overflowY: 'auto',
+      background: 'rgba(6,12,26,0.98)',
+      border: '1px solid rgba(0,234,255,0.35)',
+      boxShadow: '0 12px 28px rgba(0,0,0,0.45), 0 0 14px rgba(0,234,255,0.12)',
+      borderRadius: 6,
+      padding: 4,
+    };
+  };
+
+  const getEntryConfirmPortalPos = (): React.CSSProperties => {
+    const el = entryConfirmTriggerRef.current;
+    if (!el) return { position: 'fixed', zIndex: 50, left: 0, top: 0 };
+    const rect = el.getBoundingClientRect();
+    const gap = 4;
+    const w = 300;
+    let left = rect.right + gap;
+    let top = rect.top - 8;
+    if (left + w > window.innerWidth - 8) {
+      left = Math.max(8, rect.left - w - gap);
+    }
+    if (top < 8) top = 8;
+    const estH = 320;
+    if (top + estH > window.innerHeight - 8) {
+      top = Math.max(8, window.innerHeight - estH - 8);
+    }
+    return {
+      position: 'fixed', zIndex: 50,
+      left, top,
+      width: w,
+      maxHeight: 'min(400px, calc(100vh - 32px))',
+      overflowY: 'auto',
+      background: 'rgba(7,14,28,0.97)',
+      border: '1px solid rgba(88,166,255,0.42)',
+      borderRadius: 8,
+      padding: '10px 12px',
+      color: '#c9d1d9',
+      boxShadow: '0 8px 28px rgba(0,0,0,0.5)',
+      fontSize: 11,
+      lineHeight: 1.6,
+      pointerEvents: 'auto',
+    };
+  };
+
   return (
     <>
       <div className="panel-title" style={{ fontSize: 11, marginBottom: 6 }}>
         Trading Parameters {auto ? <span style={{ fontSize: 9, color: '#58a6ff' }}>— Auto ON</span> : ''}
       </div>
+      {props.runtimeStatus && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 9, marginBottom: 6, padding: 6, border: '1px solid rgba(88,166,255,0.16)', borderRadius: 6 }}>
+          <div>AutoBots UI: <strong>{auto ? 'ON' : 'OFF'}</strong></div>
+          <div>AutoBots Runtime: <strong>{props.runtimeStatus.autoBotsRuntimeEnabled ? 'ON' : 'OFF'}</strong></div>
+          <div>Manual Override: <strong>{props.runtimeStatus.manualOverrideActive ? 'Active' : 'Inactive'}</strong></div>
+          <div>Effective Strategy Source: <strong>{props.runtimeStatus.effectiveStrategySource}</strong></div>
+          <div>Hydration: <strong>{props.runtimeStatus.hydration === 'complete' ? 'Complete' : props.runtimeStatus.hydration === 'error' ? 'Error' : 'Pending'}</strong></div>
+          {props.onExportRuntimeDiagnostics && (
+            <button className="btn btn-sm btn-outline" style={{ fontSize: 9, padding: '2px 6px' }} onClick={props.onExportRuntimeDiagnostics}>Export Runtime Diagnostics</button>
+          )}
+          {props.runtimeStatus.mismatch && (
+            <div style={{ gridColumn: '1 / -1', color: '#f85149', fontWeight: 700 }}>
+              AutoBots scan only — auto BUY execution disabled.
+              <span style={{ display: 'block', fontWeight: 500 }}>
+                blocker={props.runtimeStatus.blockerReason ?? 'unknown'} executionMode={props.runtimeStatus.executionMode ?? 'unknown'} scannerAutoEnabled={String(props.runtimeStatus.scannerAutoEnabled ?? false)} paperAutoExecutionEnabled={String(props.runtimeStatus.paperAutoExecutionEnabled ?? false)} manualOverrideEnabled={String(props.runtimeStatus.manualOverrideActive)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
       {props.onApply && (
         <div style={{ marginBottom: 6 }}>
           <button
@@ -143,7 +310,7 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
       )}
       <div className="param-grid">
         <label>Strategy Source</label>
-        <select value={v.strategySource} onChange={(e) => patch("strategySource", e.target.value as TradingParametersView["strategySource"])}>
+        <select value={v.strategySource} onChange={(e) => patch("strategySource", e.target.value as TradingParametersView["strategySource"])} disabled={!!auto}>
           <option value="autobots">AutoBots</option>
           <option value="manual_override">Manual Override</option>
         </select>
@@ -158,7 +325,59 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
           </select>
         </DisabledWrap>
 
-        <label>Entry Confirmation</label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          Entry Confirmation
+          <span
+            ref={entryConfirmTriggerRef}
+            data-testid="entry-confirmation-helper-trigger"
+            style={{ fontSize: 9, color: '#58a6ff', cursor: 'pointer', userSelect: 'none' }}
+            onClick={(e) => { e.stopPropagation(); setEntryConfirmOpen(o => !o); }}
+            onMouseEnter={() => setEntryConfirmOpen(true)}
+            onMouseLeave={() => {
+              const t = entryConfirmPortalRef.current;
+              if (!t || !t.matches(':hover')) {
+                setTimeout(() => setEntryConfirmOpen(false), 150);
+              }
+            }}
+            onFocus={() => setEntryConfirmOpen(true)}
+            onBlur={() => setEntryConfirmOpen(false)}
+          >i</span>
+          {entryConfirmOpen && createPortal(
+            <div
+              ref={entryConfirmPortalRef}
+              data-testid="entry-confirmation-helper-tooltip"
+              style={getEntryConfirmPortalPos()}
+              onMouseEnter={() => setEntryConfirmOpen(true)}
+              onMouseLeave={() => setEntryConfirmOpen(false)}
+            >
+              <div style={{ marginBottom: 8, fontSize: 10, color: '#8b949e', lineHeight: '14px' }}>
+                Entry Confirmation controls how strict AutoBots is before allowing a BUY.
+              </div>
+              <div style={{ marginBottom: 6, borderLeft: '2px solid rgba(248,81,73,0.5)', paddingLeft: 6 }}>
+                <div style={{ fontWeight: 700, fontSize: 10, color: '#f0883e' }}>Aggressive</div>
+                <div style={{ fontSize: 9, color: '#c9d1d9', lineHeight: '13px' }}>
+                  Faster entries. Allows valid setups earlier. Higher risk. Useful for buy testing and fast markets. Still respects hard blockers.
+                </div>
+              </div>
+              <div style={{ marginBottom: 6, borderLeft: '2px solid rgba(88,166,255,0.5)', paddingLeft: 6 }}>
+                <div style={{ fontWeight: 700, fontSize: 10, color: '#58a6ff' }}>Strict</div>
+                <div style={{ fontSize: 9, color: '#c9d1d9', lineHeight: '13px' }}>
+                  Safer entries. Requires stronger confirmation. Fewer trades. More waiting.
+                </div>
+              </div>
+              <div style={{ marginBottom: 8, borderLeft: '2px solid rgba(63,185,80,0.5)', paddingLeft: 6 }}>
+                <div style={{ fontWeight: 700, fontSize: 10, color: '#3fb950' }}>Smart</div>
+                <div style={{ fontSize: 9, color: '#c9d1d9', lineHeight: '13px' }}>
+                  Adaptive mode. Uses market/risk context and setup quality. Tries to balance safety and opportunity.
+                </div>
+              </div>
+              <div style={{ fontSize: 8, color: '#484f58', lineHeight: '12px', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 6 }}>
+                Hard blockers always remain active: spread, TP room, price freshness, book freshness, duplicate position, capital, banned symbol, lifecycle integrity.
+              </div>
+            </div>,
+            document.body,
+          )}
+        </label>
         <select value={v.entryConfirmationMode} onChange={(e) => patch("entryConfirmationMode", e.target.value as TradingParametersView["entryConfirmationMode"])}>
           <option value="strict">Strict</option>
           <option value="smart">Smart</option>
@@ -202,18 +421,83 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
           <option value="LAST_3_WEEKS">3w</option>
         </select>
 
-        <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'help' }}
-          title="SMA: Simple Moving Average — smoother reference, slower reaction.&#10;EMA: Exponential MA — faster reaction, weights recent prices.&#10;Bollinger: Bands around moving average — detects squeeze/breakout.&#10;VWAP: Volume Weighted Avg Price — fair intraday value reference.">
-          Ref Mode <span style={{ fontSize: 9, color: '#58a6ff' }}>?</span>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          Ref Mode
         </label>
-        <select value={v.refMode} onChange={(e) => patch("refMode", e.target.value as TradingParametersView["refMode"])}
-          title={auto ? 'Ref Mode remains user-controlled for market context' : 'Reference Mode'}>
-          <option value="AUTO">Auto</option>
-          <option value="SMA">SMA</option>
-          <option value="EMA">EMA</option>
-          <option value="VWAP">VWAP</option>
-          <option value="BOLLINGER">Bollinger</option>
-        </select>
+        <div data-testid="ref-mode-helper-dropdown" style={{ position: 'relative' }}>
+          <button
+            ref={refModeTriggerRef}
+            type="button"
+            aria-haspopup="listbox"
+            aria-expanded={refModeOpen}
+            onClick={() => setRefModeOpen(open => !open)}
+            onFocus={() => setRefModeOpen(true)}
+            style={{
+              width: '100%',
+              height: 20,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 6,
+              padding: '2px 6px',
+              background: 'rgba(9,15,32,0.85)',
+              color: '#cfe2ff',
+              border: '1px solid rgba(0,234,255,0.15)',
+              borderRadius: 4,
+              fontSize: 10,
+              cursor: 'pointer',
+            }}
+          >
+            <span>{REF_MODE_HELPERS[v.refMode].label}</span>
+            <span style={{ color: '#58a6ff', fontSize: 9 }}>i</span>
+          </button>
+          {refModeOpen && createPortal(
+            <div data-portal="ref-mode" role="listbox" aria-label="Reference mode" style={getRefModePortalPos()}>
+              {REF_MODE_OPTIONS.map((mode) => {
+                const helper = REF_MODE_HELPERS[mode];
+                const selected = mode === v.refMode;
+                const hovered = mode === refModeHover;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    data-testid={`ref-mode-option-${mode}`}
+                    onMouseEnter={() => setRefModeHover(mode)}
+                    onFocus={() => setRefModeHover(mode)}
+                    onClick={() => {
+                      patch("refMode", mode);
+                      setRefModeOpen(false);
+                      setRefModeHover(null);
+                    }}
+                    style={{
+                      width: '100%',
+                      border: 0,
+                      borderRadius: 4,
+                      background: selected ? 'rgba(88,166,255,0.18)' : hovered ? 'rgba(0,234,255,0.12)' : 'transparent',
+                      color: '#cfe2ff',
+                      cursor: 'pointer',
+                      padding: '5px 6px',
+                      textAlign: 'left',
+                      display: 'grid',
+                      gap: 2,
+                    }}
+                  >
+                    <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10, fontWeight: 700 }}>
+                      <span>{helper.label}</span>
+                      {selected && <span style={{ color: '#3fb950', fontSize: 9 }}>selected</span>}
+                    </span>
+                    <span style={{ color: hovered ? '#dff7ff' : '#8b949e', fontSize: 8, lineHeight: '11px' }}>
+                      {hovered ? helper.detail : helper.short}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>,
+            document.body,
+          )}
+        </div>
 
         <label>Scanner Ref Period</label>
         <select value={v.scannerReferencePeriod} onChange={(e) => patch("scannerReferencePeriod", e.target.value as TradingParametersView["scannerReferencePeriod"])}>
@@ -263,7 +547,7 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
       </div>
       {manualDipperLocked && (
         <div style={{ fontSize: 9, color: '#d29922', marginBottom: 6, padding: '4px 6px', background: 'rgba(210,153,34,0.1)', borderRadius: 4 }}>
-          AutoBots ON - setup is decided automatically per coin. Manual dip/rebound fields are locked.
+          AutoBots active — manual setup is read-only. Manual dip/rebound values remain visible as reference.
         </div>
       )}
       {!manualDipperLocked && manualOverrideActive && (
@@ -410,6 +694,14 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
           <label>Entry Gate Attempt Limit</label>
           <input type="number" value={v.maxEntryGateAttemptsPerScan} onChange={(e) => patch("maxEntryGateAttemptsPerScan", Math.max(1, Number(e.target.value)))}
             min={1} max={50} title="Performance safety: max candidates sent through EntryGate per scan. Does not control trade count." />
+
+          <label>Scanner Diagnostics Level</label>
+          <select value={v.scannerDiagnosticsLevel} onChange={(e) => patch("scannerDiagnosticsLevel", e.target.value as TradingParametersView["scannerDiagnosticsLevel"])}
+            title="Normal emits summaries; Debug keeps full per-symbol scanner audits.">
+            <option value="normal">Normal</option>
+            <option value="verbose">Verbose</option>
+            <option value="debug">Debug</option>
+          </select>
 
           <label>Max / Coin / Day</label>
           <input type="number" value={v.maxEntriesPerCoinPerDay} onChange={(e) => patch("maxEntriesPerCoinPerDay", Math.max(1, Number(e.target.value)))}

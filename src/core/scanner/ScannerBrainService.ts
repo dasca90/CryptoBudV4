@@ -12,6 +12,8 @@ export interface ScannerBrainLookupResult {
 
 export class ScannerBrainService {
   private tempBrains: Map<string, TraderBrain> = new Map();
+  private brainAccessOrder: string[] = [];
+  private maxTempBrains = 250;
   private btcAnchorEnabled = true;
   private ethAnchorEnabled = true;
 
@@ -49,9 +51,12 @@ export class ScannerBrainService {
 
     const cached = this.tempBrains.get(normalized);
     if (cached) {
+      this.recordAccess(normalized);
       cached.setAnchorSettings(this.btcAnchorEnabled, this.ethAnchorEnabled);
       return { brain: cached, source: 'cached_scanner_brain' };
     }
+
+    this.evictIfNeeded();
 
     const cfg: TraderBrainConfig = {
       coin: normalized,
@@ -68,7 +73,30 @@ export class ScannerBrainService {
     const brain = new TraderBrain(cfg, this.adapter, this.ml);
     brain.setAnchorSettings(this.btcAnchorEnabled, this.ethAnchorEnabled);
     this.tempBrains.set(normalized, brain);
+    this.recordAccess(normalized);
     return { brain, source: 'scanner_temp_brain' };
+  }
+
+  clearTempBrains(): void {
+    this.tempBrains.clear();
+    this.brainAccessOrder = [];
+  }
+
+  getTempBrainCount(): number {
+    return this.tempBrains.size;
+  }
+
+  private recordAccess(key: string): void {
+    const idx = this.brainAccessOrder.indexOf(key);
+    if (idx !== -1) this.brainAccessOrder.splice(idx, 1);
+    this.brainAccessOrder.push(key);
+  }
+
+  private evictIfNeeded(): void {
+    while (this.tempBrains.size >= this.maxTempBrains) {
+      const oldest = this.brainAccessOrder.shift();
+      if (oldest) this.tempBrains.delete(oldest);
+    }
   }
 
   private isValidSymbol(symbol: string): boolean {

@@ -16,10 +16,26 @@ function captureLogs(run: () => void): string[] {
   return msgs;
 }
 
+const runtimeReady = {
+  executionMode: 'paper_simulated',
+  buildMode: 'dev',
+  tauriMode: 'tauri',
+  autoBotsUiOn: true,
+  autoBotsResolvedOn: true,
+  scannerAutoEnabled: true,
+  paperAutoExecutionEnabled: true,
+  manualOverrideRequested: false,
+};
+
 const conservativeDipMissing: any = {
   symbol: 'CONS_DIP_MISS_USDT',
   selectedStrategy: 'conservative',
   strategySource: 'autobots',
+  runtimeSnapshot: runtimeReady,
+  strategyDecision: { invariantOk: true },
+  riskGroup: 'mid_caps',
+  groupRecommendedStrategy: 'conservative',
+  autoStrategyDecision: { effectiveStrategy: 'conservative', groupRecommendedStrategy: 'conservative', strategySource: 'AutoBots' },
   status: 'WAIT',
   spreadPct: 0.1,
   dipPercent: -0.5,
@@ -33,6 +49,11 @@ const conservativeReboundMissing: any = {
   symbol: 'CONS_REBOUND_MISS_USDT',
   selectedStrategy: 'conservative',
   strategySource: 'autobots',
+  runtimeSnapshot: runtimeReady,
+  strategyDecision: { invariantOk: true },
+  riskGroup: 'mid_caps',
+  groupRecommendedStrategy: 'conservative',
+  autoStrategyDecision: { effectiveStrategy: 'conservative', groupRecommendedStrategy: 'conservative', strategySource: 'AutoBots' },
   status: 'WAIT',
   spreadPct: 0.1,
   dipPercent: -2.2,
@@ -46,6 +67,8 @@ const waitObservedOnly: any = {
   symbol: 'WAIT_OBS_USDT',
   selectedStrategy: 'wait',
   strategySource: 'autobots',
+  runtimeSnapshot: runtimeReady,
+  strategyDecision: { invariantOk: true },
   status: 'WAIT',
   spreadPct: 0.2,
   dipPercent: -1.1,
@@ -59,7 +82,7 @@ const logsDip = captureLogs(() => logStrategyAudit(buildStrategyAuditSnapshotFro
 const finalDip = logsDip.find((m) => m.includes('STRATEGY_FINAL_EXECUTABLE_AUDIT')) || '';
 ok(finalDip.includes('finalExecutable=false'), '1 conservative dip-missing has finalExecutable=false');
 ok(finalDip.includes('dip_not_confirmed'), '2 conservative dip-missing logs dip_not_confirmed');
-ok(finalDip.includes('strategy_setup_not_met') && finalDip.includes('finalExecutable_false'), '3 conservative dip-missing logs strategy/final executable blockers');
+ok(finalDip.includes('strategy_setup_not_met') && !finalDip.includes('unknown_final_executable_bug'), '3 conservative dip-missing logs exact strategy blocker, not unknown sentinel');
 ok(!finalDip.includes('blockReasons=none'), '4 finalExecutable=false never emits blockReasons=none');
 
 const logsRebound = captureLogs(() => logStrategyAudit(buildStrategyAuditSnapshotFromCandidate(conservativeReboundMissing)));
@@ -72,6 +95,11 @@ const waitDipRebound = logsWait.find((m) => m.includes('STRATEGY_DIP_REBOUND_VAL
 ok(waitMetrics.includes('dipConfirmed=observed_only') && waitMetrics.includes('reboundConfirmed=observed_only'), '6 wait metrics use observed_only');
 ok(waitDipRebound.includes('dipConfirmed=observed_only') && waitDipRebound.includes('reboundConfirmed=observed_only'), '7 wait dip/rebound audit agrees with observed_only');
 ok(!waitDipRebound.includes('dipConfirmed=true') && !waitDipRebound.includes('reboundConfirmed=true'), '8 wait does not mark dip/rebound as passed requirements');
+
+const waitFinal = logsWait.find((m) => m.includes('STRATEGY_FINAL_EXECUTABLE_AUDIT')) || '';
+const waitBlock = logsWait.find((m) => m.includes('WAIT_BLOCK_REASON_AUDIT')) || '';
+ok(!waitFinal.includes('unknown_final_executable_bug') && !waitBlock.includes('unknown_final_executable_bug'), '8b wait audit does not leak unknown final executable sentinel');
+ok(waitBlock.includes('spread_too_high') || waitBlock.includes('WAIT_STRATEGY_NON_EXECUTABLE'), '8c wait audit keeps an actionable blocker');
 
 const trendAuditSource = readFileSync('src/lib/air-scanner/tradeV4DataAdapter.ts', 'utf8');
 ok(trendAuditSource.includes('TOP_CANDIDATE_TREND_SOURCE_AUDIT') && trendAuditSource.includes('fallbackReason='), '9 trend fallback remains visible/auditable');

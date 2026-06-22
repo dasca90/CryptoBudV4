@@ -32,6 +32,22 @@ export class PaperExchangeAdapter implements ExchangeAdapter {
     this.balances.set('USDT', this.initialUsdt);
   }
 
+  getCashBalance(asset = 'USDT'): number {
+    return this.balances.get(asset) ?? 0;
+  }
+
+  hasCashBalance(asset = 'USDT'): boolean {
+    return this.balances.has(asset);
+  }
+
+  initializeCashBalanceFromConfig(amount: number, asset = 'USDT'): boolean {
+    if (!Number.isFinite(amount) || amount < 0) return false;
+    const existing = this.balances.get(asset);
+    if (existing != null && existing > 0) return false;
+    this.balances.set(asset, amount);
+    return true;
+  }
+
   setSlippageConfig(config: Partial<PaperSlippageConfig>): void {
     this.slippageConfig = { ...this.slippageConfig, ...config };
   }

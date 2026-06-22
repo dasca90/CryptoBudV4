@@ -44,6 +44,18 @@ export function TradeV4Page(props: {
   parameters: TradingParametersView;
   onChangeParameters: (next: TradingParametersView) => void;
   onApplySettings?: () => void;
+  runtimeStatus?: {
+    autoBotsRuntimeEnabled: boolean;
+    manualOverrideActive: boolean;
+    effectiveStrategySource: 'AutoBots' | 'Manual' | 'SafeFallback';
+    hydration: 'pending' | 'complete' | 'error';
+    mismatch: boolean;
+    executionMode?: string;
+    scannerAutoEnabled?: boolean;
+    paperAutoExecutionEnabled?: boolean;
+    blockerReason?: string;
+  };
+  onExportRuntimeDiagnostics?: () => void;
   onStartScanner: () => void;
   onStopScanner: () => void;
   onManualBuy: (symbol: string) => void;
@@ -74,6 +86,7 @@ export function TradeV4Page(props: {
   const selectedSymbol = props.model.selectedSymbol ?? localSelected;
   const renderAuditRef = useRef({ count: 0, startedAt: performance.now(), lastLoggedAt: 0 });
   const performanceHealthAuditRef = useRef(0);
+  const lastScanAuditRef = useRef<{ at: number; scanAt: string | null }>({ at: Date.now(), scanAt: null });
   if (IS_DEV) {
     renderAuditRef.current.count += 1;
   }
@@ -127,11 +140,17 @@ export function TradeV4Page(props: {
     const now = Date.now();
     if (now - performanceHealthAuditRef.current < 10_000) return;
     performanceHealthAuditRef.current = now;
+    if (props.model.lastScanAt && props.model.lastScanAt !== lastScanAuditRef.current.scanAt) {
+      lastScanAuditRef.current = { at: now, scanAt: props.model.lastScanAt };
+    }
     const staleOpenPositionPriceCount = props.model.openPositions.filter((p) => p.priceQuality === 'stale').length;
     const fallbackOpenPositionPriceCount = props.model.openPositions.filter((p) => p.priceQuality === 'fallback').length;
     const unavailableOpenPositionPriceCount = props.model.openPositions.filter((p) => p.priceQuality === 'unavailable').length;
-    logger.info(`UI_PERFORMANCE_HEALTH_AUDIT: graphicsQuality=${graphicsQuality} autoPerformanceMode=${autoPerformanceMode} openVisibleRows=${Math.min(props.model.openPositions.length, 25)} openTotalRows=${props.model.openPositions.length} closedVisibleRows=${Math.min(props.model.closedPositions.length, 25)} closedTotalRows=${props.model.closedPositions.length} staleOpenPositionPriceCount=${staleOpenPositionPriceCount} fallbackOpenPositionPriceCount=${fallbackOpenPositionPriceCount} unavailableOpenPositionPriceCount=${unavailableOpenPositionPriceCount}`);
-  }, [graphicsQuality, autoPerformanceMode, props.model.openPositions, props.model.closedPositions]);
+    const logsTotal = logger.getLogs().length;
+    const elapsed = Math.max(1, performance.now() - renderAuditRef.current.startedAt);
+    const avgFps = Math.min(60, Math.round((renderAuditRef.current.count / elapsed) * 1000));
+    logger.info(`UI_RUNTIME_PERFORMANCE_AUDIT: logsRendered=${Math.min(logsTotal, 200)} logsTotal=${logsTotal} scannerRowsRendered=${Math.min(props.model.candidates.length, 50)} candidatesTotal=${props.model.candidates.length} openRowsRendered=${Math.min(props.model.openPositions.length, 25)} openTotal=${props.model.openPositions.length} journalRowsRendered=${Math.min(props.model.closedPositions.length, 25)} journalTotal=${props.model.closedPositions.length} lastScanMs=${Math.max(0, now - lastScanAuditRef.current.at)} avgFps=${avgFps} graphicsQuality=${graphicsQuality} autoPerformanceMode=${autoPerformanceMode} staleOpenPositionPriceCount=${staleOpenPositionPriceCount} fallbackOpenPositionPriceCount=${fallbackOpenPositionPriceCount} unavailableOpenPositionPriceCount=${unavailableOpenPositionPriceCount}`);
+  }, [graphicsQuality, autoPerformanceMode, props.model.candidates, props.model.openPositions, props.model.closedPositions, props.model.lastScanAt]);
 
   // ── Layout version reset ──
   useEffect(() => {
@@ -263,7 +282,8 @@ export function TradeV4Page(props: {
               <TradingParametersCard
                 value={props.parameters} onChange={props.onChangeParameters}
                 scannerRunning={props.model.scannerRunning} scannerConfigDirty={props.scannerConfigDirty}
-                paperAutoEnabled={props.model.paperAutoEnabled} onApply={props.onApplySettings}
+                paperAutoEnabled={props.model.paperAutoEnabled} runtimeStatus={props.runtimeStatus}
+                onExportRuntimeDiagnostics={props.onExportRuntimeDiagnostics} onApply={props.onApplySettings}
               />
             </div>
           </div>

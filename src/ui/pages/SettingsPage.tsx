@@ -492,6 +492,61 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
           <span style={{ fontSize: 11, color: '#8b949e' }}>Auto mode only downgrades visuals after sustained low FPS.</span>
         </div>
 
+        {/* ── Time-Based Exit ─────────────────────────── */}
+        <div className="panel-section-title" style={{ marginTop: 20 }}>Time-Based Exit</div>
+        <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 8 }}>
+          Automatically close positions after a maximum holding period.
+        </div>
+        <div className="settings-row">
+          <label className="settings-label">Time-Based Exit</label>
+          <label className="toggle" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={settings.timeBasedExitEnabled}
+              onChange={(event) => setSettings((s) => ({ ...s, timeBasedExitEnabled: event.target.checked }))}
+            />
+            <span style={{ fontSize: 12 }}>{settings.timeBasedExitEnabled ? 'ON' : 'OFF'}</span>
+          </label>
+        </div>
+        {settings.timeBasedExitEnabled && (
+          <>
+            <div className="settings-row">
+              <label className="settings-label">Max Hold Hours</label>
+              <select
+                className="settings-input"
+                value={settings.defaultMaxHoldHours}
+                onChange={(event) => setSettings((s) => ({ ...s, defaultMaxHoldHours: Number(event.target.value) }))}
+              >
+                <option value={12}>12 hours</option>
+                <option value={24}>24 hours</option>
+                <option value={48}>48 hours (recommended)</option>
+                <option value={72}>72 hours</option>
+                <option value={96}>96 hours</option>
+                <option value={168}>7 days</option>
+              </select>
+            </div>
+            <div className="settings-row">
+              <label className="settings-label">Max Exits Per Cycle</label>
+              <select
+                className="settings-input"
+                value={settings.maxTimeBasedExitsPerCycle}
+                onChange={(event) => setSettings((s) => ({ ...s, maxTimeBasedExitsPerCycle: Number(event.target.value) }))}
+              >
+                <option value={1}>1 (most conservative)</option>
+                <option value={2}>2 (recommended)</option>
+                <option value={3}>3</option>
+                <option value={5}>5</option>
+              </select>
+            </div>
+          </>
+        )}
+        <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="btn btn-sm btn-green" onClick={handleSaveSettings}>
+            Save Time-Based Exit Settings
+          </button>
+          {settingsSaved && <span style={{ fontSize: 11, color: '#3fb950' }}>Saved</span>}
+        </div>
+
         {/* ── Section E: Binance Private API ───────────── */}
         <div className="panel-section-title" style={{ marginTop: 20 }}>Binance API (Private)</div>
         <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 8 }}>

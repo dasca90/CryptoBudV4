@@ -4,10 +4,14 @@ import type { TradeV4CandidateView, TradeV4NoBuyDisplay, TradeV4OpenPositionView
 import { getCoinRepresentative, getTitleSymbol } from "../../lib/ui/uiSymbolMapper";
 import { getBlockerExplanation } from "../../lib/ui/blockerExplanations";
 import { getExecutionStageDisplay, sanitizeExecutionDisplayText } from "../../lib/execution/executionDisplay";
+import { resolveFinalNoBuyReasonPriority } from "../../core/scanner/finalNoBuyReasonPriority";
 
 type Verdict = "BUY READY" | "WAIT" | "BLOCKED" | "AVOID";
 
 const BLOCKER_LABELS: Array<[RegExp, string]> = [
+  [/ENTRY_CONTRACT_INVALID|WAITING_EXECUTION_GATE|WAIT_ENTRY_CONTRACT/i, "Entry contract is not executable yet"],
+  [/WAIT_STRATEGY_NON_EXECUTABLE/i, "Wait strategy is non-executable"],
+  [/STRATEGY_HANDOFF_INTEGRITY_FAILED/i, "Strategy handoff did not produce an executable setup"],
   [/finalExecutable_false/i, "Final gate did not approve BUY"],
   [/BLOCK_CONFIDENCE_TOO_LOW|confidence_below_tier|confidence.*below.*tier|confidence.*too low/i, "Confidence is too low"],
   [/BLOCK_BREAKOUT_NOT_CONFIRMED|breakout.*not.*confirmed|ltf.*not.*confirmed/i, "LTF breakout not confirmed"],
@@ -30,7 +34,7 @@ export function getSelectedCoinVerdict(candidate: TradeV4CandidateView): Verdict
 
 export function translateBlocker(raw: string | null | undefined): string {
   const clean = sanitizeExecutionDisplayText(String(raw ?? "").trim());
-  if (!clean || /^n\/a$|^ok$|^allow$/i.test(clean)) return "";
+  if (!clean || /^n\/a$|^ok$|^allow$|^none$|^unknown_final_executable_bug$/i.test(clean)) return "";
   for (const [pattern, label] of BLOCKER_LABELS) {
     if (pattern.test(clean)) return label;
   }
@@ -72,6 +76,46 @@ export function getMlGuardExplanation(candidate: TradeV4CandidateView): string {
   return `ML Guard score is ${candidate.mlBadEntryRisk.toFixed(1)}x bad-entry risk.`;
 }
 
+export function formatStrategyLabel(value: string | null | undefined): string {
+  const raw = String(value ?? "").trim();
+  if (!raw || /^n\/a$|^none$|^unknown$/i.test(raw)) return "n/a";
+  return raw
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+export function getSelectedCoinStrategyLayers(candidate: TradeV4CandidateView): {
+  marketSetup: string;
+  runtimeMode: string;
+  finalDecision: string;
+  finalStrategy: string;
+} {
+  const audit = candidate.strategyAudit;
+  const marketSetup =
+    audit?.marketRecommendedStrategy
+    ?? audit?.dynamicSetupContext?.intendedStrategy
+    ?? candidate.groupRecommendedStrategy
+    ?? candidate.strategy;
+  const runtimeMode =
+    audit?.runtimeActiveStrategy
+    ?? audit?.strategyRequested
+    ?? candidate.effectiveStrategy
+    ?? candidate.strategy;
+  const finalStrategy =
+    audit?.finalPerCoinStrategy
+    ?? audit?.strategySelected
+    ?? candidate.strategy;
+  return {
+    marketSetup: formatStrategyLabel(marketSetup),
+    runtimeMode: formatStrategyLabel(runtimeMode),
+    finalDecision: getSelectedCoinVerdict(candidate),
+    finalStrategy: formatStrategyLabel(finalStrategy),
+  };
+}
+
 export function SelectedCoinInspector(props: {
   candidate?: TradeV4CandidateView;
   onManualBuy: (symbol: string) => void;
@@ -101,17 +145,37 @@ export function SelectedCoinInspector(props: {
   const selectedContext = useMemo(() => {
     if (!c) return null;
     const planSkip = props.executionPlan?.skippedCandidates?.find(sc => sc.symbol === c.symbol);
+    const priority = resolveFinalNoBuyReasonPriority({
+      symbol: c.symbol,
+      rawStatus: c.status,
+      displayStatus: c.lifecycleStatus ?? c.canonicalDisplayStatus?.canonicalStatus ?? c.status,
+      finalExecutable: c.finalExecutable,
+      buyAllowed: c.buyAllowed,
+      primaryBlocker: c.primaryBlocker ?? c.strategyAudit?.dynamicSetupContext?.primaryBlocker,
+      setupResult: c.strategyAudit?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult,
+      candidateWhy: c.mainReason,
+      previousFinalNoBuyReason: c.finalNoBuyReason ?? planSkip?.reason,
+      blockReasons: [...(c.blockReasons ?? []), ...(c.strategyAudit?.blockReasons ?? [])],
+      entryGateBlocker: c.gateAudit?.blocker,
+      strategyContractBlocker: c.strategyAudit?.strategyContractBlocker,
+      executionDecisionFinalNoBuyReason: c.executionDecision?.finalNoBuyReason,
+      handoffMismatch: c.handoffIntegrityStatus === 'failed' || c.strategyAudit?.handoffIntegrityStatus === 'failed',
+    });
     const rawReasons = uniqueStrings([
+      priority.actionableNoBuyReason,
+      priority.renderedUserMessage,
       c.primaryBlocker,
       c.gateAudit?.blocker,
       planSkip?.reason,
       c.mainReason,
+      c.executionDecision?.finalNoBuyReason,
       ...(c.blockReasons ?? []),
       ...(c.strategyAudit?.blockReasons ?? []),
+      ...priority.secondaryDiagnosticReasons,
       ...(c.gateAudit?.setupMissing ?? []),
       ...(c.strategyAudit?.setupMissing ?? []).map(item => item.label || item.key),
       ...(props.noBuyDisplay?.requiredNextCondition ?? []),
-    ]).filter(reason => reason && !/^n\/a$|^ok$|^allow$/i.test(reason));
+    ]).filter(reason => reason && !/^n\/a$|^ok$|^allow$|^none$/i.test(reason));
     const friendlyReasons = uniqueStrings(rawReasons.map(translateBlocker).filter(Boolean));
     return {
       verdict: getSelectedCoinVerdict(c),
@@ -121,6 +185,7 @@ export function SelectedCoinInspector(props: {
       mainReason: buildSelectedCoinMainReason(c, rawReasons),
       tpRisk: getTpRiskExplanation(c),
       mlGuard: getMlGuardExplanation(c),
+      strategyLayers: getSelectedCoinStrategyLayers(c),
     };
   }, [c, props.executionPlan, props.noBuyDisplay]);
 
@@ -173,10 +238,19 @@ export function SelectedCoinInspector(props: {
         </section>
 
         <InspectorSection title="Final Decision">
+          <div style={{ fontSize: 9, color: '#8b949e', marginBottom: 4 }}>
+            Dynamic setup: Intended {selectedContext.strategyLayers.marketSetup} / Final {selectedContext.strategyLayers.finalStrategy}
+          </div>
           <div className="selected-summary-grid">
             <Metric label="Verdict" value={selectedContext.verdict} good={selectedContext.verdict === "BUY READY"} />
-            <Metric label="Strategy" value={c.effectiveStrategy || c.strategy || "n/a"} />
+            <Metric label="Market setup" value={selectedContext.strategyLayers.marketSetup} />
+            <Metric label="Runtime mode" value={selectedContext.strategyLayers.runtimeMode} />
             <Metric label="Trend" value={c.displayTrend || c.groupTrend || "n/a"} />
+          </div>
+          <div className="selected-summary-grid" style={{ marginTop: 6 }}>
+            <Metric label="Final decision" value={selectedContext.strategyLayers.finalDecision} good={selectedContext.verdict === "BUY READY"} />
+            <Metric label="Final strategy" value={selectedContext.strategyLayers.finalStrategy} />
+            <Metric label="Entry rule" value={c.strategyAudit?.finalEntryRule ? translateBlocker(c.strategyAudit.finalEntryRule) : "n/a"} />
           </div>
           <ReadableList items={selectedContext.friendlyReasons.slice(0, 4)} fallback="No blocking reason is active." tone={selectedContext.verdict === "BUY READY" ? "good" : "warn"} />
           {selectedContext.planSkip && (

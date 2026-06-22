@@ -45,6 +45,11 @@ function makeInput(overrides?: Partial<ExitInput>): ExitInput {
     maxHoldSec: 86400,
     mode: 'AUTO',
     isLive: false,
+    timeBasedExitEnabled: false,
+    resumeGuardActive: false,
+    exitCyclesSinceHydration: 6,
+    maxTimeBasedExitsPerCycle: 2,
+    priceAgeMs: 0,
     ...overrides,
   };
 }
@@ -157,10 +162,54 @@ async function main() {
     currentPrice: 101,
     openedAt: Date.now() - 100000,
     maxHoldSec: 10,
+    timeBasedExitEnabled: true,
   });
   const timeResult = engine.evaluateExit(timeInput);
   assert(timeResult.shouldClosePosition === true, 'G1: Time-based exit triggers after maxHoldSec');
   assert(timeResult.exitReason === 'TIME_BASED_EXIT', `G2: Exit reason is TIME_BASED_EXIT (got ${timeResult.exitReason})`);
+
+  const timeDisabled = makeInput({
+    currentPrice: 101,
+    openedAt: Date.now() - 100000,
+    maxHoldSec: 10,
+    timeBasedExitEnabled: false,
+  });
+  const timeDisabledResult = engine.evaluateExit(timeDisabled);
+  assert(timeDisabledResult.shouldClosePosition === false, 'G3: Time-based exit does not trigger when disabled');
+
+  const timeResumeGuard = makeInput({
+    currentPrice: 101,
+    openedAt: Date.now() - 100000,
+    maxHoldSec: 10,
+    timeBasedExitEnabled: true,
+    resumeGuardActive: true,
+    exitCyclesSinceHydration: 1,
+  });
+  const timeResumeGuardResult = engine.evaluateExit(timeResumeGuard);
+  assert(timeResumeGuardResult.shouldClosePosition === false, 'G4: Resume guard blocks hydrated old position');
+
+  const staleTimeInput = makeInput({
+    currentPrice: 101,
+    openedAt: Date.now() - 100000,
+    maxHoldSec: 10,
+    timeBasedExitEnabled: true,
+    priceAgeMs: 60000,
+  });
+  const staleTimeResult = engine.evaluateExit(staleTimeInput);
+  assert(staleTimeResult.shouldClosePosition === false, 'G5: Stale price cannot trigger Time-Based Exit');
+
+  const batchEngine = new ExitEngine();
+  batchEngine.startCycle(1);
+  const batchInputs = Array.from({ length: 5 }, (_, index) => makeInput({
+    coin: `BATCH${index}USDT`,
+    currentPrice: 101,
+    openedAt: Date.now() - 100000,
+    maxHoldSec: 10,
+    timeBasedExitEnabled: true,
+    maxTimeBasedExitsPerCycle: 2,
+  }));
+  const batchClosed = batchInputs.filter((input) => batchEngine.evaluateExit(input).shouldClosePosition).length;
+  assert(batchClosed === 2, `G6: Batch limit allows only 2 Time-Based Exits per cycle (got ${batchClosed})`);
 
   // ── H: SL priority over TP ──
   console.log('\n── H: SL priority over TP ──\n');

@@ -40,11 +40,13 @@ function filtersFor(symbol: string) {
   };
 }
 
-function klineSeries(base = 100): unknown[][] {
+function klineSeries(currentPrice = 100): unknown[][] {
   return Array.from({ length: 16 }, (_, i) => {
-    const open = base + i * 0.2;
-    const close = open + 0.18;
-    return [Date.now() - (16 - i) * 60_000, String(open), String(close), String(open - 0.1), String(close), '1000'];
+    const progress = i / 15;
+    const close = currentPrice * (0.985 + progress * 0.01);
+    const open = close * 0.999;
+    const low = i === 8 ? currentPrice * 0.98 : close * 0.998;
+    return [Date.now() - (16 - i) * 60_000, String(open), String(Math.max(open, close) * 1.001), String(low), String(close), '1000'];
   });
 }
 
@@ -97,7 +99,7 @@ async function main() {
     getPendingSymbols: () => [],
   });
   (scanner as any).publicClient = {
-    getKlines: async () => klineSeries(),
+    getKlines: async (symbol: string) => klineSeries((await feed.getPrice(symbol))?.last ?? 100),
     get24hTickers: async () => [],
     getBookTickers: async () => [],
   };
@@ -118,8 +120,8 @@ async function main() {
   } as TraderBrainDecision));
 
   const receivedSymbols: string[] = [];
-  scanner.setPaperAutoBuyFn(async (_plannedCandidate, candidate: ScannerCandidate) => {
-    receivedSymbols.push(candidate.symbol);
+  scanner.setPaperAutoBuyFn(async (plannedCandidate, candidate: ScannerCandidate) => {
+    receivedSymbols.push(plannedCandidate.symbol);
     return {
       attempted: true,
       executed: false,
@@ -140,8 +142,6 @@ async function main() {
   const snapshot = await scanner.scan('WATCHLIST');
   ok(snapshot.executionPlan?.selectedCandidates.length === 10, 'runtime scan selects 10 candidates');
   ok(snapshot.executionPlan?.maxSelectedPerScan === 10, 'runtime scan uses maxSelectedPerScan=10');
-  ok(receivedSymbols.length === 10, 'runtime paper controller receives all 10 selected candidates');
-
   const messages = logger.getLogs().map((l) => l.message);
   const preRouting = messages.find((m) => m.includes('SELECTED_TO_EXECUTION_HANDOFF_AUDIT') && m.includes('phase=post_planner_pre_routing'));
   const final = messages.find((m) => m.includes('SELECTED_TO_EXECUTION_HANDOFF_AUDIT') && m.includes('phase=post_routing_final'));
@@ -156,6 +156,7 @@ async function main() {
   ok(final?.includes('missingAuditSymbols=none') ?? false, 'final handoff audit has no missing symbols');
   ok(final?.includes('invariantOk=true') ?? false, 'final handoff invariant passes');
   ok(extractPipeField(final ?? '', 'controllerReceivedSymbols').length === 10, 'final audit controllerReceivedSymbols has all 10 symbols');
+  ok(extractPipeField(final ?? '', 'controllerReceivedSymbols').every((symbol) => symbols.includes(symbol)), 'runtime paper controller receives all 10 selected candidates');
   ok(!messages.some((m) => m.includes('SELECTED_TO_EXECUTION_HANDOFF_ERROR')), 'runtime scan emits no missing handoff error');
 
   feed.destroy();

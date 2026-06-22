@@ -38,13 +38,18 @@ export class DiagnosticsEngine {
   private lastScannerDurationMs: number | null = null;
   private lastScalperTickDurationMs: number | null = null;
   private lastPersistenceSaveMs: number | null = null;
+  private unsubLogger: (() => void) | null = null;
 
   constructor() {
-    // Subscribe to logger to count warnings/errors
-    logger.subscribe((entry) => {
+    this.unsubLogger = logger.subscribe((entry) => {
       if (entry.level === 'WARN') this.warningCount++;
       if (entry.level === 'ERROR') this.errorCount++;
     });
+  }
+
+  destroy(): void {
+    this.unsubLogger?.();
+    this.unsubLogger = null;
   }
 
   setPositionManager(pm: PositionManager): void { this.positionManager = pm; }
@@ -59,6 +64,41 @@ export class DiagnosticsEngine {
   }
 
   getWarnings(): string[] { return [...this.warnings]; }
+
+  private getHeapMb(): number | null {
+    try {
+      const mem = (performance as any).memory;
+      if (mem && typeof mem.usedJSHeapSize === 'number') {
+        return Math.round(mem.usedJSHeapSize / (1024 * 1024) * 10) / 10;
+      }
+    } catch { /* not available */ }
+    return null;
+  }
+
+  getMemoryTelemetry(): {
+    heapMb: number | null;
+    heapLimitMb: number | null;
+    logCount: number;
+    warningCount: number;
+    errorCount: number;
+    warningsLength: number;
+  } {
+    let heapLimitMb: number | null = null;
+    try {
+      const mem = (performance as any).memory;
+      if (mem && typeof mem.jsHeapSizeLimit === 'number') {
+        heapLimitMb = Math.round(mem.jsHeapSizeLimit / (1024 * 1024));
+      }
+    } catch { /* not available */ }
+    return {
+      heapMb: this.getHeapMb(),
+      heapLimitMb,
+      logCount: logger.getStats().currentLogCount,
+      warningCount: this.warningCount,
+      errorCount: this.errorCount,
+      warningsLength: this.warnings.length,
+    };
+  }
 
   snapshot(extras?: Partial<DiagnosticsSnapshot>): DiagnosticsSnapshot {
     const stats = logger.getStats();
@@ -102,7 +142,7 @@ export class DiagnosticsEngine {
       scalperSnapshotCount: extras?.scalperSnapshotCount ?? 0,
       chartPointCount: extras?.chartPointCount ?? 0,
       marketDataCacheSize: extras?.marketDataCacheSize ?? 0,
-      memoryEstimateMb: null,
+      memoryEstimateMb: this.getHeapMb(),
       lastScannerDurationMs: this.lastScannerDurationMs,
       lastScalperTickDurationMs: this.lastScalperTickDurationMs,
       lastPersistenceSaveMs: this.lastPersistenceSaveMs,

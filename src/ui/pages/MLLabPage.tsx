@@ -22,6 +22,7 @@ interface Props {
   guardState: MlRuntimeGuardState;
   events: MlRuntimeEvent[];
   onRuntimeModeChange: (mode: MlRuntimeMode) => void;
+  onMlExitsEnabledChange: (enabled: boolean) => void;
 }
 
 type BrainStatus = 'UNTRAINED' | 'TRAINED' | 'ERROR';
@@ -30,7 +31,7 @@ const MODE_OPTIONS: { key: MlRuntimeMode; label: string; desc: string }[] = [
   { key: 'off', label: 'Off', desc: 'ML loaded but does not affect trading.' },
   { key: 'shadow_only', label: 'Shadow Only', desc: 'ML runs and records what it would do, but does not affect trading.' },
   { key: 'advisory_only', label: 'Advisory Only', desc: 'ML gives visible advice, but cannot change trading decisions.' },
-  { key: 'active_guarded', label: 'Active Guarded', desc: 'ML can downgrade entries or trigger guarded exits. ML cannot force BUY.' },
+  { key: 'active_guarded', label: 'Active Guarded', desc: 'ML can downgrade entries. ML exits require the separate ML Exit Enabled setting. ML cannot force BUY.' },
 ];
 
 const MODE_STYLE: Record<MlRuntimeMode, { bg: string; border: string; text: string }> = {
@@ -57,7 +58,7 @@ function eventRowBg(ev: MlRuntimeEvent): string {
 export function MLLabPage({
   journal, onExportML, onExportTraining, onExportAdvisory, onExportExcluded,
   equityHistory, brain, onBrainUpdate, importedRows, onImportedRowsUpdate,
-  guardState, events, onRuntimeModeChange,
+  guardState, events, onRuntimeModeChange, onMlExitsEnabledChange,
 }: Props) {
   const [, forceUpdate] = useState(0);
   const [importResult, setImportResult] = useState<string | null>(null);
@@ -220,9 +221,10 @@ export function MLLabPage({
   const badImported = importedRows.filter(r => r.dataQuality === 'BAD').length;
 
   const recentEvents = events.slice(-25).reverse();
-  const { mode, brainLoaded, modelTrained, counters } = guardState;
+  const { mode, brainLoaded, modelTrained, counters, mlExitsEnabled } = guardState;
   const modeStyle = MODE_STYLE[mode] ?? MODE_STYLE.shadow_only;
   const isSafe = mode !== 'active_guarded';
+  const canTriggerSell = mode === 'active_guarded' && mlExitsEnabled;
 
   const modeLabel = MODE_OPTIONS.find(o => o.key === mode)?.label ?? 'Shadow Only';
 
@@ -413,6 +415,18 @@ export function MLLabPage({
           <div style={{ fontSize: 10, color: '#8b949e', marginTop: 4 }}>
             {MODE_OPTIONS.find(o => o.key === mode)?.desc}
           </div>
+          <label className="ml-safety-item" style={{ marginTop: 8, cursor: 'pointer' }}>
+            <span className="ml-safety-label">ML Exit Enabled</span>
+            <input
+              type="checkbox"
+              checked={mlExitsEnabled}
+              onChange={(event) => onMlExitsEnabledChange(event.currentTarget.checked)}
+              aria-label="Enable ML guarded exits"
+            />
+          </label>
+          <div style={{ fontSize: 10, color: mlExitsEnabled ? '#d29922' : '#3fb950', marginTop: 4 }}>
+            {mlExitsEnabled ? 'ML exit permission is ON, but only Active Guard can use it.' : 'ML exit permission is OFF. ML cannot trigger SELL.'}
+          </div>
         </div>
 
         {/* ── TWO-COLUMN: SAFETY + DECISIONS ── */}
@@ -454,8 +468,8 @@ export function MLLabPage({
               </div>
               <div className="ml-safety-item">
                 <span className="ml-safety-label">Can Trigger SELL</span>
-                <span className="ml-safety-value" style={{ color: !isSafe ? '#f85149' : '#3fb950' }}>
-                  {!isSafe ? 'YES' : 'NO'}
+                <span className="ml-safety-value" style={{ color: canTriggerSell ? '#f85149' : '#3fb950' }}>
+                  {canTriggerSell ? 'YES' : 'NO'}
                 </span>
               </div>
               <div className="ml-safety-item">

@@ -159,7 +159,7 @@ export function reduceScannerCoinLifecycle(
           enteredAtMs: prev?.state === "floating" ? prev.enteredAtMs : input.nowMs,
           lastReason: "execution_failed_or_blocked_no_position",
         });
-        logger.info(`AIR_SCANNER_STATE_RECONCILIATION_AUDIT: symbol=${symbol} visualStateBefore=${prevState} visualStateAfter=floating candidateStatus=${candidate.status ?? 'n/a'} finalExecutable=${String(candidate.finalExecutable ?? 'n/a')} buyAllowed=${String(candidate.buyAllowed ?? 'n/a')} executionSubmitted=${String(exec?.stage !== 'ExecutionFailed')} adapterCalled=${String(exec?.adapterCalled ?? false)} positionOpen=false finalNoBuyReason=${exec?.reason ?? 'execution_failed'} ageMs=${prev ? (input.nowMs - prev.enteredAtMs) : 0} actionTaken=release_from_buy_hold`);
+        logger.info(`AIR_SCANNER_STATE_RECONCILIATION_AUDIT: symbol=${symbol} visualStateBefore=${prevState} visualStateAfter=floating candidateStatus=${candidate.status ?? 'n/a'} finalExecutable=${String(candidate.finalExecutable ?? 'n/a')} buyAllowed=${String(candidate.buyAllowed ?? 'n/a')} submitAttempted=${String(exec?.stage !== 'ExecutionFailed')} adapterCalled=${String(exec?.adapterCalled ?? false)} positionOpen=false finalNoBuyReason=${exec?.reason ?? 'execution_failed'} ageMs=${prev ? (input.nowMs - prev.enteredAtMs) : 0} actionTaken=release_from_buy_hold`);
       } else {
         next.delete(symbol);
       }

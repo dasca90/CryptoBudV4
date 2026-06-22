@@ -7,12 +7,14 @@ import { BUY_TRANSFER_HERO_POSITION, MAX_RENDERED_COINS, QUALITY_PARTICLE_BUDGET
 import { mockScannerCoins } from '../state/mockScannerFeed';
 import { mapMockCoinToVisualState } from '../utils/visualStateMapper';
 import { BUY_PULL_DURATION_MS, acquireBuyLightningLock, createAnimationId, getBlockedPushFrame, getBuyPullProgress, getQualityParticleMultiplier, releaseBuyLightningLock } from '../utils/animationTimelines';
+import { buildAirScannerMemoryAuditSnapshot, formatAirScannerMemoryAudit, recordAirScannerCleanup } from '../utils/airScannerMemoryAudit';
 import { CoinOrb } from './CoinOrb';
-import { CoreEnergy, getScanPulseFrame } from './CoreEnergy';
+import { CoreEnergy } from './CoreEnergy';
 import { HolographicGrid } from './HolographicGrid';
 import { ParticleTrail } from './ParticleTrail';
 import { AmbientScannerParticles } from './AmbientScannerParticles';
 import { LightningArc } from './LightningArc';
+import { VolumetricScanPulse, getPulseDrawCallEstimate, getScanImpactColor, getVolumetricScanPulseFrame, updateSpherePulseImpacts, type SpherePulseImpact } from './VolumetricScanPulse';
 
 interface ScannerSceneProps {
   visualState: CoinVisualState;
@@ -34,6 +36,7 @@ interface CoinFrame {
   opacity: number;
   transferProgress?: number;
   scanPulseIntensity?: number;
+  scanImpact?: SpherePulseImpact;
   focused?: boolean;
 }
 
@@ -57,6 +60,7 @@ const COLLISION_BUCKET_SIZE = 2.25;
 const SCREEN_BUCKET_SIZE = 0.32;
 const BUY_TRANSFER_VISIBLE_OPACITY_MIN = 0.9;
 const IS_DEV = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV);
+export const FOCUSED_COIN_FRONT_POSITION: Vector3Tuple = [0, 1.18, 5.2];
 
 export interface SpatialCollisionPoint {
   x: number;
@@ -264,7 +268,7 @@ function hashSymbol(symbol: string): number {
 }
 
 function enforceCenterKeepOut(frame: CoinFrame): CoinFrame {
-  if (frame.state === 'buy_pull_to_core') return frame;
+  if (frame.state === 'buy_pull_to_core' || frame.focused === true) return frame;
   const radialDistance = Math.hypot(frame.position[0], frame.position[2]);
   if (radialDistance >= CENTER_KEEP_OUT_RADIUS) return frame;
   const angle = radialDistance > 0.0001 ? Math.atan2(frame.position[2], frame.position[0]) : hashSymbol(frame.coin.symbol) * 0.917;
@@ -336,7 +340,7 @@ function getSceneCoinState(params: {
 }
 
 export function ScannerScene({ visualState, quality, toggles, lifecycleId, coins = mockScannerCoins, transferSymbol, onDebugUpdate, onOpenPositionConfirmed, onTransferSourceUpdate, onCoinSelect }: ScannerSceneProps) {
-  const { camera, size } = useThree();
+  const { camera, gl, scene, size } = useThree();
   const qualityConfig = getGraphicsQualityConfig(quality);
   const renderedCoins = useMemo(() => coins.slice(0, MAX_RENDERED_COINS), [coins]);
   const activeTransferSymbol = transferSymbol
@@ -364,8 +368,17 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, coins
   const sourceProjectRef = useRef(0);
   const frameStateUpdateRef = useRef(0);
   const velocityRef = useRef<Map<string, OrbVelocity>>(new Map());
+  const scanImpactRef = useRef<Map<string, SpherePulseImpact>>(new Map());
+  const pulseHitCountRef = useRef<Map<number, number>>(new Map());
+  const activeImpactCountRef = useRef(0);
+  const fpsEstimateRef = useRef<number | undefined>(undefined);
+  const latestTransferRef = useRef({ symbol: activeTransferSymbol, lifecycleId });
   const [coinFrames, setCoinFrames] = useState<CoinFrame[]>([]);
   const particleCount = Math.round(QUALITY_PARTICLE_BUDGET[qualityConfig.quality] * qualityConfig.particleMultiplier);
+
+  useEffect(() => {
+    latestTransferRef.current = { symbol: activeTransferSymbol, lifecycleId };
+  }, [activeTransferSymbol, lifecycleId]);
 
   useEffect(() => {
     const previousState = animationIdRef.current ? visualState : 'initial';
@@ -403,13 +416,36 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, coins
     };
   }, [activeTransferSymbol, blockedSymbol, lifecycleId, renderedCoins, toggles.buyLightning, visualState]);
 
+  useEffect(() => {
+    return () => {
+      const latest = latestTransferRef.current;
+      releaseBuyLightningLock(latest.symbol, String(latest.lifecycleId));
+      lightningLockedRef.current = false;
+      velocityRef.current.clear();
+      scanImpactRef.current.clear();
+      pulseHitCountRef.current.clear();
+      activeImpactCountRef.current = 0;
+      onTransferSourceUpdate(null);
+      recordAirScannerCleanup();
+      if (IS_DEV) {
+        console.info(formatAirScannerMemoryAudit(buildAirScannerMemoryAuditSnapshot({
+          root: scene,
+          renderer: gl,
+          lightningEffectCount: 0,
+          pulseImpactCount: 0,
+          rafActive: false,
+        })));
+      }
+    };
+  }, [gl, onTransferSourceUpdate, scene]);
+
   useFrame((stateFrame) => {
     if (hiddenRef.current) return;
     const now = performance.now();
     const frameStart = performance.now();
     const elapsed = now - startTimeRef.current;
     const collisionMetrics = { collisionChecks: 0 };
-    const scanFrame = getScanPulseFrame(stateFrame.clock.elapsedTime);
+    const scanFrame = getVolumetricScanPulseFrame(stateFrame.clock.elapsedTime, visualState === 'scanning');
     const baseFrames = renderedCoins.map((coin, index) => {
       const state = getSceneCoinState({ coin, selectedState: visualState, transferSymbol: activeTransferSymbol, waitSymbol, blockedSymbol });
       let position = coin.position;
@@ -431,6 +467,9 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, coins
         }
       } else if (visualState === 'buy_pull_to_core') {
         position = getBuyTransferClearancePosition(position, index);
+      }
+      if (state !== 'buy_pull_to_core' && coin.isFocused === true) {
+        position = FOCUSED_COIN_FRONT_POSITION;
       }
       if (state !== 'buy_pull_to_core' && state !== 'blocked_push_out' && coin.isFocused !== true) {
         position = getRoamingCoinPosition(position, coin, index, stateFrame.clock.elapsedTime);
@@ -458,7 +497,33 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, coins
         focused: coin.isFocused === true && state !== 'buy_pull_to_core',
       };
     });
-    const collisionResolvedFrames = resolveOrbCollisions(baseFrames, velocityRef.current, collisionMetrics);
+    const impactResult = updateSpherePulseImpacts({
+      frames: baseFrames.map((frame) => ({
+        symbol: frame.coin.symbol,
+        state: frame.state,
+        position: frame.position,
+        opacity: frame.opacity,
+      })),
+      pulse: scanFrame,
+      previous: scanImpactRef.current,
+      nowMs: now,
+    });
+    scanImpactRef.current = impactResult.impacts;
+    activeImpactCountRef.current = impactResult.activeImpactCount;
+    if (impactResult.hitCount > 0) {
+      pulseHitCountRef.current.set(scanFrame.pulseId, (pulseHitCountRef.current.get(scanFrame.pulseId) ?? 0) + impactResult.hitCount);
+    }
+    const impactedFrames = baseFrames.map((frame) => {
+      const impact = impactResult.impacts.get(frame.coin.symbol);
+      return impact
+        ? {
+            ...frame,
+            scanImpact: impact,
+            scanPulseIntensity: Math.max(frame.scanPulseIntensity ?? 0, impact.intensity * 1.12),
+          }
+        : frame;
+    });
+    const collisionResolvedFrames = resolveOrbCollisions(impactedFrames, velocityRef.current, collisionMetrics);
     const projectedResolvedFrames = resolveProjectedOverlaps(collisionResolvedFrames, camera, collisionMetrics);
     const nextFrames = projectedResolvedFrames.map(enforceCenterKeepOut);
     if (now - frameStateUpdateRef.current > 33 || coinFrames.length === 0) {
@@ -482,6 +547,7 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, coins
     const fpsElapsed = now - fpsStartedRef.current;
     if (fpsElapsed > 600) {
       const fpsEstimate = Math.round((framesRef.current / fpsElapsed) * 1000);
+      fpsEstimateRef.current = fpsEstimate;
       const avgFrameTimeMs = frameTimeTotalRef.current / Math.max(1, framesRef.current);
       const drawCallEstimate = nextFrames.filter((frame) => frame.opacity > 0.04).length * (qualityConfig.glowLayerScale > 0.7 ? 4 : 3)
         + (toggles.particles && (visualState === 'buy_pull_to_core' || visualState === 'blocked_push_out') ? 1 + blockedCoinFrames.length : 0)
@@ -511,6 +577,13 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, coins
         console.info('GRAPHICS_PERFORMANCE_AUDIT', debug);
         console.info(`THREE_D_RENDER_LOOP_AUDIT: fps=${fpsEstimate} avgFrameTimeMs=${avgFrameTimeMs.toFixed(2)} renderedCoins=${nextFrames.length} quality=${qualityConfig.quality}`);
         console.info(`GRAPHICS_EFFECT_COST_AUDIT: particles=${activeParticles} drawCallEstimate=${drawCallEstimate} collisionChecks=${collisionMetrics.collisionChecks} bloom=${String(qualityConfig.bloom && toggles.bloom)} dpr=${QUALITY_DPR[qualityConfig.quality].join('-')}`);
+        console.info(formatAirScannerMemoryAudit(buildAirScannerMemoryAuditSnapshot({
+          root: scene,
+          renderer: gl,
+          lightningEffectCount: activeLightningEffects,
+          pulseImpactCount: activeImpactCountRef.current,
+          rafActive: !hiddenRef.current,
+        })));
         if (fpsEstimate < 45 && qualityConfig.quality !== 'low') {
           console.info(`PERFORMANCE_MODE_RECOMMENDATION: current=${qualityConfig.quality} recommended=low reason=fps_below_45`);
         }
@@ -540,8 +613,19 @@ export function ScannerScene({ visualState, quality, toggles, lifecycleId, coins
       {toggles.particles && <AmbientScannerParticles count={qualityConfig.ambientParticleCount} />}
       {toggles.backgroundGrid && <HolographicGrid />}
       <CoreEnergy successPulse={successPulse} scanningPulse={visualState === 'scanning'} />
+      <VolumetricScanPulse
+        active={visualState === 'scanning'}
+        quality={qualityConfig.quality}
+        fpsEstimate={fpsEstimateRef.current}
+        onPulseAudit={(audit) => {
+          const sphereHitCount = pulseHitCountRef.current.get(audit.scanCycleId) ?? 0;
+          const estimatedDrawCalls = getPulseDrawCallEstimate(audit.pulseMode, activeImpactCountRef.current);
+          console.info(`SCANNER_PULSE_VISUAL_AUDIT scanCycleId=${audit.scanCycleId} graphicsQuality=${audit.graphicsQuality} pulseMode=${audit.pulseMode} pulseDurationMs=${audit.pulseDurationMs} sphereHitCount=${sphereHitCount} activeImpactCount=${activeImpactCountRef.current} estimatedDrawCalls=${estimatedDrawCalls} avgPulseFrameCostMs=n/a degradedForPerformance=${String(audit.degradedForPerformance)}`);
+          pulseHitCountRef.current.delete(audit.scanCycleId);
+        }}
+      />
       {coinFrames.filter((frame) => frame.opacity > 0.04).map((frame) => (
-        <CoinOrb key={frame.coin.symbol} coin={frame.coin} visualState={frame.state} position={frame.position} opacity={frame.opacity} transferProgress={frame.transferProgress} scanPulseIntensity={frame.scanPulseIntensity} realisticMaterials={toggles.realisticMaterials} glowLayerScale={qualityConfig.glowLayerScale} cheapMaterial={qualityConfig.useCheapOrbMaterial} onSelect={onCoinSelect} />
+        <CoinOrb key={frame.coin.symbol} coin={frame.coin} visualState={frame.state} position={frame.position} opacity={frame.opacity} transferProgress={frame.transferProgress} scanPulseIntensity={frame.scanPulseIntensity} scanImpactIntensity={frame.scanImpact?.intensity ?? 0} scanImpactColor={frame.scanImpact ? getScanImpactColor(frame.scanImpact.impactState) : undefined} realisticMaterials={toggles.realisticMaterials} glowLayerScale={qualityConfig.glowLayerScale} cheapMaterial={qualityConfig.useCheapOrbMaterial} onSelect={onCoinSelect} />
       ))}
       {buyCoinFrame && visualState === 'buy_pull_to_core' && (
         <ParticleTrail

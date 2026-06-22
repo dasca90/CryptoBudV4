@@ -23,7 +23,7 @@ ok(autoRuntimeSrc.includes('private scanner: MarketScanner;'), 'AutoRuntime hold
 ok(autoRuntimeSrc.includes('getScanner(): MarketScanner { return this.scanner; }'), 'getScanner returns the same singleton');
 
 // 3. Scanner boot wiring applies from persisted settings
-ok(appSrc.includes('scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? false)'), 'boot wiring applies paperAutoExecutionEnabled to scanner runtime');
+ok(appSrc.includes('scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? true)'), 'boot wiring applies paperAutoExecutionEnabled to scanner runtime with fresh-install AutoBots ON default');
 ok(appSrc.includes('APP_SCANNER_WIRING_AUDIT'), 'boot wiring audits the scanner instance and callback state');
 
 // 4. Start handler preserves live state over stale persisted settings

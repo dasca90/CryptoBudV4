@@ -8,6 +8,7 @@ import { useReducedMotion } from "../../hooks/useReducedMotion";
 import { AirCoinNode } from "./AirCoin";
 import { getVisualToken, getAllVisualTokens } from "../../lib/air-scanner/scannerVisualStateTheme";
 import { logger } from "../../utils/logger";
+import { getMemoryPressureState } from "../../core/diagnostics/memoryLifecycle";
 import "./air-scanner.css";
 
 const IS_DEV = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV);
@@ -49,7 +50,15 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
 
   useEffect(() => {
     logger.info(`AIR_SCANNER_MOUNT_LIFECYCLE_AUDIT: event=mounted reason=initial_render layoutMode=${typeof (props as any).scannerMode !== 'undefined' ? String((props as any).scannerMode) : 'n/a'} candidateCount=${props.candidates.length} visualBallCount=0`);
-    return () => logger.info(`AIR_SCANNER_MOUNT_LIFECYCLE_AUDIT: event=unmounted reason=component_unmount candidateCount=${props.candidates.length} visualBallCount=${mappedCoins?.length ?? 0}`);
+    return () => {
+      const coinRefCount = coinRefs.current.size;
+      const coinStateCount = coinsRef.current.size;
+      coinRefs.current.clear();
+      coinsRef.current.clear();
+      lastStateRef.current.clear();
+      logger.info(`AIR_SCANNER_MEMORY_AUDIT objectCount=0 coinRefCountBeforeCleanup=${coinRefCount} coinStateCountBeforeCleanup=${coinStateCount} lightningEffectCount=0 particleCount=0 sceneChildrenCount=0 rafActive=false cleanup=component_unmount`);
+      logger.info(`AIR_SCANNER_MOUNT_LIFECYCLE_AUDIT: event=unmounted reason=component_unmount candidateCount=${props.candidates.length} visualBallCount=${mappedCoins?.length ?? 0}`);
+    };
   }, []);
 
   useEffect(() => {
@@ -104,6 +113,10 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
 
   useRafLoop(props.active && !reducedMotion && documentVisible, (nowMs) => {
     if (hiddenRef.current) return;
+    if (getMemoryPressureState().active) {
+      logger.throttled("WARN", "AIR_SCANNER_EFFECTS_PAUSED_MEMORY_PRESSURE: tradingLogicStopped=false pausedEffects=dom_coin_motion|lightning_tethers", "air-scanner-memory-pressure-pause", 30000);
+      return;
+    }
     const start = performance.now();
     coinsRef.current.forEach((coin, symbol) => {
       const next = updateAirCoinMotion(coin, nowMs);
@@ -122,27 +135,24 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
         node.style.removeProperty("--pull-tether-angle");
       }
 
-      const centerDistance = Math.hypot(next.x, next.y);
-      const suppressCenterCoreDot = (
+      const depth = Math.max(0.45, Math.min(1.35, (next.z + 420) / 620));
+      const pullProgress = next.engineState === "pull_to_center" ? Math.max(0, Math.min(1, next.pullProgress ?? 0)) : 0;
+      const isTransferCoin = (
         next.engineState === "locked_for_buy"
         || next.engineState === "execution_submitted"
         || next.engineState === "position_opened_hold"
-      ) && centerDistance < 42;
-      node.dataset.centerCoreDotSuppressed = suppressCenterCoreDot ? "true" : "false";
-
-      const depth = Math.max(0.45, Math.min(1.35, (next.z + 420) / 620));
-      const pullProgress = next.engineState === "pull_to_center" ? Math.max(0, Math.min(1, next.pullProgress ?? 0)) : 0;
-      const pullFade = Math.max(0, 1 - pullProgress);
-      const opacity = next.engineState === "pull_to_center"
-        ? Math.max(0, Math.min(1, depth) * pullFade)
+        || next.engineState === "pull_to_center"
+      );
+      const opacity = isTransferCoin
+        ? 1
         : Math.max(0.05, Math.min(1, (next.z + 360) / 520));
       const scale = next.engineState === "pull_to_center"
         ? Math.max(0.22, depth * (1.24 - pullProgress * 0.78))
         : Math.max(0.12, depth);
       node.style.transform = `translate3d(${next.x}px, ${next.y}px, ${next.z}px) scale(${scale})`;
       node.style.opacity = String(opacity);
-      node.style.filter = next.engineState === "pull_to_center"
-        ? `blur(${Math.max(0, pullProgress * 1.8)}px) saturate(${Math.max(1, 1.35 - pullProgress * 0.35)})`
+      node.style.filter = isTransferCoin
+        ? "blur(0px) brightness(1.18) saturate(1.28)"
         : `blur(${Math.max(0, 1.2 - depth)}px)`;
     });
     const ms = performance.now() - start;
@@ -156,9 +166,10 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
         else if (coin.engineState === 'position_opened_hold') positionOpen++;
         else if (coin.engineState === 'rejected') blocked++;
       });
-      logger.info(`SCANNER_3D_VISUAL_STATE_AUDIT: totalCoinsRendered=${coinsRef.current.size} buyReadyVisualCount=${buyReady} pullingToCoreCount=${pulling} openedPositionVisualCount=${positionOpen} blockedVisualCount=${blocked} maxScannerCoinsRendered=24 graphicsQuality=medium fpsEstimate=n/a particleCount=0 activeLightningEffects=${buyReady + pulling} animationLocksCount=0`);
-      logger.info(`SCANNER_3D_PERFORMANCE_AUDIT: fpsEstimate=n/a frameTimeMs=n/a totalMeshes=${coinsRef.current.size} totalMaterials=1 totalParticles=0 activeAnimations=${buyReady + pulling} memoryWarning=false graphicsQuality=medium degradationApplied=false`);
-      logger.info(`AIR_SCANNER_ANIMATION_LOOP_AUDIT: animationLoopActive=true frameCount=${frameCountRef.current} candidateCount=${coinsRef.current.size} movingBallCount=${moving} frozenBallCount=${frozen}`);
+      logger.throttled("INFO", `SCANNER_3D_VISUAL_STATE_AUDIT: totalCoinsRendered=${coinsRef.current.size} buyReadyVisualCount=${buyReady} pullingToCoreCount=${pulling} openedPositionVisualCount=${positionOpen} blockedVisualCount=${blocked} maxScannerCoinsRendered=24 graphicsQuality=medium fpsEstimate=n/a particleCount=0 activeLightningEffects=${buyReady + pulling} animationLocksCount=0`, "scanner-3d-visual-state", 30000);
+      logger.throttled("INFO", `SCANNER_3D_PERFORMANCE_AUDIT: fpsEstimate=n/a frameTimeMs=n/a totalMeshes=${coinsRef.current.size} totalMaterials=1 totalParticles=0 activeAnimations=${buyReady + pulling} memoryWarning=${String(getMemoryPressureState().active)} graphicsQuality=medium degradationApplied=${String(getMemoryPressureState().active)}`, "scanner-3d-performance", 30000);
+      logger.throttled("INFO", `AIR_SCANNER_ANIMATION_LOOP_AUDIT: animationLoopActive=true frameCount=${frameCountRef.current} candidateCount=${coinsRef.current.size} movingBallCount=${moving} frozenBallCount=${frozen}`, "air-scanner-animation-loop", 30000);
+      logger.throttled("INFO", `AIR_SCANNER_MEMORY_AUDIT objectCount=${coinsRef.current.size} coinRefCount=${coinRefs.current.size} coinStateCount=${coinsRef.current.size} lightningEffectCount=${buyReady + pulling} particleCount=0 sceneChildrenCount=${coinsRef.current.size} rafActive=true cleanup=not_required`, "air-scanner-memory-audit", 30000);
     }
     if (ms > 12) logger.throttled("WARN", `AIR_SCANNER_PERF_DEGRADED: frame=${ms.toFixed(2)}ms`, "air-scanner-perf", 5000);
   });

@@ -24,6 +24,13 @@ import { buildExecutionPlan } from '../core/scanner/ExecutionPlanner';
 import { buildExecutionModeParityAudit, getExecutionAdapterDisplay, sanitizeExecutionDisplayText } from '../lib/execution/executionDisplay';
 import { validateStrategyContract } from '../core/strategy-audit/strategy-contracts';
 import type { EntryGateOutput, ScannerCandidate, ScannerSnapshot } from '../core/types';
+import { resolveAutoBotsRuntimeState } from '../core/runtime/autobots-state';
+import { resolveAutoBotsFinalStrategy } from '../core/scanner/AutoStrategyRouter';
+import {
+  buildCandidateExecutionPrecheckSnapshot,
+  buildCandidateRuntimeSnapshot,
+  buildCandidateStrategyDecisionSnapshot,
+} from '../core/scanner/CandidateLifecycle';
 
 let passed = 0;
 let failed = 0;
@@ -164,16 +171,18 @@ async function main() {
   console.log('\n── Test 6: Exit parity — same ExitEngine decision for demo/live ──\n');
 
   const exitEngine = new ExitEngine();
-  const exitInput = {
+  const exitInput: ExitInput = {
     coin: 'BTCUSDT', entryPrice: 100, quantity: 1, currentPrice: 97,
     bidPrice: 96.9, askPrice: 97.1, lastPrice: 97, priceTimestamp: Date.now(),
     openedAt: Date.now() - 120000, highestPrice: 105, highestPriceSinceTp: 101,
     tpArmed: true, tp1Hit: false, tp2Hit: false, stopLossPercent: 2,
     tp1Percent: 3, tp2Percent: 6, trailFromPeakPercent: 1, maxHoldSec: 86400,
-    mode: 'AUTO' as const, isLive: false,
+    mode: 'AUTO', isLive: false,
+    timeBasedExitEnabled: false, resumeGuardActive: false,
+    exitCyclesSinceHydration: 6, maxTimeBasedExitsPerCycle: 2, priceAgeMs: 0,
   };
   const demoExit = exitEngine.evaluateExit(exitInput);
-  const liveExit = exitEngine.evaluateExit({ ...exitInput, isLive: true } as ExitInput);
+  const liveExit = exitEngine.evaluateExit({ ...exitInput, isLive: true });
   assertEqual(demoExit.shouldClosePosition, liveExit.shouldClosePosition, 'Exit decision parity: shouldClosePosition matches');
   assertEqual(demoExit.exitReason, liveExit.exitReason, 'Exit decision parity: exitReason matches');
 
@@ -229,12 +238,71 @@ async function main() {
       timestamp: new Date().toISOString(), source: 'entry_gate_canonical',
     },
   });
-  const makeCandidate = (symbol: string): ScannerCandidate => ({
-    candidateId: symbol, symbol, createdAt: '', updatedAt: '', mode: 'AUTO', riskGroup: 'mid_caps', selectedStrategy: 'momentum',
-    selectedPlaybook: null, confidence: 0.8, status: 'BUY', traderBrainDecision: { entryPlan: { side: 'BUY', price: 10, quantity: 1, reason: 'test' } } as any,
-    entryGateDecision: gateAllow(), mainReason: 'ok', requiredNextActions: [], blockReasons: [], warnings: [], price: 10, priceAgeMs: 100, spreadPct: 0.1,
-    volumeRel: 1, tpRoomOk: true, reboundConfirmed: true, momentumConfirmed: true,     dipPercent: 0, reboundPercent: 1.2, m5Change: 0, m15Change: 0, h1Change: 0, change24h: 0, mlBadEntryRisk: false, mlWinProbability: 0.8, bookFresh: true,
+  const parityRuntime = resolveAutoBotsRuntimeState({
+    executionMode: 'paper_simulated',
+    buildMode: 'dev',
+    tauriDetected: false,
+    uiAutoBotsOn: true,
+    strategySource: 'autobots',
+    scannerAutoEnabled: true,
+    paperAutoExecutionEnabled: true,
+    marketScannerPaperAutoEnabled: true,
+    paperAutoBuyFnPresent: true,
   });
+  const makeCandidate = (symbol: string): ScannerCandidate => {
+    const runtimeSnapshot = buildCandidateRuntimeSnapshot({ scanId: 'demo-live-parity', runtimeState: parityRuntime });
+    const baseCandidate: ScannerCandidate = {
+      candidateId: symbol, symbol, createdAt: '', updatedAt: '', mode: 'AUTO', riskGroup: 'mid_caps', selectedStrategy: 'momentum',
+      selectedPlaybook: null, confidence: 0.8, status: 'BUY', traderBrainDecision: { entryPlan: { side: 'BUY', price: 10, quantity: 1, reason: 'test' } } as any,
+      entryGateDecision: gateAllow(), mainReason: 'ok', requiredNextActions: [], blockReasons: [], warnings: [], price: 10, priceAgeMs: 100, spreadPct: 0.1,
+      volumeRel: 1, tpRoomOk: true, reboundConfirmed: true, momentumConfirmed: true, dipPercent: 0, reboundPercent: 1.2, m5Change: 0.7, m15Change: 0.5, h1Change: 0.4, change24h: 0, mlBadEntryRisk: false, mlWinProbability: 0.8, bookFresh: true, priceFresh: true,
+      runtimeSnapshot,
+      autoBotsRuntimeState: parityRuntime,
+      autoStrategyDecision: {
+        symbol,
+        effectiveStrategy: 'momentum',
+        strategySource: 'AutoBots',
+        strategySourceDetail: 'per_coin_selector',
+        strategyReason: 'parity fixture',
+        groupRecommendedStrategy: 'momentum',
+        groupTrend: 'sideways',
+        referencePeriod: '1h',
+        confidenceTier: 'A_80_PLUS',
+        confidenceAdjustment: 0,
+        blockedByGroupRegime: false,
+        blockedBySafety: false,
+        reason: 'parity fixture',
+        warnings: [],
+        marketAnalyzerBestFit: 'momentum',
+        perCoinSelectedStrategy: 'momentum',
+      } as any,
+      groupRecommendedStrategy: 'momentum',
+      marketAnalyzerBestFit: 'momentum',
+      perCoinSelectedStrategy: 'momentum',
+      effectiveStrategy: 'momentum',
+      professionalGateMode: 'advisory',
+      professionalAnalysis: { professionalScore: 80, professionalVerdict: 'WAIT', professionalReasons: [], professionalBlockers: [] } as any,
+    };
+    const resolution = resolveAutoBotsFinalStrategy(baseCandidate as any, { marketBestFit: 'momentum' }, { groupRecommendedStrategy: 'momentum', groupTrend: 'sideways' }, {
+      autoBotsOn: parityRuntime.resolvedAutoBotsEnabled,
+      dynamicPerCoinStrategy: parityRuntime.dynamicPerCoinStrategy,
+      userSelectedRuntimeStrategy: 'momentum',
+      manualOverrideActive: false,
+    });
+    const strategyDecision = buildCandidateStrategyDecisionSnapshot({ scanId: 'demo-live-parity', candidate: baseCandidate, resolution });
+    const executionPrecheckSnapshot = buildCandidateExecutionPrecheckSnapshot({
+      candidate: baseCandidate,
+      priceFresh: true,
+      bookFresh: true,
+      spreadOk: true,
+      tpRoomOk: true,
+      riskGroupResolved: true,
+      professionalGateResolved: true,
+      entryContractResolved: true,
+      entryContractValid: true,
+    });
+    return { ...baseCandidate, strategyDecision, executionPrecheckSnapshot };
+  };
   const parityCandidate = makeCandidate('ETHUSDT');
   const scannerSnapshot: ScannerSnapshot = { scanId: 'demo-live-parity', startedAt: '', finishedAt: '', status: 'COOLDOWN', universeMode: 'TOP_50', universeSize: 1, scannedCount: 1, candidateCount: 1, buyCount: 1, waitCount: 0, blockCount: 0, avoidCount: 0, candidates: [parityCandidate], summary: '', diagnostics: {} as any };
   const basePlanInput = { scannerSnapshot, executionPool: [parityCandidate], watchPool: [], nearMissPool: [], openSymbols: [], pendingOrderSymbols: [], capital: 1000, usedCapital: 0, maxPositions: 10, maxEntriesPerCycle: 1, capitalPerTrade: 100, maxSpreadPct: 0.35, decisionMode: 'unified' as const, enabledRiskGroups: { mid_caps: true } };
@@ -339,10 +407,15 @@ async function main() {
   console.log(`  Results: ${passed} passed, ${failed} failed`);
   console.log('══════════════════════════════════════════════\n');
 
-  process.exit(failed > 0 ? 1 : 0);
+  await demoAdapter.disconnect();
+  await liveAdapter.disconnect();
+  await readyAdapter.disconnect();
+  feed.destroy();
+
+  process.exitCode = failed > 0 ? 1 : 0;
 }
 
 main().catch(e => {
   console.error('Test runner error:', e);
-  process.exit(1);
+  process.exitCode = 1;
 });

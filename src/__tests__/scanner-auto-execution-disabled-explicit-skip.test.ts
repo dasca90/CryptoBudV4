@@ -6,6 +6,7 @@ let failed = 0;
 const ok = (cond: boolean, label: string) => cond ? passed++ : (failed++, console.error(`FAIL: ${label}`));
 
 const scannerSrc = readFileSync(path.resolve(process.cwd(), 'src/core/scanner/MarketScanner.ts'), 'utf8');
+const autoBotsStateSrc = readFileSync(path.resolve(process.cwd(), 'src/core/runtime/autobots-state.ts'), 'utf8');
 const appSrc = readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
 
 // 1. Explicit auto_execution_disabled skip audit
@@ -24,11 +25,12 @@ ok(scannerSrc.includes("!this.paperAutoEnabled"), 'auto disabled check exists in
 ok(scannerSrc.includes('Demo execution disabled'), 'explicit blocker name for disabled auto');
 ok(scannerSrc.includes('paper_auto_buy_fn_missing'), 'explicit blocker when buy fn missing');
 
-// 4. Gate audit shows skipReason=auto_execution_disabled
-ok(scannerSrc.includes("skipReasonGate = !this.paperAutoEnabled ? 'auto_execution_disabled'"), 'phase gate computes skipReason=auto_execution_disabled when auto disabled');
+// 4. Gate audit shows canonical skip reason while explicit skip audit keeps auto_execution_disabled detail
+ok(scannerSrc.includes("skipReasonGate = canonicalState.finalBlockedReason !== 'none'"), 'phase gate computes skipReason from canonical auto execution state');
+ok(scannerSrc.includes("reason=auto_execution_disabled"), 'explicit skipped audit keeps reason=auto_execution_disabled detail');
 
 // 5. Scanner AUTO_EXECUTION_GATE_AUDIT also shows skip
-ok(scannerSrc.includes("skipReason = !this.paperAutoEnabled ? 'paper_auto_execution_disabled'"), 'entry gate computes skipReason=paper_auto_execution_disabled when auto disabled');
+ok(scannerSrc.includes('skipReason=${canonicalState.finalBlockedReason}'), 'entry gate reports canonical final blocked reason');
 
 // 6. No silent skip — all skip paths are audit-logged
 const explicitSkipCount = (scannerSrc.match(/SCANNER_EXECUTION_SKIPPED_AUDIT/g) || []).length;
@@ -39,7 +41,7 @@ ok(appSrc.includes('LEGACY_AUTO_BUY_PATH_BLOCKED'), 'legacy brain auto buy path 
 ok(appSrc.includes('canonicalReplacement=scanner_auto'), 'canonical replacement is scanner_auto');
 
 // 8. Scanner AUTO_EXECUTION_GATE_AUDIT exists at scan entry with full context
-ok(scannerSrc.includes('paper_auto_execution_disabled'), 'entry gate reason includes paper_auto_execution_disabled');
+ok(autoBotsStateSrc.includes("finalBlockedReason = 'ui_autobots_button_off'"), 'canonical state includes ui_autobots_button_off');
 ok(scannerSrc.includes('paper_auto_buy_fn_missing'), 'entry gate reason includes paper_auto_buy_fn_missing');
 
 if (failed > 0) {

@@ -1,11 +1,13 @@
 import type { ScannerCandidate, ScannerSnapshot, ExecutionPlan, PlannedCandidate, SkippedCandidate, PlannedAction, AutoStrategyDecision, ScannerAutoEntryConfigSnapshot } from '../types';
 import { logger } from '../../utils/logger';
 import { buildCanonicalEntryGateSnapshot } from '../entry-gate/EntryGate';
-import { buildStrategyAuditSnapshotFromCandidate } from '../strategy-audit/strategy-audit-builder';
+import { buildStrategyAuditSnapshotFromCandidate, resolveActionableFinalBlocker } from '../strategy-audit/strategy-audit-builder';
 import { resolveEntryRiskParams } from '../trading/entry-risk-resolver';
 import { resolveAutoTargetOwnership, resolveTradingTargetOwnership } from '../trading/TradingTargetOwnership';
 import { resolveMaxSelectedPerScanConfig, type MaxSelectedPerScanSource } from '../settings/max-selected-per-scan';
 import { resolveExecutionDecision, emitCanonicalExecutionDecisionAudit, type ExecutionDecision, type ExecutionDecisionParams } from './executionDecision';
+import { assertCandidateRuntimeReady, revalidateCandidateForExecution } from './CandidateLifecycle';
+import { resolveFinalNoBuyReasonPriority } from './finalNoBuyReasonPriority';
 
 export interface ExecutionPlannerInput {
   scannerSnapshot: ScannerSnapshot;
@@ -46,6 +48,102 @@ export type CanonicalExecutableCandidateSet = {
   canonicalBuyReadySymbols: string[];
 };
 
+function hydratePlannerExecutionContract(candidate: ScannerCandidate): ScannerCandidate {
+  const audit = buildStrategyAuditSnapshotFromCandidate(candidate);
+  const auditAny = audit as any;
+  const primaryBlocker = String(
+    auditAny.dynamicSetupContext?.primaryBlocker
+    ?? audit.finalBlocker
+    ?? audit.strategyContractBlocker
+    ?? 'none',
+  );
+  const finalNoBuyReason = audit.finalExecutable && audit.buyAllowed
+    ? undefined
+    : resolveFinalNoBuyReasonPriority({
+      symbol: candidate.symbol,
+      rawStatus: candidate.status,
+      displayStatus: candidate.lifecycleStatus ?? candidate.status,
+      finalExecutable: audit.finalExecutable,
+      buyAllowed: audit.buyAllowed,
+      primaryBlocker,
+      setupResult: audit.setupResult,
+      candidateWhy: candidate.mainReason,
+      previousFinalNoBuyReason: (candidate as any).finalNoBuyReason ?? audit.finalNoBuyReason ?? audit.finalBlocker,
+      blockReasons: audit.blockReasons,
+      entryGateBlocker: candidate.entryGateDecision?.primaryReason ?? candidate.entryGateDecision?.blockReasons?.[0] ?? candidate.entryGateDecision?.snapshot?.blockReasons?.[0],
+      strategyContractBlocker: audit.strategyContractBlocker,
+      executionDecisionFinalNoBuyReason: (candidate as any).executionDecision?.finalNoBuyReason,
+      runtimeReason: (candidate as any).executionPrecheckSnapshot?.failureReason,
+      handoffMismatch: audit.handoffIntegrityStatus === 'failed',
+    }).resolvedFinalNoBuyReason;
+  return {
+    ...candidate,
+    strategyAuditSnapshot: (candidate as any).strategyAuditSnapshot ?? audit,
+    finalExecutionStrategy: String(auditAny.finalExecutionStrategy ?? audit.strategySelected ?? candidate.selectedStrategy ?? ''),
+    effectiveStrategy: String(auditAny.finalExecutionStrategy ?? audit.strategySelected ?? candidate.effectiveStrategy ?? candidate.selectedStrategy ?? ''),
+    selectedStrategy: String(auditAny.finalExecutionStrategy ?? audit.strategySelected ?? candidate.selectedStrategy ?? ''),
+    setupResult: String(audit.setupResult ?? (candidate as any).setupResult ?? 'none'),
+    primaryBlocker,
+    finalExecutable: audit.finalExecutable,
+    buyAllowed: audit.buyAllowed,
+    finalNoBuyReason,
+    actionableNoBuyReason: audit.actionableNoBuyReason,
+    technicalNoBuyReason: audit.technicalNoBuyReason,
+    secondaryDiagnosticReasons: audit.secondaryDiagnosticReasons,
+    handoffIntegrityStatus: audit.handoffIntegrityStatus,
+  } as ScannerCandidate;
+}
+
+function buildRuntimeBlockedExecutionDecision(candidate: ScannerCandidate, scanId: string, reason: string): ExecutionDecision {
+  return {
+    symbol: candidate.symbol,
+    scanId,
+    candidateRank: candidate.rank ?? 0,
+    finalExecutable: false,
+    buyAllowed: false,
+    setupResult: 'WAIT_RUNTIME_STATE',
+    finalExecutionStrategy: String(candidate.finalExecutionStrategy ?? candidate.selectedStrategy ?? 'wait'),
+    riskGroup: candidate.riskGroup ?? 'unknown',
+    groupName: candidate.riskGroup ?? 'unknown',
+    groupRecommendedStrategy: String(candidate.groupRecommendedStrategy ?? ''),
+    groupOpenCount: 0,
+    groupMaxOpen: 0,
+    groupExposure: 0,
+    groupMaxExposure: 0,
+    priceFresh: candidate.priceFresh !== false,
+    bookFresh: candidate.bookFresh !== false,
+    spreadOk: false,
+    tpRoomOk: false,
+    capitalOk: false,
+    maxOpenPositionsOk: false,
+    maxGroupPositionsOk: false,
+    maxGroupExposureOk: false,
+    duplicateOpenPosition: false,
+    pendingOrderExists: false,
+    banned: false,
+    buySpacingOk: false,
+    runtimeExecutionEnabled: false,
+    selectedForExecution: false,
+    submitAttempted: false,
+    adapterCalled: false,
+    adapterAccepted: false,
+    adapterResult: '',
+    orderFilled: false,
+    positionCreated: false,
+    journalPersisted: false,
+    telegramSent: false,
+    finalDecision: 'SKIP',
+    finalNoBuyReason: reason as any,
+    actionableNoBuyReason: reason,
+    technicalNoBuyReason: 'none',
+    secondaryDiagnosticReasons: [],
+    renderedUserMessage: reason,
+    finalNoBuyReasonSource: 'candidate_runtime_snapshot_guard',
+    reasonPriorityTrace: [{ reason, passed: false, detail: 'Missing or invalid candidate runtime snapshot' }],
+    invariantOk: true,
+  };
+}
+
 export function buildExecutableCandidateSet(input: {
   scanSnapshot: ScannerSnapshot;
   runtimeState: { canAttemptScannerAutoExecution: boolean };
@@ -64,6 +162,19 @@ export function buildExecutableCandidateSet(input: {
   const capitalOk = input.riskState.capitalPerTrade > 0 && capitalAvailable >= input.riskState.capitalPerTrade;
   const maxOpenPositionsOk = input.riskState.openSymbols.length < input.riskState.maxPositions;
   const decisions: ExecutionDecision[] = candidates.map((candidate) => {
+    const runtimeReady = assertCandidateRuntimeReady({
+      candidate,
+      scanId: input.scanSnapshot.scanId ?? 'unknown',
+      sourcePath: 'execution_planner_executable_set',
+      blockedBeforeEntryGate: true,
+    });
+    if (!runtimeReady.ready) {
+      const decision = buildRuntimeBlockedExecutionDecision(runtimeReady.candidate, input.scanSnapshot.scanId ?? 'unknown', runtimeReady.candidate.finalNoBuyReason ?? 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING');
+      emitCanonicalExecutionDecisionAudit(decision);
+      return decision;
+    }
+    const revalidatedCandidate = revalidateCandidateForExecution(hydratePlannerExecutionContract(candidate));
+    candidate = revalidatedCandidate;
     const audit = buildStrategyAuditSnapshotFromCandidate(candidate);
     const setupResult = String(audit.setupResult ?? '');
     const priceFresh = candidate.priceFresh ?? audit.priceFresh ?? true;
@@ -101,6 +212,14 @@ export function buildExecutableCandidateSet(input: {
       banned: (candidate as any).banned === true,
       buySpacingOk: true,
       runtimeExecutionEnabled: input.runtimeState.canAttemptScannerAutoExecution,
+      primaryBlocker: candidate.primaryBlocker ?? (candidate as any).strategyAuditSnapshot?.dynamicSetupContext?.primaryBlocker ?? audit.finalBlocker ?? audit.strategyContractBlocker ?? 'none',
+      blockReasons: candidate.blockReasons ?? audit.blockReasons ?? [],
+      candidateWhy: candidate.mainReason,
+      previousFinalNoBuyReason: (candidate as any).finalNoBuyReason ?? audit.finalNoBuyReason ?? audit.finalBlocker ?? 'none',
+      entryGateBlocker: candidate.entryGateDecision?.primaryReason ?? candidate.entryGateDecision?.blockReasons?.[0] ?? candidate.entryGateDecision?.snapshot?.blockReasons?.[0],
+      strategyContractBlocker: audit.strategyContractBlocker,
+      runtimeReason: (candidate as any).executionPrecheckSnapshot?.failureReason,
+      handoffMismatch: audit.handoffIntegrityStatus === 'failed',
     };
     const decision = resolveExecutionDecision(params);
     emitCanonicalExecutionDecisionAudit(decision);
@@ -222,7 +341,7 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
     riskState: { openSymbols, pendingOrderSymbols, capital, usedCapital, capitalPerTrade, maxPositions, maxSpreadPct },
   });
   const excludedUiReady = canonicalSet.skippedCandidates.map((c) => `${c.symbol}:${c.finalNoBuyReason}`);
-  logger.info(`EXECUTION_SELECTION_INTEGRITY_AUDIT: scanId=${canonicalSet.scanId} uiBuyReadySymbols=${canonicalSet.uiBuyReadySymbols.join('|') || 'none'} canonicalBuyReadySymbols=${canonicalSet.canonicalBuyReadySymbols.join('|') || 'none'} executableCandidateSymbols=${canonicalSet.executableCandidates.map((c) => c.symbol).join('|') || 'none'} selectedCandidateSymbol=${canonicalSet.selectedCandidateForExecution ?? 'none'} executionSubmitted=false adapterCalled=false noExecutionReason=${canonicalSet.noExecutionReason} excludedUiReady=${excludedUiReady.join('|') || 'none'} mismatchDetected=${String(canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0)} mismatchReason=${canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0 ? canonicalSet.noExecutionReason : 'none'} invariantOk=${String(!(canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0 && excludedUiReady.length === 0))}`);
+  logger.info(`EXECUTION_SELECTION_INTEGRITY_AUDIT: scanId=${canonicalSet.scanId} uiBuyReadySymbols=${canonicalSet.uiBuyReadySymbols.join('|') || 'none'} canonicalBuyReadySymbols=${canonicalSet.canonicalBuyReadySymbols.join('|') || 'none'} executableCandidateSymbols=${canonicalSet.executableCandidates.map((c) => c.symbol).join('|') || 'none'} selectedCandidateSymbol=${canonicalSet.selectedCandidateForExecution ?? 'none'} submitAttempted=false adapterCalled=false noExecutionReason=${canonicalSet.noExecutionReason} excludedUiReady=${excludedUiReady.join('|') || 'none'} mismatchDetected=${String(canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0)} mismatchReason=${canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0 ? canonicalSet.noExecutionReason : 'none'} invariantOk=${String(!(canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0 && excludedUiReady.length === 0))}`);
   if (canonicalSet.uiBuyReadySymbols.length > 0 && canonicalSet.executableCandidates.length === 0 && excludedUiReady.length === 0) {
     logger.error(`EXECUTION_SELECTION_INTEGRITY_FAILED: scanId=${canonicalSet.scanId} uiBuyReadySymbols=${canonicalSet.uiBuyReadySymbols.join('|')} canonicalBuyReadySymbols=none executableCandidateSymbols=none noExecutionReason=UNKNOWN_EXECUTION_SELECTION_BUG candidateSnapshots=${JSON.stringify((scannerSnapshot.candidates ?? []).filter((c) => canonicalSet.uiBuyReadySymbols.includes(c.symbol)).map((c) => ({ symbol: c.symbol, status: c.status, finalExecutable: (c as any).finalExecutable, buyAllowed: (c as any).buyAllowed, mainReason: c.mainReason, blockReasons: c.blockReasons })))}`);
   }
@@ -246,7 +365,21 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   let confirmationBlockedCount = 0;
   let spreadBlockedCount = 0;
 
-  const scoredExecutionPool = executionPool.map(c => ({ candidate: c, score: computeExecutionScore(c) }));
+  const revalidatedExecutionPool = executionPool.map((c) => {
+    const runtimeReady = assertCandidateRuntimeReady({
+      candidate: c,
+      scanId: scannerSnapshot.scanId ?? 'unknown',
+      sourcePath: 'execution_planner_pool_revalidation',
+      blockedBeforeEntryGate: true,
+    });
+    if (!runtimeReady.ready) return runtimeReady.candidate;
+    const candidate = revalidateCandidateForExecution(hydratePlannerExecutionContract(c));
+    if (c.status === 'BUY' && candidate.status !== 'BUY') {
+      logger.info(`CANDIDATE_EXECUTION_REVALIDATION_DEMOTED: symbol=${candidate.symbol} previousStatus=${c.status} finalStatus=${candidate.lifecycleStatus ?? candidate.status} reason=${candidate.finalNoBuyReason ?? candidate.promotionAudit?.blockedPromotionReason ?? 'unknown'} adapterCallAllowed=false`);
+    }
+    return candidate;
+  });
+  const scoredExecutionPool = revalidatedExecutionPool.map(c => ({ candidate: c, score: computeExecutionScore(c) }));
   scoredExecutionPool.sort((a, b) => b.score - a.score);
   logger.info(`SELECTION_LIMIT_REMOVED_AUDIT: totalPoolCandidates=${executionPool.length} evaluatedCandidates=${scoredExecutionPool.length} blockedByRealSafety=0 blockedByDuplicatePosition=0 blockedByPendingOrder=0 blockedByMaxOpenPositions=${availableSlots <= 0 ? executionPool.length : 0} blockedByCapital=${capitalLimitedSlots <= 0 ? executionPool.length : 0} blockedBySpread=0 blockedByTpRoom=0 blockedByPriceStale=0 selectionLimitApplied=false maxSelectedPerScan=unlimited`);
 
@@ -281,6 +414,25 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   logger.info(`GROUP_ROUND_ROBIN_SELECTION_AUDIT totalCandidates=${scoredExecutionPool.length} groupCaps=5|5|6|4|4 candidateCountByGroup=${[...grouped.entries()].map(([g, items]) => `${g}=${items.length}`).join('|')} rankedTopByGroup=${[...grouped.entries()].map(([g, items]) => `${g}:${items.slice(0, 3).map(i => i.candidate.symbol).join('|')}`).join('|')} selectionRounds=${round} roundRobinPoolSize=${roundRobinPool.length}`);
 
   for (const { candidate, score } of roundRobinPool) {
+    const runtimeReady = assertCandidateRuntimeReady({
+      candidate,
+      scanId: scannerSnapshot.scanId ?? 'unknown',
+      sourcePath: 'execution_planner_before_entry_gate',
+      blockedBeforeEntryGate: true,
+    });
+    if (!runtimeReady.ready) {
+      const reason = runtimeReady.candidate.finalNoBuyReason ?? 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING';
+      skippedCandidates.push({
+        symbol: runtimeReady.candidate.symbol,
+        status: runtimeReady.candidate.status,
+        reason,
+        gate: 'CandidateRuntimeGuard',
+        isRetryable: true,
+        finalNoBuyReason: reason,
+      });
+      if (!noBuyReasons.includes(reason)) noBuyReasons.push(reason);
+      continue;
+    }
     emitEntryPlanObjectTrace(candidate, 'insideExecutionPlanner', 'ExecutionPlanner.buildExecutionPlan');
     const candidateWithPlan: ScannerCandidate = { ...candidate };
     const fromCandidateEntryPlan = candidate.entryPlan;
@@ -376,24 +528,43 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
 
     const strategyAudit = buildStrategyAuditSnapshotFromCandidate(candidateWithPlan);
     if (!candidateWithPlan.riskGroup) {
-      logger.warn(`STRATEGY_MISMATCH_BLOCK_AUDIT: symbol=${symbol} finalExecutionStrategy=${strategyAudit.strategySelected} strategyAtEntry=${strategyAudit.strategyAtEntry ?? strategyAudit.strategySelected} positionStrategy=pending setupResult=${strategyAudit.setupResult ?? 'n/a'} setupMatchesStrategy=true marketBestFit=${strategyAudit.marketRecommendedStrategy ?? 'n/a'} groupRecommendedStrategy=${strategyAudit.groupRecommendedStrategy ?? 'n/a'} groupName=n/a strategyMismatchDetected=false mismatchAllowed=true mismatchReason=missing_group_metadata overrideApplied=${String(strategyAudit.overrideApplied ?? false)} overrideReason=${strategyAudit.overrideReason ?? 'none'} action=warn_missing_group_metadata_final_buy_evaluation`);
+      logger.warn(`STRATEGY_MISMATCH_BLOCK_AUDIT: symbol=${symbol} finalExecutionStrategy=${strategyAudit.strategySelected} strategyAtEntry=${strategyAudit.strategyAtEntry ?? strategyAudit.strategySelected} positionStrategy=pending setupResult=${strategyAudit.setupResult ?? 'n/a'} setupMatchesStrategy=true marketBestFit=${strategyAudit.marketRecommendedStrategy ?? 'n/a'} groupRecommendedStrategy=${strategyAudit.groupRecommendedStrategy ?? 'n/a'} groupName=missing_risk_group strategyMismatchDetected=false mismatchAllowed=true mismatchReason=missing_group_metadata overrideApplied=${String(strategyAudit.overrideApplied ?? false)} overrideReason=${strategyAudit.overrideReason ?? 'none'} action=block_candidate`);
+      if (!skipped) {
+        skipped = true;
+        skipReason = 'MISSING_RISK_GROUP';
+        skipGate = 'ExecutionPlannerIntegrity';
+        isRetryable = false;
+        if (!noBuyReasons.includes('MISSING_RISK_GROUP')) noBuyReasons.push('MISSING_RISK_GROUP');
+      }
     }
     if (!skipped && !strategyAudit.finalExecutable) {
       skipped = true;
       const missing = strategyAudit.setupMissing.map((s) => s.key);
-      const exactReason = missing.includes('dipConfirmed')
-        ? 'dip_missing'
-        : missing.includes('reboundConfirmed')
-          ? 'rebound_missing'
-          : strategyAudit.dynamicSetupContext?.primaryBlocker && strategyAudit.dynamicSetupContext.primaryBlocker !== 'finalExecutable_false'
-            ? strategyAudit.dynamicSetupContext.primaryBlocker
-            : 'unknown_final_executable_bug';
-      skipReason = `strategy_setup_not_met:${exactReason}`;
+      const exactReason = resolveActionableFinalBlocker({
+        finalExecutable: strategyAudit.finalExecutable,
+        strategySelected: strategyAudit.strategySelected,
+        setupResult: strategyAudit.setupResult ?? strategyAudit.dynamicSetupContext?.setupResult,
+        finalBlocker: strategyAudit.finalBlocker,
+        strategyContractBlocker: strategyAudit.strategyContractBlocker,
+        marketSafetyBlocker: strategyAudit.marketSafetyBlocker,
+        executionFreshnessBlocker: strategyAudit.executionFreshnessBlocker,
+        professionalGateBlocker: strategyAudit.professionalGateBlocker,
+        primaryBlocker: strategyAudit.dynamicSetupContext?.primaryBlocker,
+        blockReasons: strategyAudit.blockReasons,
+        setupMissingKeys: missing,
+      });
+      const finalBlockerSource = strategyAudit.finalBlockerSource ?? 'strategy_contract';
+      skipReason = finalBlockerSource === 'strategy_contract'
+        ? `strategy_setup_not_met:${exactReason}`
+        : `${finalBlockerSource}:${exactReason}`;
       skipGate = 'ExecutionPlannerFinalGate';
       isRetryable = true;
-      if (!noBuyReasons.includes('strategy_setup_not_met')) noBuyReasons.push('strategy_setup_not_met');
+      if (finalBlockerSource === 'strategy_contract' && !noBuyReasons.includes('strategy_setup_not_met')) noBuyReasons.push('strategy_setup_not_met');
       if (!noBuyReasons.includes(exactReason)) noBuyReasons.push(exactReason);
-      logger.warn(`BUY_BLOCKED_STRATEGY_SETUP_NOT_MET: symbol=${symbol} strategy=${strategyAudit.strategySelected} actualDipPct=${String(strategyAudit.setupMetrics.find((m) => m.key === 'actualDipPct')?.actualValue ?? 'n/a')} requiredDipPct=${String(strategyAudit.setupMetrics.find((m) => m.key === 'requiredDipPct')?.requiredValue ?? 'n/a')} actualReboundPct=${String(strategyAudit.setupMetrics.find((m) => m.key === 'actualReboundPct')?.actualValue ?? 'n/a')} requiredReboundPct=${String(strategyAudit.setupMetrics.find((m) => m.key === 'requiredReboundPct')?.requiredValue ?? 'n/a')} setupMissing=${strategyAudit.setupMissing.map((s) => s.key).join('|') || 'none'} finalExecutable=${String(strategyAudit.finalExecutable)}`);
+      const finalGateAuditName = finalBlockerSource === 'strategy_contract'
+        ? 'BUY_BLOCKED_STRATEGY_SETUP_NOT_MET'
+        : 'BUY_BLOCKED_EXTERNAL_GATE';
+      logger.warn(`${finalGateAuditName}: symbol=${symbol} strategy=${strategyAudit.strategySelected} actualDipPct=${String(strategyAudit.setupMetrics.find((m) => m.key === 'actualDipPct')?.actualValue ?? 'n/a')} requiredDipPct=${String(strategyAudit.setupMetrics.find((m) => m.key === 'requiredDipPct')?.requiredValue ?? 'n/a')} actualReboundPct=${String(strategyAudit.setupMetrics.find((m) => m.key === 'actualReboundPct')?.actualValue ?? 'n/a')} requiredReboundPct=${String(strategyAudit.setupMetrics.find((m) => m.key === 'requiredReboundPct')?.requiredValue ?? 'n/a')} strategyContractValid=${String(strategyAudit.strategyContractValid ?? false)} strategyContractBlocker=${strategyAudit.strategyContractBlocker ?? 'unknown'} professionalGateValid=${String(strategyAudit.professionalGateValid ?? true)} professionalGateBlocker=${strategyAudit.professionalGateBlocker ?? 'none'} finalBlocker=${exactReason} finalBlockerSource=${finalBlockerSource} setupMissing=${strategyAudit.setupMissing.map((s) => s.key).join('|') || 'none'} finalExecutable=${String(strategyAudit.finalExecutable)}`);
       logger.warn(`BUY_BLOCKED_FINAL_EXECUTABLE_FALSE: symbol=${symbol} reason=${exactReason} strategy=${strategyAudit.strategySelected}`);
     }
 
@@ -486,7 +657,24 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
     }
 
     if (skipped) {
-      skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: skipReason, gate: skipGate, isRetryable, finalNoBuyReason: canonicalDecisionBySymbol.get(symbol) });
+      const canonicalSkipReason = resolveFinalNoBuyReasonPriority({
+        symbol,
+        rawStatus: candidateWithPlan.status,
+        displayStatus: candidateWithPlan.lifecycleStatus ?? candidateWithPlan.status,
+        finalExecutable: candidateWithPlan.finalExecutable,
+        buyAllowed: candidateWithPlan.buyAllowed,
+        primaryBlocker: candidateWithPlan.primaryBlocker ?? candidateWithPlan.entryGateDecision?.primaryReason ?? candidateWithPlan.entryGateDecision?.blockReasons?.[0],
+        setupResult: (candidateWithPlan as any).setupResult,
+        candidateWhy: candidateWithPlan.mainReason,
+        previousFinalNoBuyReason: canonicalDecisionBySymbol.get(symbol) ?? candidateWithPlan.finalNoBuyReason ?? skipReason,
+        blockReasons: candidateWithPlan.blockReasons,
+        entryGateBlocker: candidateWithPlan.entryGateDecision?.primaryReason ?? candidateWithPlan.entryGateDecision?.blockReasons?.[0] ?? candidateWithPlan.entryGateDecision?.snapshot?.blockReasons?.[0],
+        strategyContractBlocker: (candidateWithPlan as any).strategyAuditSnapshot?.strategyContractBlocker,
+        executionDecisionFinalNoBuyReason: canonicalDecisionBySymbol.get(symbol),
+        runtimeReason: candidateWithPlan.executionPrecheckSnapshot?.failureReason,
+        handoffMismatch: candidateWithPlan.handoffIntegrityStatus === 'failed',
+      }).resolvedFinalNoBuyReason;
+      skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: skipReason, gate: skipGate, isRetryable, finalNoBuyReason: canonicalSkipReason });
       const isOverextended = Array.isArray(candidateWithPlan.blockReasons) && candidateWithPlan.blockReasons.some(r => String(r).toLowerCase().includes('overextended'));
       const isCandleExhaustion = Array.isArray(candidateWithPlan.blockReasons) && candidateWithPlan.blockReasons.some(r => String(r).toLowerCase().includes('candle'));
       const OVEREXTENSION_THRESHOLD_PCT = 1.8;
@@ -512,7 +700,7 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
         limitToken = 'CAPITAL_BLOCKED';
         limitReason = 'BLOCK_CAPITAL_LIMIT';
       }
-      skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: limitReason, gate: 'ExecutionPlannerLimit', isRetryable: true, finalNoBuyReason: canonicalDecisionBySymbol.get(symbol) });
+      skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: limitReason, gate: 'ExecutionPlannerLimit', isRetryable: true, finalNoBuyReason: canonicalDecisionBySymbol.get(symbol) ?? limitReason });
       skippedReasons.push(limitToken);
       if (!noBuyReasons.includes(limitToken)) noBuyReasons.push(limitToken);
       auditIntegrity(false, limitToken);

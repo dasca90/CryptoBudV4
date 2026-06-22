@@ -23,7 +23,35 @@ export type TradeV4CandidateView = {
   source: string;
   riskGroup: string;
   strategy: string;
-  status: "BUY" | "WAIT" | "BLOCK" | "AVOID";
+  status:
+    | "BUY"
+    | "WAIT"
+    | "BLOCK"
+    | "AVOID"
+    | "WAITING_CONFIRMATION"
+    | "WAIT_DIP_CONFIRMATION"
+    | "WAIT_REBOUND_FRESHNESS"
+    | "WAITING_MOMENTUM"
+    | "WAIT_SPREAD"
+    | "WAIT_TP_ROOM"
+    | "WAIT_PRICE_FRESHNESS"
+    | "WAIT_BOOK_FRESHNESS"
+    | "WAIT_RUNTIME_STATE"
+    | "WAIT_STRATEGY_DECISION"
+    | "WAIT_STRATEGY_HANDOFF"
+    | "WAIT_ENTRY_CONTRACT"
+    | "WAIT_RISK_GROUP"
+    | "WAIT_PROFESSIONAL_GATE"
+    | "INVALID_RUNTIME_STATE";
+  lifecycleStatus?: string | null;
+  canonicalDisplayStatus?: {
+    canonicalStatus?: string;
+    statusSource?: string;
+    normalizedBy?: string;
+  } | null;
+  runtimeSnapshotPresent?: boolean;
+  strategyDecisionPresent?: boolean;
+  executionPrecheckSnapshotPresent?: boolean;
   engineState: TradeV4VisualState;
   confidence: number;
   spreadPct: number | null;
@@ -71,6 +99,12 @@ export type TradeV4CandidateView = {
   finalExecutable?: boolean;
   buyAllowed?: boolean;
   primaryBlocker?: string | null;
+  finalNoBuyReason?: string | null;
+  actionableNoBuyReason?: string | null;
+  technicalNoBuyReason?: string | null;
+  secondaryDiagnosticReasons?: string[];
+  handoffIntegrityStatus?: 'ok' | 'failed' | 'not_applicable' | string;
+  renderedUserMessage?: string | null;
   gateAudit?: {
     spreadPct: number;
     maxSpreadSettingFromUI: number;
@@ -101,8 +135,15 @@ export type TradeV4CandidateView = {
   anchorDecision?: 'ALIGNED' | 'ADVISORY_WARNING' | 'BLOCKED' | 'UNAVAILABLE';
   anchorBlockApplied?: boolean;
   executionDecision?: {
+    scanId?: string;
+    candidateRank?: number;
     selectedForExecution: boolean;
     finalNoBuyReason: string;
+    actionableNoBuyReason?: string;
+    technicalNoBuyReason?: string;
+    secondaryDiagnosticReasons?: string[];
+    renderedUserMessage?: string;
+    finalNoBuyReasonSource?: string;
     finalDecision: string;
     submitAttempted: boolean;
     adapterCalled: boolean;
@@ -122,10 +163,20 @@ export type TradeV4CandidateView = {
     tpRoomOk: boolean;
     capitalOk: boolean;
     maxOpenPositionsOk: boolean;
+    maxGroupPositionsOk?: boolean;
+    maxGroupExposureOk?: boolean;
     duplicateOpenPosition: boolean;
+    pendingOrderExists?: boolean;
+    banned?: boolean;
     runtimeExecutionEnabled: boolean;
     setupResult: string;
     finalExecutionStrategy: string;
+    riskGroup?: string;
+    groupName?: string;
+    groupOpenCount?: number;
+    groupMaxOpen?: number;
+    groupExposure?: number;
+    groupMaxExposure?: number;
   };
 };
 

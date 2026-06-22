@@ -13,6 +13,8 @@ interface CoinOrbProps {
   opacity?: number;
   transferProgress?: number;
   scanPulseIntensity?: number;
+  scanImpactIntensity?: number;
+  scanImpactColor?: string;
   realisticMaterials: boolean;
   glowLayerScale?: number;
   cheapMaterial?: boolean;
@@ -40,7 +42,7 @@ function hashSymbol(symbol: string) {
   return symbol.split('').reduce((value, char) => value + char.charCodeAt(0), 0);
 }
 
-export function CoinOrb({ coin, visualState, position, opacity = 1, transferProgress = 0, scanPulseIntensity = 0, realisticMaterials, glowLayerScale = 1, cheapMaterial = false, onSelect }: CoinOrbProps) {
+export function CoinOrb({ coin, visualState, position, opacity = 1, transferProgress = 0, scanPulseIntensity = 0, scanImpactIntensity = 0, scanImpactColor, realisticMaterials, glowLayerScale = 1, cheapMaterial = false, onSelect }: CoinOrbProps) {
   const groupRef = useRef<Group>(null);
   const shellRef = useRef<Group>(null);
   const stateRingsRef = useRef<Group>(null);
@@ -62,6 +64,7 @@ export function CoinOrb({ coin, visualState, position, opacity = 1, transferProg
   const coinMark = coinLogo.mark;
   const labelScale = coin.base.length > 7 ? 0.82 : coin.base.length > 5 ? 0.9 : 1;
   const transferAuraColor = '#3a8fd4';
+  const impactColor = scanImpactColor ?? '#37e8ff';
 
   const motionSeed = useMemo(() => hashSymbol(coin.symbol), [coin.symbol]);
   const subtlePulse = useMemo(() => 0.35 + (motionSeed % 50) / 100, [motionSeed]);
@@ -145,7 +148,7 @@ export function CoinOrb({ coin, visualState, position, opacity = 1, transferProg
           <meshPhongMaterial
             color={isFocused ? '#173244' : colors.main}
             emissive={isFocused ? '#071c2b' : colors.emissive}
-            emissiveIntensity={(isFocused ? 0.2 : isBlocked ? 0.48 : isBuyReady ? 0.42 : isBuy ? 0.62 : isWait ? 0.48 : 0.34) + scanPulseIntensity * 0.9}
+            emissiveIntensity={(isFocused ? 0.2 : isBlocked ? 0.48 : isBuyReady ? 0.42 : isBuy ? 0.62 : isWait ? 0.48 : 0.34) + scanPulseIntensity * 0.9 + scanImpactIntensity * 0.85}
             shininess={realisticMaterials ? 36 : 18}
             transparent
             opacity={(isFocused ? 0.86 : isBuyReady ? 0.5 : 0.66) * opacity}
@@ -154,7 +157,7 @@ export function CoinOrb({ coin, visualState, position, opacity = 1, transferProg
           <meshStandardMaterial
             color={isFocused ? '#173244' : colors.main}
             emissive={isFocused ? '#071c2b' : colors.emissive}
-            emissiveIntensity={(isFocused ? 0.28 : isBlocked ? 0.72 : isBuyingTransfer ? 4.2 : isBuyReady ? 0.58 : isBuy ? 0.82 : isWait ? 0.68 : 0.48) + scanPulseIntensity * (isBuyingTransfer ? 2.15 : 1.35)}
+            emissiveIntensity={(isFocused ? 0.28 : isBlocked ? 0.72 : isBuyingTransfer ? 4.2 : isBuyReady ? 0.58 : isBuy ? 0.82 : isWait ? 0.68 : 0.48) + scanPulseIntensity * (isBuyingTransfer ? 2.15 : 1.35) + scanImpactIntensity * 1.2}
             roughness={isBuyingTransfer ? 0.055 : realisticMaterials ? 0.24 : 0.48}
             metalness={isFocused ? 0.24 : isBuyingTransfer ? 0.72 : realisticMaterials ? 0.42 : 0.1}
             transparent
@@ -164,8 +167,20 @@ export function CoinOrb({ coin, visualState, position, opacity = 1, transferProg
         </mesh>
         <mesh>
           <sphereGeometry args={[ORB_AURA_RADIUS, 48, 48]} />
-          <meshBasicMaterial color={isFocused ? '#24506a' : isBuyingTransfer ? transferAuraColor : scanPulseIntensity > 0.05 ? '#5adfc2' : colors.emissive} transparent opacity={((isFocused ? 0.2 : isBlocked ? 0.1 : isBuyingTransfer ? 0.62 : isBuyReady ? 0.052 : isOpen ? 0.12 : 0.075) + scanPulseIntensity * (isBuyingTransfer ? 0.32 : 0.18)) * opacity * glowLayerScale} blending={(isBuyingTransfer || scanPulseIntensity > 0.02) ? AdditiveBlending : undefined} depthWrite={!isBuyingTransfer && scanPulseIntensity <= 0.02} />
+          <meshBasicMaterial color={scanImpactIntensity > 0.01 ? impactColor : isFocused ? '#24506a' : isBuyingTransfer ? transferAuraColor : scanPulseIntensity > 0.05 ? '#5adfc2' : colors.emissive} transparent opacity={((isFocused ? 0.2 : isBlocked ? 0.1 : isBuyingTransfer ? 0.62 : isBuyReady ? 0.052 : isOpen ? 0.12 : 0.075) + scanPulseIntensity * (isBuyingTransfer ? 0.32 : 0.18) + scanImpactIntensity * 0.28) * opacity * glowLayerScale} blending={(isBuyingTransfer || scanPulseIntensity > 0.02 || scanImpactIntensity > 0.01) ? AdditiveBlending : undefined} depthWrite={!isBuyingTransfer && scanPulseIntensity <= 0.02 && scanImpactIntensity <= 0.01} />
         </mesh>
+        {scanImpactIntensity > 0.01 && (
+          <>
+            <mesh>
+              <sphereGeometry args={[ORB_AURA_RADIUS * (1.18 + scanImpactIntensity * 0.58), 32, 32]} />
+              <meshBasicMaterial color={impactColor} transparent opacity={0.13 * scanImpactIntensity * opacity * glowLayerScale} blending={AdditiveBlending} depthWrite={false} />
+            </mesh>
+            <mesh rotation={[Math.PI / 2, 0, 0]}>
+              <torusGeometry args={[ORB_RING_RADIUS * (1.05 + scanImpactIntensity * 0.42), 0.008, 8, 88]} />
+              <meshBasicMaterial color={impactColor} transparent opacity={0.62 * scanImpactIntensity * opacity * glowLayerScale} blending={AdditiveBlending} depthWrite={false} />
+            </mesh>
+          </>
+        )}
         {scanPulseIntensity > 0.02 && glowLayerScale > 0.7 && (
           <mesh>
             <sphereGeometry args={[ORB_AURA_RADIUS * 1.52, 48, 48]} />

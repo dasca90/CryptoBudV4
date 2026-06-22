@@ -102,7 +102,7 @@ async function main() {
   assert(snapA.referencePeriod !== undefined, 'Scanner snapshot includes referencePeriod');
   const waitCand = snapA.candidates.find(c => c.symbol === 'BTCUSDT');
   assert(waitCand !== undefined, 'BTCUSDT candidate exists');
-  assert(waitCand!.status === 'WAIT', 'BTCUSDT status is WAIT');
+  assert(waitCand!.status === 'WAITING_CONFIRMATION', 'BTCUSDT status is WAITING_CONFIRMATION');
   assert(waitCand!.mainReason.includes('rebound'), 'WAIT reason includes rebound');
   assert(waitCand!.referencePeriod !== undefined, 'Scanner candidate includes referencePeriod');
 
@@ -685,19 +685,22 @@ async function main() {
   const yLogs = logger.getRecentLogs(500).map(l => l.message);
   const settingsAudit = yLogs.find(m => m.includes('ENTRY_GATE_SETTINGS_SOURCE_AUDIT: symbol=BTCUSDT')) ?? '';
   const confirmTrace = yLogs.find(m => m.includes('ENTRY_CONFIRMATION_TRACE: symbol=BTCUSDT')) ?? '';
-  const moverTrace = yLogs.find(m => m.includes('TOP_MOVER_ENTRY_TRACE: symbol=BTCUSDT')) ?? '';
+  const moverTrace = yLogs.find(m => m.includes('TOP_MOVER_ADVISORY_TRACE: symbol=BTCUSDT')) ?? '';
   assert(settingsAudit.includes('maxSpreadPct_effective=3'), 'Y1 relaxed maxSpread reaches EntryGate effective settings');
   assert(settingsAudit.includes('maxSlippagePct_effective=3'), 'Y2 relaxed maxSlippage reaches EntryGate effective settings');
   assert(settingsAudit.includes('maxTotalCostPct_effective=3'), 'Y3 relaxed maxTotalCost reaches EntryGate effective settings');
   assert(settingsAudit.includes('settingsAppliedToEntryGate=true'), 'Y4 settings are applied to EntryGate');
   assert(confirmTrace.includes('missingConfirmation=') && !confirmTrace.includes('missingConfirmation=none'), 'Y5 missing confirmation is explicitly traced');
-  assert(moverTrace.includes('spreadPass=true') && moverTrace.includes('slippagePass=true') && moverTrace.includes('totalCostPass=true'), 'Y6 spread/slippage/total cost pass in top mover trace');
+  assert(moverTrace.includes('spreadPass=true') && moverTrace.includes('slippagePass=true') && moverTrace.includes('totalCostPass=true') && moverTrace.includes('advisoryOnly=true'), 'Y6 spread/slippage/total cost pass in advisory top mover trace');
   assert(moverTrace.includes('confirmationPass=false'), 'Y7 relaxed settings do not bypass missing confirmation');
   assert(
-    moverTrace.includes('finalGateDecision=BLOCK')
-      || moverTrace.includes('finalBlocker=WAITING_FOR_CONFIRMATION')
-      || moverTrace.includes('finalBlocker=BLOCK_REBOUND_NOT_CONFIRMED')
-      || moverTrace.includes('finalBlocker=BLOCK_BREAKOUT_NOT_CONFIRMED'),
+    !moverTrace.includes('finalGateDecision=ALLOW')
+      && !moverTrace.includes('entryGateDecision=ALLOW')
+      && (
+        moverTrace.includes('advisoryBlocker=WAITING_FOR_CONFIRMATION')
+        || moverTrace.includes('advisoryBlocker=BLOCK_REBOUND_NOT_CONFIRMED')
+        || moverTrace.includes('advisoryBlocker=BLOCK_BREAKOUT_NOT_CONFIRMED')
+      ),
     'Y8 blocker remains confirmation-related',
   );
 

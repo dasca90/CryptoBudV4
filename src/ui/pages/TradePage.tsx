@@ -111,23 +111,41 @@ export function TradePage({
     autoBotsLastToggleRef.current = now;
     logger.info(`AUTOBOTS_TOGGLE_CLICKED: clickId=${clickId} previousUiValue=${previousValue} previousStoreValue=${previousValue} requestedValue=${requestedValue} timestamp=${now}`);
     setPaperAutoEnabled(requestedValue);
+    const effectiveStrategySource = requestedValue ? 'autobots' : airParams.strategySource;
+    if (requestedValue && airParams.strategySource === 'manual_override') {
+      setAirParams(prev => ({ ...prev, strategySource: 'autobots' }));
+    }
     logger.info(`AUTOBOTS_TOGGLE_STORE_WRITE: clickId=${clickId} requestedValue=${requestedValue} storeValueBefore=${previousValue} storeValueAfter=${requestedValue} success=true`);
     const scanner = engine.getAutoRuntime()?.getScanner();
     if (scanner) {
       scanner.setPaperAutoEnabled(requestedValue);
-      const manualStrategy = airParams.strategySource === 'manual_override' ? airParams.strategy : null;
+      const manualStrategy = !requestedValue && effectiveStrategySource === 'manual_override' ? airParams.strategy : null;
       scanner.setManualStrategy(manualStrategy);
-      logger.info(`AUTOBOTS_TOGGLE_RUNTIME_APPLIED: clickId=${clickId} requestedValue=${requestedValue} scannerRuntimeValue=${requestedValue} strategySource=${airParams.strategySource} success=true`);
+      scanner.setTradingTargetConfig({
+        strategySource: effectiveStrategySource,
+        confirmationMode: airParams.entryConfirmationMode,
+        manualTp1Pct: airParams.tp1Pct,
+        manualTp2Pct: airParams.tp2Pct,
+        stopLossPct: airParams.stopLossPct,
+        dynamicTrailingEnabled: airParams.dynamicTrailingEnabled,
+        trailPullbackPct: airParams.trailPullbackPct,
+      });
+      const diag = scanner.getRuntimeSettingsDiagnostics?.();
+      const invariantOk = !requestedValue || (diag?.paperAutoEnabled === true && diag.strategySourceMode === 'autobots' && diag.manualMode === false);
+      logger.info(`AUTOBOTS_TOGGLE_RUNTIME_APPLIED: clickId=${clickId} requestedValue=${requestedValue} scannerRuntimeValue=${String(diag?.paperAutoEnabled === true)} strategySource=${effectiveStrategySource} success=${String(invariantOk)}`);
+      logger.info(`AUTOBOTS_RUNTIME_BINDING_AUDIT: reason=toggle_click_${clickId} uiAutoBotsOn=${String(requestedValue)} persistedAutoBotsOn=${String(paperSettings.paperAutoExecutionEnabled === true)} runtimeAutoBotsOn=${String(diag?.paperAutoEnabled === true)} scannerAutoExecutionEnabled=${String(diag?.paperAutoEnabled === true)} executionControllerEnabled=${String(diag?.paperAutoBuyFnPresent === true || diag?.liveBuyFnPresent === true)} paperAutoBuyFnPresent=${String(diag?.paperAutoBuyFnPresent === true)} liveBuyFnPresent=${String(diag?.liveBuyFnPresent === true)} scannerRunning=${String(state.scannerRunning)} canExecute=${String(requestedValue && !!diag?.paperAutoBuyFnPresent)} invariantOk=${String(invariantOk)}`);
+      if (!invariantOk) logger.warn(`AUTOBOTS_UI_RUNTIME_MISMATCH_WARNING: reason=toggle_click_${clickId} uiAutoBotsOn=${String(requestedValue)} runtimeAutoBotsOn=${String(diag?.paperAutoEnabled === true)} scannerRunning=${String(state.scannerRunning)}`);
     }
     // Persist to settings
-    settingsPersistence.saveSettings({ ...paperSettings, paperAutoExecutionEnabled: requestedValue, updatedAt: new Date().toISOString() }).then(() => {
-      setPaperSettings(prev => ({ ...prev, paperAutoExecutionEnabled: requestedValue }));
+    settingsPersistence.saveSettings({ ...paperSettings, paperAutoExecutionEnabled: requestedValue, strategySource: effectiveStrategySource, autoBotsUserSet: true, updatedAt: new Date().toISOString() } as any).then(() => {
+      setPaperSettings(prev => ({ ...prev, paperAutoExecutionEnabled: requestedValue, strategySource: effectiveStrategySource, autoBotsUserSet: true } as any));
       logger.info(`AUTOBOTS_TOGGLE_PERSIST_WRITE: clickId=${clickId} requestedValue=${requestedValue} persistedValueAfter=${requestedValue} success=true`);
     });
   };
   const [airParams, setAirParams] = useState<TradingParametersView>({
     strategySource: 'autobots',
     entryConfirmationMode: 'smart',
+    scannerDiagnosticsLevel: 'normal',
     strategy: 'balanced',
     stopLossPct: 1.5,
     tp1Pct: 2.0,
@@ -184,6 +202,7 @@ export function TradePage({
   const [scannerConfigDirty, setScannerConfigDirty] = useState(false);
   const [scannerConfigError, setScannerConfigError] = useState<string | null>(null);
   const [userTradingSettingsHydrated, setUserTradingSettingsHydrated] = useState(false);
+  const [settingsHydrationStatus, setSettingsHydrationStatus] = useState<'pending' | 'complete' | 'error'>('pending');
   const [, forceUpdate] = useState(0);
   const tradeCountAuditRef = useRef<{ sig: string; at: number }>({ sig: '', at: 0 });
 
@@ -196,9 +215,17 @@ export function TradePage({
   }, [engine]);
 
   useEffect(() => {
+    return engine.getPositionManager().subscribe((positions, reason, symbol) => {
+      logger.info(`POSITION_MANAGER_REACTIVE_RENDER_AUDIT: target=TradePage reason=${reason} symbol=${symbol ?? 'none'} openCount=${positions.length} symbols=${positions.map(p => p.coin).join('|') || 'none'}`);
+      forceUpdate(n => n + 1);
+    });
+  }, [engine]);
+
+  useEffect(() => {
     const scanner = engine.getAutoRuntime()?.getScanner();
+    const effectiveStrategySource = paperAutoEnabled ? 'autobots' : airParams.strategySource;
     if (scanner && typeof scanner.setManualStrategy === 'function') {
-      scanner.setManualStrategy(airParams.strategySource === 'manual_override' ? airParams.strategy : null);
+      scanner.setManualStrategy(!paperAutoEnabled && effectiveStrategySource === 'manual_override' ? airParams.strategy : null);
     }
     if (scanner && typeof scanner.setMaxSpreadPct === 'function') {
       scanner.setMaxSpreadPct(airParams.maxSpreadPct);
@@ -215,7 +242,7 @@ export function TradePage({
     }
     if (scanner && typeof scanner.setTradingTargetConfig === 'function') {
       scanner.setTradingTargetConfig({
-        strategySource: airParams.strategySource,
+        strategySource: effectiveStrategySource,
         confirmationMode: airParams.entryConfirmationMode,
         manualTp1Pct: airParams.tp1Pct,
         manualTp2Pct: airParams.tp2Pct,
@@ -238,6 +265,9 @@ export function TradePage({
         hydrated: true,
       });
     }
+    if (scanner && typeof scanner.setScannerDiagnosticsLevel === 'function') {
+      scanner.setScannerDiagnosticsLevel(airParams.scannerDiagnosticsLevel);
+    }
     if (scanner && typeof scanner.setExecutionLimits === 'function') {
       scanner.setExecutionLimits({
         maxPositions: airParams.maxOpenPositions,
@@ -250,13 +280,17 @@ export function TradePage({
         userExplicit: airParams.maxSelectedPerScanUserSet === true,
       });
     }
-  }, [airParams.strategySource, airParams.entryConfirmationMode, airParams.strategy, airParams.maxSpreadPct, airParams.maxSlippagePct, airParams.maxTotalEntryCostPct, airParams.maxPriceAgeMs, airParams.tp1Pct, airParams.tp2Pct, airParams.stopLossPct, airParams.dynamicTrailingEnabled, airParams.trailPullbackPct, airParams.scannerCandidatePoolSize, airParams.min24hQuoteVolumeUsdt, airParams.maxSymbolsScanned, airParams.momentumWeight, airParams.volumeSurgeWeight, airParams.breakoutWeight, airParams.newMoverBonus, airParams.enableNewMoverBonus, airParams.maxOpenPositions, airParams.maxSelectedPerScan, airParams.autoTradingCapital, airParams.capitalPerCoin, engine]);
+  }, [airParams.strategySource, airParams.entryConfirmationMode, airParams.scannerDiagnosticsLevel, airParams.strategy, airParams.maxSpreadPct, airParams.maxSlippagePct, airParams.maxTotalEntryCostPct, airParams.maxPriceAgeMs, airParams.tp1Pct, airParams.tp2Pct, airParams.stopLossPct, airParams.dynamicTrailingEnabled, airParams.trailPullbackPct, airParams.scannerCandidatePoolSize, airParams.min24hQuoteVolumeUsdt, airParams.maxSymbolsScanned, airParams.momentumWeight, airParams.volumeSurgeWeight, airParams.breakoutWeight, airParams.newMoverBonus, airParams.enableNewMoverBonus, airParams.maxOpenPositions, airParams.maxSelectedPerScan, airParams.autoTradingCapital, airParams.capitalPerCoin, paperAutoEnabled, engine]);
 
   useEffect(() => {
     (async () => {
       logger.info('USER_SETTINGS_HYDRATION_START');
+      const persistenceReadyAt = Date.now();
       const s = await settingsPersistence.loadSettings();
+      const settingsLoadedAt = Date.now();
       setPaperSettings(s);
+      const persistedAutoBots = s.paperAutoExecutionEnabled ?? true;
+      const effectiveStrategySource: TradingParametersView['strategySource'] = persistedAutoBots ? 'autobots' : (s.strategySource ?? 'autobots');
       const scannerRiskGroups = normalizeDipperRiskGroups(s.scannerRiskGroups ?? {
         top_caps: true,
         large_caps: true,
@@ -271,8 +305,9 @@ export function TradePage({
       const scannerBanlist = toCanonicalBanlist([...DEFAULT_BANNED_SYMBOLS, ...(s.scannerBanlist ?? []), ...(s.manualScannerBanlist ?? [])]);
       setAirParams((prev) => ({
         ...prev,
-        strategySource: s.strategySource ?? prev.strategySource,
+        strategySource: effectiveStrategySource,
         entryConfirmationMode: s.entryConfirmationMode ?? prev.entryConfirmationMode,
+        scannerDiagnosticsLevel: (s as any).scannerDiagnosticsLevel ?? prev.scannerDiagnosticsLevel,
         strategy: s.riskStyle === 'aggressive' ? 'momentum' : s.riskStyle === 'conservative' ? 'conservative' : 'balanced',
         stopLossPct: s.stopLossPct ?? prev.stopLossPct,
         tp1Pct: s.tp1Pct ?? prev.tp1Pct,
@@ -324,7 +359,6 @@ export function TradePage({
         scannerBanlist,
       });
       // Restore AutoBots from persisted settings only if user hasn't toggled since mount
-      const persistedAutoBots = s.paperAutoExecutionEnabled ?? false;
       const userToggleTime = autoBotsLastToggleRef.current;
       const hydrationTime = Date.now();
       if (userToggleTime === 0) {
@@ -333,6 +367,16 @@ export function TradePage({
         const scanner = engine.getAutoRuntime()?.getScanner();
         if (scanner) {
           scanner.setPaperAutoEnabled(persistedAutoBots);
+          scanner.setManualStrategy(!persistedAutoBots && effectiveStrategySource === 'manual_override' ? (s.riskStyle === 'aggressive' ? 'momentum' : s.riskStyle === 'conservative' ? 'conservative' : 'balanced') : null);
+          scanner.setTradingTargetConfig({
+            strategySource: effectiveStrategySource,
+            confirmationMode: s.entryConfirmationMode ?? 'smart',
+            manualTp1Pct: s.tp1Pct ?? 2.0,
+            manualTp2Pct: s.tp2Pct ?? 4.0,
+            stopLossPct: s.stopLossPct ?? 1.5,
+            dynamicTrailingEnabled: s.dynamicTrailingEnabled ?? false,
+            trailPullbackPct: s.trailPullbackPct ?? 0.25,
+          });
         }
         logger.info(`AUTOBOTS_HYDRATION_RESTORE: persistedValue=${persistedAutoBots} storeValue=false chosenValue=${persistedAutoBots} reason=no_user_toggle_yet`);
       } else if (persistedAutoBots !== paperAutoEnabled) {
@@ -342,7 +386,11 @@ export function TradePage({
       logger.info(`USER_SETTINGS_HYDRATED: tradingCapital=${(s as any).autoTradingCapital ?? 1000} capitalPerCoin=${(s as any).capitalPerCoin ?? s.capitalPerTrade ?? 100} maxOpenPositions=${s.maxPositions ?? 10} bannedCoinsCount=${scannerBanlist.length}`);
       logger.info(`TRADING_PARAMETERS_RESTORE_AUDIT: reason=component_mount loadedRefPeriod=${scannerReferencePeriod} loadedRefMode=${s.refMode ?? 'not_persisted'} loadedRefWindow=${s.refWindow ?? 'not_persisted'} loadedStrategy=${s.riskStyle ?? 'balanced'} sourceUsed=${s.refMode ? 'persisted_store' : 'defaults'} usedDefaults=${String(!s.refMode)} hydrationComplete=true`);
       logger.info(`TRADING_SETTINGS_UI_BINDING_AUDIT: displayedRefPeriod=${airParams.scannerReferencePeriod} canonicalRefPeriod=${s.scannerReferencePeriod} displayedRefMode=${airParams.refMode} canonicalRefMode=${s.refMode} displayedRefWindow=${airParams.refWindow} canonicalRefWindow=${s.refWindow} mismatchDetected=${String(airParams.scannerReferencePeriod !== s.scannerReferencePeriod || airParams.refMode !== s.refMode)} sourceUsed=${s.refMode ? 'persisted_store' : 'defaults'}`);
+      const diag = engine.getAutoRuntime()?.getScanner()?.getRuntimeSettingsDiagnostics?.();
+      logger.info(`PACKAGED_RUNTIME_SETTINGS_SOURCE_AUDIT: isPackagedBuild=${String(typeof window !== 'undefined' && window.location.protocol === 'tauri:')} appVersion=${(s as any).settingsVersion ?? '4.0.0'} appDataDir=see_runtime_diagnostics configPath=app_state:app_settings persistenceBackend=${settingsPersistence.getPersistenceBackend()} settingsLoadedFrom=${settingsPersistence.getPersistenceBackend()} settingsHydratedAt=${new Date(settingsLoadedAt).toISOString()} autoBotsUiValue=${String(persistedAutoBots)} autoBotsRuntimeValue=${String(diag?.paperAutoEnabled === true)} autoExecutionEnabled=${String(diag?.paperAutoEnabled === true)} manualOverrideEnabled=${String(effectiveStrategySource === 'manual_override')} manualControlsEnabled=${String(!persistedAutoBots)} runtimeActiveStrategy=${diag?.strategySourceMode ?? 'unknown'} scannerRunning=${String(state.scannerRunning)} executionMode=${engine.getAdapter().isLive ? 'live' : 'demo'} mismatchDetected=${String(persistedAutoBots !== (diag?.paperAutoEnabled === true))} mismatchReason=${persistedAutoBots !== (diag?.paperAutoEnabled === true) ? 'ui_runtime_auto_difference' : 'none'}`);
+      logger.info(`RUNTIME_SETTINGS_HYDRATION_LIFECYCLE_AUDIT: bootStartedAt=unknown persistenceReadyAt=${new Date(persistenceReadyAt).toISOString()} settingsLoadedAt=${new Date(settingsLoadedAt).toISOString()} migrationCompletedAt=${new Date(settingsLoadedAt).toISOString()} runtimeConfigAppliedAt=${diag?.runtimeConfigAppliedAt ? new Date(diag.runtimeConfigAppliedAt).toISOString() : 'unknown'} scannerStartedAt=${diag?.scannerStartedAt ? new Date(diag.scannerStartedAt).toISOString() : 'none'} autoBotsStartedAt=${persistedAutoBots ? (diag?.scannerStartedAt ? new Date(diag.scannerStartedAt).toISOString() : 'pending') : 'none'} orderValid=${String(!diag?.scannerStartedAt || (!!diag?.runtimeConfigAppliedAt && diag.scannerStartedAt >= diag.runtimeConfigAppliedAt))}`);
       setUserTradingSettingsHydrated(true);
+      setSettingsHydrationStatus('complete');
     })();
   }, [onScannerConfigChange, engine]);
 
@@ -383,6 +431,7 @@ export function TradePage({
     logger.info(`SETTINGS_APPLY_VALIDATION_AUDIT valid=true errors=none warnings=${warnings.join('|') || 'none'}`);
 
     const canonicalBanlist = toCanonicalBanlist(airParams.scannerBanlist);
+    const effectiveStrategySource = paperAutoEnabled ? 'autobots' : airParams.strategySource;
     logger.info(`USER_SETTINGS_SAVE_REQUESTED: tradingCapital=${airParams.autoTradingCapital} capitalPerCoin=${airParams.capitalPerCoin} maxOpenPositions=${airParams.maxOpenPositions} bannedCoinsCount=${canonicalBanlist.length} source=UI hydrationComplete=true`);
     await settingsPersistence.saveSettings({
       ...settings,
@@ -393,8 +442,9 @@ export function TradePage({
       scannerFinalPoolSize: airParams.scannerFinalPoolSize,
       scannerBanlist: canonicalBanlist,
       manualScannerBanlist: canonicalBanlist,
-      strategySource: airParams.strategySource,
+      strategySource: effectiveStrategySource,
       entryConfirmationMode: airParams.entryConfirmationMode,
+      scannerDiagnosticsLevel: airParams.scannerDiagnosticsLevel as any,
       stopLossPct: airParams.stopLossPct,
       tp1Pct: airParams.tp1Pct,
       tp2Pct: airParams.tp2Pct,
@@ -430,6 +480,17 @@ export function TradePage({
       manualDipperSetup: airParams.manualDipperSetup as any,
       updatedAt: new Date().toISOString(),
     } as any);
+    engine.getAutoRuntime()?.getScanner()?.setPaperAutoEnabled(paperAutoEnabled);
+    engine.getAutoRuntime()?.getScanner()?.setManualStrategy(!paperAutoEnabled && effectiveStrategySource === 'manual_override' ? airParams.strategy : null);
+    engine.getAutoRuntime()?.getScanner()?.setTradingTargetConfig?.({
+      strategySource: effectiveStrategySource,
+      confirmationMode: airParams.entryConfirmationMode,
+      manualTp1Pct: airParams.tp1Pct,
+      manualTp2Pct: airParams.tp2Pct,
+      stopLossPct: airParams.stopLossPct,
+      dynamicTrailingEnabled: airParams.dynamicTrailingEnabled,
+      trailPullbackPct: airParams.trailPullbackPct,
+    });
     engine.getAutoRuntime()?.getScanner()?.setExecutionLimits?.({
       maxPositions: airParams.maxOpenPositions,
       maxSelectedPerScan: airParams.maxSelectedPerScan,
@@ -551,6 +612,74 @@ export function TradePage({
     logger.info(`TRADE_COUNT_AUDIT: positionManagerOpenCount=${positionManagerOpenPositions.length} openPanelRowsCount=${airModel.openPositions.length} closedTradesCount=${closedTradesCount} totalTradeHistoryCount=${totalTradeHistoryCount} journalTradeEventCount=${totalTradeHistoryCount} uniqueTradeIdsCount=${uniqueTradeIds.size} duplicatedTradeIdsCount=${duplicatedTradeIdsCount} displayedHeaderCount=${airModel.openPositions.length} displayedLabel=OPEN_POSITIONS source=TradePage`);
   }
 
+  const scanner = engine.getAutoRuntime()?.getScanner?.();
+  const scannerRuntimeDiagnostics = scanner?.getRuntimeSettingsDiagnostics?.();
+  const canonicalAutoState = scanner?.getCanonicalAutoExecutionState?.();
+  const runtimeStatus = {
+    autoBotsRuntimeEnabled: canonicalAutoState?.resolvedAutoBotsEnabled ?? scannerRuntimeDiagnostics?.paperAutoEnabled === true,
+    manualOverrideActive: canonicalAutoState?.manualOverrideEnabled ?? scannerRuntimeDiagnostics?.manualMode === true,
+    effectiveStrategySource: ((canonicalAutoState?.strategySource ?? scannerRuntimeDiagnostics?.strategySourceMode) === 'manual_override' ? 'Manual' : 'AutoBots') as 'AutoBots' | 'Manual' | 'SafeFallback',
+    hydration: settingsHydrationStatus,
+    mismatch: paperAutoEnabled === true && canonicalAutoState?.canAttemptScannerAutoExecution !== true,
+    executionMode: canonicalAutoState?.executionMode,
+    scannerAutoEnabled: canonicalAutoState?.scannerAutoEnabled,
+    paperAutoExecutionEnabled: canonicalAutoState?.paperAutoExecutionEnabled,
+    blockerReason: canonicalAutoState?.finalBlockedReason,
+  };
+
+  const exportRuntimeDiagnostics = async () => {
+    const persistedSettings = await settingsPersistence.loadSettings();
+    const envDiagnostics = await import('../../core/persistence/TauriRuntimeDiagnostics').then(m => m.runTauriRuntimeDiagnostics()).catch((err) => ({ errors: [err instanceof Error ? err.message : String(err)] }));
+    const localStorageAvailable = (() => {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return false;
+        const key = 'cryptobud_v4_runtime_diag_probe';
+        window.localStorage.setItem(key, '1');
+        window.localStorage.removeItem(key);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    const indexedDbAvailable = typeof indexedDB !== 'undefined';
+    const snapshot = {
+      exportedAt: new Date().toISOString(),
+      appVersion: (persistedSettings as any).settingsVersion ?? '4.0.0',
+      buildMode: typeof window !== 'undefined' && window.location.protocol === 'tauri:' ? 'packaged' : 'dev_or_browser',
+      os: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+      persistenceBackend: settingsPersistence.getPersistenceBackend(),
+      appDataPath: (envDiagnostics as any).dbPath ?? null,
+      currentUiSettings: { paperAutoEnabled, parameters: airParams },
+      persistedSettings,
+      runtimeEffectiveSettings: scannerRuntimeDiagnostics,
+      scannerState: { scannerRunning: state.scannerRunning, snapshot: state.scannerSnapshot ? { scanId: state.scannerSnapshot.scanId, candidates: state.scannerSnapshot.candidates.length } : null },
+      autoBotsState: { ui: paperAutoEnabled, runtime: scannerRuntimeDiagnostics?.paperAutoEnabled === true },
+      manualOverrideState: { ui: airParams.strategySource === 'manual_override', runtime: scannerRuntimeDiagnostics?.manualMode === true },
+      executionAdapterState: { mode: engine.getAdapter().isLive ? 'live' : 'demo', paperAutoBuyFnPresent: scannerRuntimeDiagnostics?.paperAutoBuyFnPresent === true, liveBuyFnPresent: scannerRuntimeDiagnostics?.liveBuyFnPresent === true },
+      environment: {
+        isTauri: (envDiagnostics as any).canInvokeGetDbPath === true || (envDiagnostics as any).hasTauriInternals === true,
+        isPackaged: typeof window !== 'undefined' && window.location.protocol === 'tauri:',
+        appDataDirAvailable: Boolean((envDiagnostics as any).dbPath),
+        localStorageAvailable,
+        indexedDbAvailable,
+        configFileReadable: (envDiagnostics as any).canInvokeGetDbPath === true || localStorageAvailable,
+        configFileWritable: localStorageAvailable || settingsPersistence.getPersistenceBackend() === 'tauri_app_state',
+        helperBinariesAvailable: true,
+        envOk: (((envDiagnostics as any).canInvokeGetDbPath === true || localStorageAvailable) && (localStorageAvailable || settingsPersistence.getPersistenceBackend() === 'tauri_app_state')),
+      },
+      recentInvariantWarnings: logger.getLogs?.().filter((entry: any) => String(entry.message ?? entry).includes('AUTOBOTS_UI_RUNTIME_MISMATCH_WARNING') || String(entry.message ?? entry).includes('AUTOBOTS_MANUAL_OVERRIDE_INVARIANT_AUDIT')).slice(-25) ?? [],
+      envDiagnostics,
+    };
+    logger.info(`PACKAGED_BUILD_ENVIRONMENT_AUDIT: isTauri=${String(snapshot.environment.isTauri)} isPackaged=${String(snapshot.environment.isPackaged)} appDataDirAvailable=${String(snapshot.environment.appDataDirAvailable)} localStorageAvailable=${String(localStorageAvailable)} indexedDbAvailable=${String(indexedDbAvailable)} configFileReadable=${String(snapshot.environment.configFileReadable)} configFileWritable=${String(snapshot.environment.configFileWritable)} helperBinariesAvailable=true envOk=${String(snapshot.environment.envOk)}`);
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cryptobud-runtime-diagnostics-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   // Overwrite detector: check if snapshot would override user's AutoBots choice
   const snapPaperAuto = snapshot?.paperAutoEnabled;
   if (snapPaperAuto !== undefined && snapPaperAuto !== paperAutoEnabled && autoBotsLastToggleRef.current > 0) {
@@ -595,7 +724,7 @@ export function TradePage({
             if (paperAutoEnabled) {
               logger.info('MANUAL_DIPPER_SETUP_DISABLED_AUTOBOTS_ON: autoBotsOn=true manualSetupEditable=false');
             }
-            setAirParams(next);
+            setAirParams(paperAutoEnabled && next.strategySource === 'manual_override' ? { ...next, strategySource: 'autobots' } : next);
           }}
           onStartScanner={() => {
             if (!hasEnabledScannerRiskGroup) {
@@ -608,6 +737,8 @@ export function TradePage({
           }}
           onStopScanner={() => { onStopScanner?.(); }}
           onTogglePaperAuto={handleTogglePaperAuto}
+          runtimeStatus={runtimeStatus}
+          onExportRuntimeDiagnostics={exportRuntimeDiagnostics}
           onSelectSymbol={(symbol) => selectSymbol(symbol)}
           onAddWatchlist={(symbol) => onAddCoin(symbol)}
           onManualBuy={(symbol) => { void onManualBuy?.(symbol); }}

@@ -32,6 +32,9 @@ ok(openSrc.includes('PAGE_SIZE = 10') && openSrc.includes('Page {safePage} / {to
 ok(closedSrc.includes('PAGE_SIZE = 10') && closedSrc.includes('Page {safePage} / {totalPages}'), 'D Closed Positions paginates at 10 rows');
 ok(openSrc.includes('Prev') && openSrc.includes('Next') && closedSrc.includes('Prev') && closedSrc.includes('Next'), 'E pagination prev/next works');
 ok(paramsSrc.includes('Strategy') && paramsSrc.includes('Stop Loss (SL)') && paramsSrc.includes('TP1') && paramsSrc.includes('TP2') && paramsSrc.includes('Ref Window') && paramsSrc.includes('Ref Mode'), 'F Trading Parameters card renders required fields');
+ok(paramsSrc.includes('REF_MODE_HELPERS') && paramsSrc.includes('data-testid="ref-mode-helper-dropdown"'), 'F1 Ref Mode uses custom helper dropdown');
+ok(['AUTO', 'SMA', 'EMA', 'VWAP', 'BOLLINGER'].every(mode => paramsSrc.includes(`data-testid={\`ref-mode-option-${mode}\`}`) || paramsSrc.includes(`${mode}: {`)), 'F1b Ref Mode helper covers every mode type');
+ok(!paramsSrc.includes('<select value={v.refMode}'), 'F1c Ref Mode is not a native select because option hover helpers do not work reliably');
 ok(paramsSrc.includes('AutoBots dynamic per coin'), 'F2 AutoBots mode displays TP1 as dynamic ownership');
 ok(paramsSrc.includes('0 / disabled in AutoBots'), 'F3 AutoBots mode displays TP2 disabled');
 ok(paramsSrc.includes('Starts at TP1'), 'F4 AutoBots mode displays trailing start ownership');
@@ -122,11 +125,11 @@ ok(topSrc.includes('Conf = confidence %'), 'R2 Legend explains Conf is confidenc
 ok(topSrc.includes('c.confidence') || topSrc.includes('confDisplay'), 'R3 Confidence is rendered in TopCandidatesPanel');
 ok(!topSrc.includes('c.score != null'), 'R4 Score column removed from Watch Pool (now shows Price/Trend)');
 ok(topSrc.includes('c.symbol.replace("USDT"'), 'R5 Coin column strips USDT suffix');
-ok(topSrc.includes("c.status === 'BUY'") && topSrc.includes("c.status === 'WAIT'"), 'R6 Status column shows status only');
+ok(topSrc.includes("c.status === 'BUY'") && topSrc.includes("status === 'WAIT'"), 'R6 Status column shows status only');
 
 // Score/Conf separation still exists in SelectedCoinInspector
-ok(selectedSrc.includes('Raw scanner ranking score'), 'R7 Selected Coin SCORE shows tooltip explanation');
-ok(selectedSrc.includes('Independent from score'), 'R8 Selected Coin CONF shows tooltip explanation');
+ok(selectedSrc.includes('label="Score"'), 'R7 Selected Coin SCORE shows tooltip explanation');
+ok(selectedSrc.includes('label="Conf"'), 'R8 Selected Coin CONF shows tooltip explanation');
 
 // AirCoin bubble: score labeled with S prefix
 ok(airCoinSrc.includes('S{coin.score.toFixed(0)}'), 'R9 AirCoin bubble labels score with S prefix');

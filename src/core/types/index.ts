@@ -240,6 +240,11 @@ export interface ExitInput {
   maxHoldSec: number;
   mode: TradingMode;
   isLive: boolean;
+  timeBasedExitEnabled: boolean;
+  resumeGuardActive: boolean;
+  exitCyclesSinceHydration: number;
+  maxTimeBasedExitsPerCycle: number;
+  priceAgeMs: number;
 }
 
 export interface ExitDecision {
@@ -989,7 +994,26 @@ export interface AutoStrategyDecision {
 
 export type ScannerState = 'OFF' | 'IDLE' | 'WARMING_UP' | 'SCANNING' | 'COOLDOWN' | 'ERROR';
 export type UniverseMode = 'WATCHLIST' | 'TOP_20' | 'TOP_50' | 'BINANCE_TOP_250' | 'HIGH_RISK' | 'VERY_HIGH_RISK' | 'CUSTOM';
-export type CandidateStatus = 'BUY' | 'WAIT' | 'BLOCK' | 'AVOID';
+export type CandidateStatus =
+  | 'BUY'
+  | 'WAIT'
+  | 'BLOCK'
+  | 'AVOID'
+  | 'WAITING_CONFIRMATION'
+  | 'WAIT_DIP_CONFIRMATION'
+  | 'WAIT_REBOUND_FRESHNESS'
+  | 'WAITING_MOMENTUM'
+  | 'WAIT_SPREAD'
+  | 'WAIT_TP_ROOM'
+  | 'WAIT_PRICE_FRESHNESS'
+  | 'WAIT_BOOK_FRESHNESS'
+  | 'WAIT_RUNTIME_STATE'
+  | 'WAIT_STRATEGY_DECISION'
+  | 'WAIT_STRATEGY_HANDOFF'
+  | 'WAIT_ENTRY_CONTRACT'
+  | 'WAIT_RISK_GROUP'
+  | 'WAIT_PROFESSIONAL_GATE'
+  | 'INVALID_RUNTIME_STATE';
 
 export interface ScannerCandidate {
   candidateId: string;
@@ -1046,6 +1070,27 @@ export interface ScannerCandidate {
   periodVolatility?: number | null;
   periodRegime?: string | null;
   autoStrategyDecision?: AutoStrategyDecision;
+  autoBotsRuntimeState?: import('../runtime/autobots-state').AutoBotsCanonicalState;
+  runtimeSnapshot?: import('../scanner/CandidateLifecycle').CandidateRuntimeSnapshot;
+  candidateBirthSource?: string;
+  lastTransformSource?: string;
+  candidateStatusSource?: string;
+  suppressedSecondaryBlockers?: string[];
+  strategyDecision?: import('../scanner/CandidateLifecycle').CandidateStrategyDecisionSnapshot;
+  executionPrecheckSnapshot?: import('../scanner/CandidateLifecycle').CandidateExecutionPrecheckSnapshot;
+  promotionAudit?: import('../scanner/CandidateLifecycle').CandidatePromotionAudit;
+  lifecycleStatus?: import('../scanner/CandidateLifecycle').CandidateLifecycleStatus;
+  canonicalDisplayStatus?: import('../scanner/CandidateLifecycle').CandidateCanonicalDisplayStatus;
+  primaryBlocker?: string;
+  finalNoBuyReason?: string;
+  actionableNoBuyReason?: string;
+  technicalNoBuyReason?: string;
+  secondaryDiagnosticReasons?: string[];
+  handoffIntegrityStatus?: 'ok' | 'failed' | 'not_applicable' | string;
+  finalExecutable?: boolean;
+  buyAllowed?: boolean;
+  professionalGateMode?: 'advisory' | 'hard_gate' | string;
+  professionalAnalysis?: unknown;
   effectiveStrategy?: string;
   groupRecommendedStrategy?: string;
   marketBestFit?: string | null;
@@ -1383,6 +1428,8 @@ export interface PaperAutoExecutionResult {
   stage?: 'PreCheckPassed' | 'ExecutionSubmitted' | 'DemoFillCreated' | 'PaperFillCreated' | 'PositionOpened' | 'ExecutionFailed';
   adapterCalled?: boolean;
   adapterResult?: string;
+  orderId?: string;
+  positionId?: string;
   positionCreateAttempted?: boolean;
   positionCreated?: boolean;
   openPositionsBefore?: number;
@@ -1774,6 +1821,9 @@ export interface AppSettings {
   tp2Pct: number;
   dynamicTrailingEnabled: boolean;
   trailPullbackPct: number;
+  timeBasedExitEnabled: boolean;
+  defaultMaxHoldHours: number;
+  maxTimeBasedExitsPerCycle: number;
   paperAutoExecutionEnabled: boolean;
   microScalperFeatureEnabled: boolean;
   graphicsQuality: GraphicsQualitySetting;
@@ -1854,6 +1904,9 @@ export function createDefaultAppSettings(): AppSettings {
     tp2Pct: 4.0,
     dynamicTrailingEnabled: false,
     trailPullbackPct: 0.25,
+    timeBasedExitEnabled: false,
+    defaultMaxHoldHours: 48,
+    maxTimeBasedExitsPerCycle: 2,
     paperAutoExecutionEnabled: true,
     microScalperFeatureEnabled: true,
     graphicsQuality: 'balanced',
@@ -2084,6 +2137,7 @@ export interface MlRuntimeGuardState {
   modelTrained: boolean;
   lastModeChangeAt: string | null;
   persisted: boolean;
+  mlExitsEnabled: boolean;
   counters: MlRuntimeCounters;
 }
 

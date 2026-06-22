@@ -199,6 +199,9 @@ ok(selectedBuyCoin[0]?.engineState === 'locked', '14b clicked BUY coin enters se
 const selectedBuy = selectedBuyCoin[0]!;
 const focusedSelectedCoin = updateAirCoinMotion({ ...selectedBuy, x: 260, y: 140, z: -180 }, 1000);
 ok(focusedSelectedCoin.z > -180 && focusedSelectedCoin.x < 260 && focusedSelectedCoin.y < 140, '14c selected focus moves toward stable front target');
+let centeredSelectedCoin = { ...selectedBuy, x: 260, y: 140, z: -180 };
+for (let i = 0; i < 36; i++) centeredSelectedCoin = updateAirCoinMotion(centeredSelectedCoin, 1000 + i);
+ok(Math.abs(centeredSelectedCoin.x) < 3 && centeredSelectedCoin.z > 280, '14d clicked coin settles centered in front of user, not on the left side');
 
 const timerCheck = reduceScannerCoinLifecycle(entries, { nowMs: 40 + 32_300, candidates: [], openPositions: [], closedPositions: [closed()] });
 ok(timerCheck.hasActiveTimers === false, '15 closed/removed lifecycle has no timer leak');
@@ -217,10 +220,10 @@ ok(scannerCss.includes('.air-coin-locked_for_buy::before') && scannerCss.include
 ok(scannerCss.includes('--open-sphere-material') && scannerCss.includes('.air-coin-pull_to_center .air-coin-orb') && scannerCss.includes('var(--open-sphere-material)'), '20c after 30s teleport phase turns toward open-position blue sphere');
 
 const scanner3dSrc = await import('node:fs').then(fs => fs.readFileSync('src/components/trade-v4/AirScanner3D.tsx', 'utf8'));
-ok(scanner3dSrc.includes('pullFade') && scanner3dSrc.includes('1 - pullProgress'), '21 pull_to_center fades after 30 second hold');
+ok(scanner3dSrc.includes('const opacity = isTransferCoin') && scanner3dSrc.includes('? 1'), '21 transfer coin remains fully opaque during buy/open teleport');
 ok(scanner3dSrc.includes('hasTransferCoin') && scanner3dSrc.includes('scanner-transfer-active'), '22 scanner marks active transfer to keep sphere visually dominant');
 ok(scanner3dSrc.includes('--pull-tether-length') && scanner3dSrc.includes('Math.atan2(-next.y, -next.x)'), '23 scanner computes lightning tether direction from sphere to center');
-ok(scanner3dSrc.includes('centerCoreDotSuppressed') && scannerCss.includes('data-center-core-dot-suppressed="true"'), '23b scanner suppresses pink center dot once transfer reaches scanner core');
+ok(!scanner3dSrc.includes('centerCoreDotSuppressed') && !scannerCss.includes('data-center-core-dot-suppressed="true"'), '23b scanner no longer hides transfer sphere at the center core');
 
 const motionSrc = await import('node:fs').then(fs => fs.readFileSync('src/lib/air-scanner/airCoinMotion.ts', 'utf8'));
 ok(motionSrc.includes('coin.engineState === "locked_for_buy" || coin.engineState === "execution_submitted"'), '24 BUY lock/submitted states are pulled toward scanner center');

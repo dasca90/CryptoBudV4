@@ -325,14 +325,6 @@
   animation: buy-sphere-breathe 1.25s ease-in-out infinite;
 }
 
-.air-coin[data-center-core-dot-suppressed="true"] .air-coin-orb {
-  opacity: 0 !important;
-  transform: scale(0.05);
-  border-color: transparent !important;
-  box-shadow: none !important;
-  animation: none !important;
-}
-
 .air-coin-position_opened_hold .air-coin-orb {
   border-color: rgba(255, 127, 247, 0.86);
   background: var(--buy-sphere-material) !important;

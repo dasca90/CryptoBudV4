@@ -4,6 +4,7 @@ import { logger } from '../../utils/logger';
 export class PositionManager {
   private positions: Map<string, Position> = new Map();
   private listeners: Set<(positions: Position[], reason: string, symbol?: string) => void> = new Set();
+  private lastUpdateLogAt: Map<string, number> = new Map();
 
   getOpenPositions(): Position[] {
     return Array.from(this.positions.values());
@@ -33,7 +34,12 @@ export class PositionManager {
     const existing = this.positions.get(symbol);
     if (!existing) return;
     Object.assign(existing, patch);
-    logger.info(`POSITION_MANAGER_UPDATE: ${symbol}`);
+    const now = Date.now();
+    const previousLogAt = this.lastUpdateLogAt.get(symbol) ?? 0;
+    if (now - previousLogAt > 30000) {
+      this.lastUpdateLogAt.set(symbol, now);
+      logger.info(`POSITION_MANAGER_UPDATE: ${symbol} rateLimited=true`);
+    }
     this.emit('update', symbol);
   }
 
@@ -45,11 +51,13 @@ export class PositionManager {
     }
     logger.info(`POSITION_MANAGER_CLOSE: ${symbol} pnl=${closeSnapshot.pnlUsd.toFixed(2)} reason=${closeSnapshot.exitReason}`);
     this.positions.delete(symbol);
+    this.lastUpdateLogAt.delete(symbol);
     this.emit('close', symbol);
   }
 
   removePosition(symbol: string): void {
     this.positions.delete(symbol);
+    this.lastUpdateLogAt.delete(symbol);
     logger.info(`POSITION_MANAGER_CLOSE: ${symbol} removed`);
     this.emit('remove', symbol);
   }
@@ -95,6 +103,7 @@ export class PositionManager {
     }
     const count = this.positions.size;
     this.positions.clear();
+    this.lastUpdateLogAt.clear();
     logger.info(`POSITION_MANAGER_CLEAR_ALL: ${count} positions cleared`);
     this.emit('clear');
   }

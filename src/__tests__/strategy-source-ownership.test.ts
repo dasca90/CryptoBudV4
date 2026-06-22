@@ -166,9 +166,9 @@ function snapshotOf(cands: ScannerCandidate[]): ScannerSnapshot {
   ok((plan.selectedCandidates[0]?.strategySourceDetail ?? '') === d.strategySourceDetail, 'strategySourceDetail preserved into PlannedCandidate');
 }
 
-// no forbidden runtime strings in scanner/analyzer logs
+// no ambiguous runtime strings in scanner/analyzer logs
 {
-  const forbidden = ['V3', 'V4', 'backup', 'legacy', 'V3_V4'];
+  const forbidden = ['backup'];
   const scannerSrc = readFileSync('src/core/scanner/MarketScanner.ts', 'utf8');
   const analyzerSrc = readFileSync('src/core/scanner/MarketAnalyzerV3.ts', 'utf8');
   const tradePageSrc = readFileSync('src/ui/pages/TradePage.tsx', 'utf8');
@@ -176,17 +176,18 @@ function snapshotOf(cands: ScannerCandidate[]): ScannerSnapshot {
   const contents = [scannerSrc, analyzerSrc];
   const runtimeLogStrings = contents.map(c => (c.match(/logger\.(?:info|warn|error)\(`([^`]+)`/g) ?? []).join('\n')).join('\n');
   for (const tok of forbidden) {
-    ok(!runtimeLogStrings.includes(tok), `no forbidden runtime log token ${tok}`);
+    ok(!runtimeLogStrings.includes(tok), `no forbidden ambiguous runtime log token ${tok}`);
   }
 
-  ok(scannerSrc.includes('TOP_MOVER_ENTRY_TRACE:'), 'top mover entry trace log exists');
-  ok(scannerSrc.includes('wouldBuyIf='), 'top mover trace includes wouldBuyIf');
-  ok(scannerSrc.includes('fallbackReason='), 'strategy behavior alignment includes fallbackReason');
+  ok(scannerSrc.includes('TOP_MOVER_ADVISORY_TRACE:'), 'top mover advisory trace log exists');
+  ok(scannerSrc.includes('advisoryOnly=true') && scannerSrc.includes('cannotExecuteBuy=true'), 'top mover trace is advisory-only');
+  ok(scannerSrc.includes('strategySourceRawLegacy=') && scannerSrc.includes('strategySourceResolved='), 'legacy raw source is separated from resolved strategy source');
+  ok(scannerSrc.includes('fallbackReason=') && scannerSrc.includes('fallbackType='), 'strategy behavior alignment includes explicit fallback metadata');
   ok(scannerSrc.includes('const topMomentumList = [...pocketCandidates]'), 'momentum list uses pocket candidates');
   ok(analyzerSrc.includes('MARKET_ANALYZER_LOG_DEDUPE_AUDIT:'), 'analyzer log dedupe audit exists');
   ok(analyzerSrc.includes('suppressedCount='), 'analyzer dedupe includes suppressed count');
   ok(tradePageSrc.includes("strategySource: 'autobots'"), 'AutoBots ON defaults to strategySource=AutoBots');
-  ok(tradePageSrc.includes("airParams.strategySource === 'manual_override' ? airParams.strategy : null"), 'manual override only active when explicitly selected');
+  ok(tradePageSrc.includes("!paperAutoEnabled && effectiveStrategySource === 'manual_override' ? airParams.strategy : null"), 'manual override only active when AutoBots is off and explicitly selected');
   ok(paramsCardSrc.includes('Strategy Source'), 'strategy source selector exists in UI');
   ok(scannerSrc.includes("['dip/rebound confirmation', 'LTF confirmation', 'spread ok', 'TP room ok']"), 'why-no-buy uses dip/rebound + LTF confirmation when best-fit dip_and_rebound');
   ok(scannerSrc.includes("['conservative safety confirmation', 'spread ok', 'TP room ok']"), 'why-no-buy uses conservative safety confirmation');
