@@ -55,10 +55,10 @@ assert.ok(scannerScene.includes('IS_DEV &&'), 'graphics telemetry is dev-gated')
 const productionPreview = read('src/features/air-scanner-lab/AirScannerProductionPreview.tsx');
 assert.ok(productionPreview.includes('quality?: AirScannerQuality') && productionPreview.includes('normalizeGraphicsQuality(props.quality ?? storedQuality)'), 'production preview accepts persisted graphics quality from Trade V4');
 
-const tradeV4Page = read('src/components/trade-v4/TradeV4Page.tsx');
-assert.ok(tradeV4Page.includes('GRAPHICS_QUALITY_STORAGE_KEY') && tradeV4Page.includes('setGraphicsQuality'), 'Trade V4 exposes persisted graphics quality control');
-assert.ok(tradeV4Page.includes('<option value="low">Low</option>') && tradeV4Page.includes('<option value="balanced">Balanced</option>') && tradeV4Page.includes('<option value="high">High</option>'), 'Trade V4 graphics quality supports Low/Balanced/High');
-assert.ok(tradeV4Page.includes('quality={graphicsQuality}'), 'Trade V4 passes graphics quality into 3D production preview');
+const airScannerPage = read('src/ui/pages/AirScannerPage.tsx');
+assert.ok(airScannerPage.includes('loadPerformanceSettings') && airScannerPage.includes('setGraphicsQuality'), 'isolated Air Scanner tab exposes persisted graphics quality control');
+assert.ok(airScannerPage.includes('<option value="low">Low</option>') && airScannerPage.includes('<option value="balanced">Balanced</option>') && airScannerPage.includes('<option value="high">High</option>'), 'isolated Air Scanner tab graphics quality supports Low/Balanced/High');
+assert.ok(airScannerPage.includes('quality={graphicsQuality}'), 'isolated Air Scanner tab passes graphics quality into 3D production preview');
 
 for (const file of [
   'src/core/scanner/MarketScanner.ts',

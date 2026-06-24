@@ -454,7 +454,9 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
     primaryBlocker: strategyAudit.dynamicSetupContext?.primaryBlocker
       ?? strategyAudit.blockReasons[0]
       ?? (strategyAudit.finalExecutable ? null : 'finalExecutable_false'),
-    finalNoBuyReason: strategyAudit.finalNoBuyReason ?? candidate.finalNoBuyReason ?? null,
+    finalNoBuyReason: strategyAudit.finalExecutable === true && strategyAudit.buyAllowed === true
+      ? null
+      : strategyAudit.finalNoBuyReason ?? candidate.finalNoBuyReason ?? null,
     actionableNoBuyReason: strategyAudit.actionableNoBuyReason ?? candidate.actionableNoBuyReason ?? null,
     technicalNoBuyReason: strategyAudit.technicalNoBuyReason ?? candidate.technicalNoBuyReason ?? null,
     secondaryDiagnosticReasons: strategyAudit.secondaryDiagnosticReasons ?? candidate.secondaryDiagnosticReasons ?? [],

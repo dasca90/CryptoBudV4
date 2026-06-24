@@ -1,10 +1,22 @@
-import type { TradeRecord, MLPrediction } from '../types';
+import type { TradeRecord, MLPrediction, Position } from '../types';
 import { createMLLabel } from '../ml/ml-labeler';
 import { buildMLFeatures } from '../ml/ml-feature-builder';
 import { evaluateTradeMLQuality } from '../ml/ml-data-quality';
 import { tauriDb, InMemoryStore, detectRuntime, checkDatabaseHealth, logFallbackOnce } from './TauriBridge';
 import type { DbStatus } from './TauriBridge';
 import { logger } from '../../utils/logger';
+
+type OpenPositionPersistenceRow = { trade_id: string; symbol: string; position_json: string; buy_snapshot_json: string | null };
+
+export interface OpenPositionStoreReconciliationAudit {
+  positionManagerOpenCount: number;
+  storeOpenCount: number;
+  staleStorePositionIds: string[];
+  staleStoreSymbols: string[];
+  removedCount: number;
+  reconciliationSource: string;
+  invariantOk: boolean;
+}
 
 export class Journal {
   private trades: TradeRecord[] = [];
@@ -61,7 +73,7 @@ export class Journal {
     this.clearResetMarker();
   }
 
-  private readOpenPosFallback(): Array<{ trade_id: string; symbol: string; position_json: string; buy_snapshot_json: string | null }> {
+  private readOpenPosFallback(): OpenPositionPersistenceRow[] {
     try {
       const primary = localStorage.getItem(this.openPosKey);
       const backup = localStorage.getItem(this.openPosBackupKey);
@@ -102,7 +114,7 @@ export class Journal {
     return [];
   }
 
-  private writeOpenPosFallback(rows: Array<{ trade_id: string; symbol: string; position_json: string; buy_snapshot_json: string | null }>): void {
+  private writeOpenPosFallback(rows: OpenPositionPersistenceRow[]): void {
     try {
       if (!this.openPositionsHydrated && rows.length === 0) {
         const existingPrimary = localStorage.getItem(this.openPosKey);
@@ -403,6 +415,86 @@ export class Journal {
     return coin ? open.filter(t => t.coin === coin) : open;
   }
 
+  private positionToOpenTrade(position: Position): TradeRecord {
+    const snapshot = position.buySnapshot;
+    return {
+      tradeId: position.tradeId ?? snapshot?.tradeId ?? `${position.coin}-${position.openedAt}`,
+      coin: position.coin,
+      mode: position.mode,
+      side: 'BUY',
+      adapter: position.adapter ?? snapshot?.adapter ?? 'paper',
+      entryPrice: position.avgEntryPrice,
+      quantity: position.quantity,
+      entryTime: new Date(position.openedAt || Date.now()).toISOString(),
+      status: 'open',
+      mlConfidence: snapshot?.confidence,
+      prediction: snapshot?.mlPredictionAtEntry?.prediction,
+      strategy: snapshot?.selectedStrategy ?? 'unknown',
+      buySnapshot: snapshot,
+    };
+  }
+
+  async reconcileOpenPositionsToPositionManager(positions: Position[], reconciliationSource: string): Promise<OpenPositionStoreReconciliationAudit> {
+    const canonicalRows: OpenPositionPersistenceRow[] = positions.map((p) => {
+      const tradeId = p.tradeId ?? p.buySnapshot?.tradeId ?? `${p.coin}-${p.openedAt}`;
+      return {
+        trade_id: tradeId,
+        symbol: p.coin,
+        position_json: JSON.stringify({ ...p, tradeId }),
+        buy_snapshot_json: p.buySnapshot ? JSON.stringify(p.buySnapshot) : null,
+      };
+    });
+    const canonicalIds = new Set(canonicalRows.map(r => r.trade_id));
+    const canonicalSymbols = new Set(canonicalRows.map(r => r.symbol));
+    const existingRows = this.filterClosedFromOpen(await this.loadOpenPositions());
+    const staleRows = existingRows.filter(r => !canonicalIds.has(r.trade_id) || !canonicalSymbols.has(r.symbol));
+    const missingRows = canonicalRows.filter(r => !existingRows.some(e => e.trade_id === r.trade_id && e.symbol === r.symbol));
+    const storeOpenTradesBefore = this.getOpenTrades();
+    const staleOpenTrades = storeOpenTradesBefore.filter(t => !canonicalIds.has(t.tradeId) || !canonicalSymbols.has(t.coin));
+    const missingOpenTradePositions = positions.filter(p => {
+      const tradeId = p.tradeId ?? p.buySnapshot?.tradeId ?? `${p.coin}-${p.openedAt}`;
+      return !storeOpenTradesBefore.some(t => t.tradeId === tradeId && t.coin === p.coin && t.status === 'open');
+    });
+    const needsRepair =
+      existingRows.length !== canonicalRows.length ||
+      staleRows.length > 0 ||
+      missingRows.length > 0 ||
+      storeOpenTradesBefore.length !== positions.length ||
+      staleOpenTrades.length > 0 ||
+      missingOpenTradePositions.length > 0;
+
+    if (needsRepair) {
+      this.trades = [
+        ...this.trades.filter(t => t.status !== 'open' || (canonicalIds.has(t.tradeId) && canonicalSymbols.has(t.coin))),
+        ...missingOpenTradePositions.map(p => this.positionToOpenTrade(p)),
+      ];
+      this.writeOpenPosFallback(canonicalRows);
+      if (this.useTauri && this.tauriReady) {
+        for (const stale of staleRows) {
+          try { await tauriDb.deleteOpenPosition(stale.trade_id); } catch { /* best-effort reconciliation */ }
+        }
+        for (const row of canonicalRows) {
+          try { await tauriDb.saveOpenPosition(row.trade_id, row.symbol, row.position_json, row.buy_snapshot_json ?? undefined); } catch { /* best-effort reconciliation */ }
+        }
+        for (const trade of missingOpenTradePositions.map(p => this.positionToOpenTrade(p))) {
+          try { await tauriDb.saveTrade(trade); } catch { /* best-effort reconciliation */ }
+        }
+      }
+    }
+
+    const audit: OpenPositionStoreReconciliationAudit = {
+      positionManagerOpenCount: positions.length,
+      storeOpenCount: storeOpenTradesBefore.length,
+      staleStorePositionIds: [...new Set([...staleRows.map(r => r.trade_id), ...staleOpenTrades.map(t => t.tradeId)])],
+      staleStoreSymbols: [...new Set([...staleRows.map(r => r.symbol), ...staleOpenTrades.map(t => t.coin)])],
+      removedCount: new Set([...staleRows.map(r => r.trade_id), ...staleOpenTrades.map(t => t.tradeId)]).size,
+      reconciliationSource,
+      invariantOk: this.getOpenTrades().length === positions.length && canonicalRows.length === positions.length,
+    };
+    logger.info(`OPEN_POSITION_STORE_RECONCILIATION_AUDIT: positionManagerOpenCount=${audit.positionManagerOpenCount} storeOpenCount=${audit.storeOpenCount} staleStorePositionIds=${audit.staleStorePositionIds.join('|') || 'none'} staleStoreSymbols=${audit.staleStoreSymbols.join('|') || 'none'} removedCount=${audit.removedCount} reconciliationSource=${audit.reconciliationSource} invariantOk=${String(audit.invariantOk)}`);
+    return audit;
+  }
+
   getPredictions(coin?: string): MLPrediction[] {
     return coin ? this.predictions.filter(p => p.coin === coin) : [...this.predictions];
   }
@@ -521,7 +613,7 @@ export class Journal {
     }
   }
 
-  async loadOpenPositions(): Promise<Array<{ trade_id: string; symbol: string; position_json: string; buy_snapshot_json: string | null }>> {
+  async loadOpenPositions(): Promise<OpenPositionPersistenceRow[]> {
     if (!this.useTauri || !this.tauriReady) return this.readOpenPosFallback();
     try {
       const rows = await tauriDb.getOpenPositions();
@@ -540,7 +632,7 @@ export class Journal {
     }
   }
 
-  private filterClosedFromOpen(rows: Array<{ trade_id: string; symbol: string; position_json: string; buy_snapshot_json: string | null }>): Array<{ trade_id: string; symbol: string; position_json: string; buy_snapshot_json: string | null }> {
+  private filterClosedFromOpen(rows: OpenPositionPersistenceRow[]): OpenPositionPersistenceRow[] {
     if (rows.length === 0) return rows;
     const closedTradeIds = new Set(this.getClosedTrades().map(t => t.tradeId).filter(Boolean));
     const filtered = rows.filter(r => !closedTradeIds.has(r.trade_id));

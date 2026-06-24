@@ -28,6 +28,13 @@ export interface AirScannerMemoryAuditSnapshot {
   lastAirScannerCleanupAt: number | null;
 }
 
+export interface AirScannerCleanupAudit {
+  disposedGeometries: number;
+  disposedMaterials: number;
+  disposedTextures: number;
+  removedSceneObjects: number;
+}
+
 let cleanupCount = 0;
 let lastAirScannerCleanupAt: number | null = null;
 
@@ -72,23 +79,30 @@ function disposeMaybe(value: unknown): void {
   }
 }
 
-export function disposeAirScannerSceneResources(root: TraversableObject | null | undefined): void {
+export function disposeAirScannerSceneResources(root: TraversableObject | null | undefined): AirScannerCleanupAudit {
   const children = [...(root?.children ?? [])];
+  const geometries = new Set<unknown>();
+  const materials = new Set<unknown>();
+  const textures = new Set<unknown>();
   root?.traverse?.((node) => {
     if (!node || typeof node !== 'object') return;
     const object = node as { geometry?: unknown; material?: unknown };
+    if (object.geometry) geometries.add(object.geometry);
     disposeMaybe(object.geometry);
     for (const material of asArray(object.material)) {
-      countMaterialTextures(material, {
-        add(texture: unknown) {
-          disposeMaybe(texture);
-          return this;
-        },
-      } as Set<unknown>);
+      materials.add(material);
+      countMaterialTextures(material, textures);
       disposeMaybe(material);
     }
   });
+  for (const texture of textures) disposeMaybe(texture);
   if (children.length > 0) root?.remove?.(...children);
+  return {
+    disposedGeometries: geometries.size,
+    disposedMaterials: materials.size,
+    disposedTextures: textures.size,
+    removedSceneObjects: children.length,
+  };
 }
 
 export function buildAirScannerMemoryAuditSnapshot(input: {

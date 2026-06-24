@@ -4,6 +4,14 @@ import { getTrendTone } from "../../lib/ui/trendColorHelper";
 import { logger } from "../../utils/logger";
 import { formatFinalNoBuyReasonPriorityAudit, resolveFinalNoBuyReasonPriority } from "../../core/scanner/finalNoBuyReasonPriority";
 
+const DEBUG_UI_AUDITS = (() => {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem('cryptobud_v4:debug_ui_audits') === 'true';
+  } catch {
+    return false;
+  }
+})();
+
 type SourceFilter = 'All' | 'Dipper' | 'Scalper';
 type TopCandidateDisplay = {
   status: string;
@@ -126,9 +134,13 @@ function normalizeFinalNoBuyReason(reason: string | null | undefined): string {
   return raw.toUpperCase();
 }
 
+function isExecutableBuyReady(candidate: TradeV4CandidateView): boolean {
+  return candidate.finalExecutable === true && candidate.buyAllowed === true;
+}
+
 function getCanonicalExecutionReason(candidate: TradeV4CandidateView, fallback?: string | null): string {
   const decisionReason = normalizeFinalNoBuyReason(candidate.executionDecision?.finalNoBuyReason);
-  if (candidate.finalExecutable === true && candidate.buyAllowed === true && decisionReason) return decisionReason;
+  if (isExecutableBuyReady(candidate)) return decisionReason;
   const priority = resolveFinalNoBuyReasonPriority({
     symbol: candidate.symbol,
     rawStatus: candidate.status,
@@ -138,7 +150,7 @@ function getCanonicalExecutionReason(candidate: TradeV4CandidateView, fallback?:
     primaryBlocker: candidate.primaryBlocker ?? candidate.strategyAudit?.dynamicSetupContext?.primaryBlocker,
     setupResult: candidate.strategyAudit?.setupResult ?? candidate.strategyAudit?.dynamicSetupContext?.setupResult,
     candidateWhy: candidate.mainReason,
-    previousFinalNoBuyReason: candidate.finalNoBuyReason ?? fallback,
+    previousFinalNoBuyReason: isExecutableBuyReady(candidate) ? 'none' : candidate.finalNoBuyReason ?? fallback,
     blockReasons: [...(candidate.blockReasons ?? []), ...(candidate.strategyAudit?.blockReasons ?? [])],
     entryGateBlocker: candidate.gateAudit?.blocker,
     strategyContractBlocker: candidate.strategyAudit?.strategyContractBlocker,
@@ -158,6 +170,7 @@ function getCanonicalDisplayParams(input: {
   const decisionReason = normalizeFinalNoBuyReason(c.executionDecision?.finalNoBuyReason);
   const skippedReason = normalizeFinalNoBuyReason(input.skippedReasons?.get(c.symbol));
   const fallbackReason = normalizeFinalNoBuyReason(input.fallbackFinalNoBuyReason);
+  const previousFinalNoBuyReason = isExecutableBuyReady(c) ? 'none' : fallbackReason || skippedReason;
   const priority = resolveFinalNoBuyReasonPriority({
     symbol: c.symbol,
     rawStatus: c.status,
@@ -167,17 +180,19 @@ function getCanonicalDisplayParams(input: {
     primaryBlocker: c.primaryBlocker ?? c.strategyAudit?.dynamicSetupContext?.primaryBlocker,
     setupResult: c.strategyAudit?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult,
     candidateWhy: c.mainReason,
-    previousFinalNoBuyReason: fallbackReason || skippedReason,
+    previousFinalNoBuyReason,
     blockReasons: [...(c.blockReasons ?? []), ...(c.strategyAudit?.blockReasons ?? [])],
     entryGateBlocker: c.gateAudit?.blocker,
     strategyContractBlocker: c.strategyAudit?.strategyContractBlocker,
     executionDecisionFinalNoBuyReason: decisionReason,
     handoffMismatch: c.handoffIntegrityStatus === 'failed' || c.strategyAudit?.handoffIntegrityStatus === 'failed',
   });
-  const finalNoBuyReason = priority.resolvedFinalNoBuyReason === 'UNKNOWN'
+  const finalNoBuyReason = isExecutableBuyReady(c)
+    ? decisionReason || 'none'
+    : priority.resolvedFinalNoBuyReason === 'UNKNOWN'
     ? decisionReason || skippedReason || fallbackReason
     : priority.resolvedFinalNoBuyReason;
-  logger.info(formatFinalNoBuyReasonPriorityAudit({
+  if (DEBUG_UI_AUDITS || !priority.invariantOk) logger.info(formatFinalNoBuyReasonPriorityAudit({
     symbol: c.symbol,
     rawStatus: c.status,
     displayStatus: c.lifecycleStatus ?? c.canonicalDisplayStatus?.canonicalStatus ?? c.status,
@@ -186,7 +201,7 @@ function getCanonicalDisplayParams(input: {
     primaryBlocker: c.primaryBlocker ?? c.strategyAudit?.dynamicSetupContext?.primaryBlocker,
     setupResult: c.strategyAudit?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult,
     candidateWhy: c.mainReason,
-    previousFinalNoBuyReason: fallbackReason || skippedReason,
+    previousFinalNoBuyReason,
     blockReasons: [...(c.blockReasons ?? []), ...(c.strategyAudit?.blockReasons ?? [])],
     entryGateBlocker: c.gateAudit?.blocker,
     strategyContractBlocker: c.strategyAudit?.strategyContractBlocker,
@@ -363,6 +378,8 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
   const syncSourceRef = useRef<'none' | 'wrap' | 'top'>('none');
   const syncRafRef = useRef<number | null>(null);
   const lastScrollLeftRef = useRef(0);
+  const lastDisplayAuditSigRef = useRef('');
+  const candidateAuditSigRef = useRef(new Map<string, { sig: string; at: number }>());
   const [tableScrollWidth, setTableScrollWidth] = useState(0);
 
   const filtered = useMemo(() => sourceFilter === 'All'
@@ -403,7 +420,10 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
       const display = resolveTopCandidateDisplay({ candidate: c, ...params });
       return `${c.symbol}:${c.status}:${String(c.finalExecutable)}:${display.status}:${display.whyLabel}:${params.finalNoBuyReason || 'none'}`;
     }).join('|');
-    logger.info(`TOP_CANDIDATE_DISPLAY_AUDIT: mode=${viewMode} count=${top.length} compact=${String(viewMode === 'compact')} detailed=${String(viewMode === 'detailed')} signature=${displaySig || 'none'}`);
+    if (DEBUG_UI_AUDITS || lastDisplayAuditSigRef.current !== displaySig) {
+      lastDisplayAuditSigRef.current = displaySig;
+      logger.info(`TOP_CANDIDATE_DISPLAY_AUDIT: mode=${viewMode} count=${top.length} compact=${String(viewMode === 'compact')} detailed=${String(viewMode === 'detailed')} signature=${displaySig || 'none'}`);
+    }
     const buyReadyCount = top.filter((c) => c.status === 'BUY' && c.finalExecutable === true && c.buyAllowed === true).length;
     const selectedCount = props.executionPlan?.selectedCandidates?.length ?? 0;
     const attemptedCount = 0; // not available in UI — we use handoffEmitted as proxy
@@ -420,26 +440,36 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
         candidate: c,
         ...displayParams,
       });
-      logger.info(`TOP_CANDIDATE_STATUS_REASON_AUDIT: symbol=${c.symbol} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} why=${display.whyLabel} finalNoBuyReason=${display.exactSkipReason || displayParams.finalNoBuyReason || 'none'} primaryBlocker=${c.primaryBlocker ?? 'none'} setupResult=${c.executionDecision?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult ?? 'none'}`);
       const canonicalStatus = String((c as any).canonicalDisplayStatus?.canonicalStatus ?? c.lifecycleStatus ?? c.status);
       const displayBuyWithNonExecutable = display.status === 'BUY' && (c.finalExecutable === false || c.buyAllowed === false);
       const rawBuyIntentCanonicalWait = c.status === 'BUY' && canonicalStatus !== 'BUY' && display.status !== 'BUY';
       const canonicalFailureReason = displayBuyWithNonExecutable
         ? 'RAW_BUY_WITH_NON_EXECUTABLE_CANDIDATE'
         : 'none';
-      logger.info(`TOP_CANDIDATE_CANONICAL_STATUS_AUDIT: symbol=${c.symbol} scanId=${c.executionDecision?.scanId ?? (c as any).scanId ?? c.candidateId ?? 'n/a'} canonicalStatus=${canonicalStatus} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} primaryBlocker=${c.primaryBlocker ?? 'none'} finalNoBuyReason=${display.exactSkipReason || displayParams.finalNoBuyReason || 'none'} setupResult=${c.executionDecision?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult ?? 'none'} statusSource=${(c as any).canonicalDisplayStatus?.statusSource ?? 'TopCandidatesPanel.canonical_consumer'} normalizedBy=${(c as any).canonicalDisplayStatus?.normalizedBy ?? 'upstream'} rawBuyIntentCanonicalWait=${String(rawBuyIntentCanonicalWait)} invariantOk=${String(!displayBuyWithNonExecutable)} failureReason=${canonicalFailureReason}`);
-      logger.info(`TOP_CANDIDATE_STATUS_INTEGRITY_AUDIT: symbol=${c.symbol} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} rawBuyIntentCanonicalWait=${String(rawBuyIntentCanonicalWait)} invariantOk=${String(!displayBuyWithNonExecutable)} reason=${displayBuyWithNonExecutable ? 'RAW_BUY_WITH_NON_EXECUTABLE_CANDIDATE' : 'status_consistent'}`);
+      const candidateAuditSig = `${c.status}|${canonicalStatus}|${display.status}|${String(c.finalExecutable)}|${String(c.buyAllowed)}|${display.whyLabel}|${display.exactSkipReason || displayParams.finalNoBuyReason || 'none'}|${c.primaryBlocker ?? 'none'}`;
+      const previousCandidateAudit = candidateAuditSigRef.current.get(c.symbol);
+      const shouldEmitCandidateAudit = DEBUG_UI_AUDITS
+        || !previousCandidateAudit
+        || previousCandidateAudit.sig !== candidateAuditSig
+        || Date.now() - previousCandidateAudit.at > 60_000
+        || displayBuyWithNonExecutable;
+      if (shouldEmitCandidateAudit) {
+        candidateAuditSigRef.current.set(c.symbol, { sig: candidateAuditSig, at: Date.now() });
+        logger.info(`TOP_CANDIDATE_STATUS_REASON_AUDIT: symbol=${c.symbol} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} why=${display.whyLabel} finalNoBuyReason=${display.exactSkipReason || displayParams.finalNoBuyReason || 'none'} primaryBlocker=${c.primaryBlocker ?? 'none'} setupResult=${c.executionDecision?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult ?? 'none'}`);
+        logger.info(`TOP_CANDIDATE_CANONICAL_STATUS_AUDIT: symbol=${c.symbol} scanId=${c.executionDecision?.scanId ?? (c as any).scanId ?? c.candidateId ?? 'n/a'} canonicalStatus=${canonicalStatus} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} primaryBlocker=${c.primaryBlocker ?? 'none'} finalNoBuyReason=${display.exactSkipReason || displayParams.finalNoBuyReason || 'none'} setupResult=${c.executionDecision?.setupResult ?? c.strategyAudit?.dynamicSetupContext?.setupResult ?? 'none'} statusSource=${(c as any).canonicalDisplayStatus?.statusSource ?? 'TopCandidatesPanel.canonical_consumer'} normalizedBy=${(c as any).canonicalDisplayStatus?.normalizedBy ?? 'upstream'} rawBuyIntentCanonicalWait=${String(rawBuyIntentCanonicalWait)} invariantOk=${String(!displayBuyWithNonExecutable)} failureReason=${canonicalFailureReason}`);
+        logger.info(`TOP_CANDIDATE_STATUS_INTEGRITY_AUDIT: symbol=${c.symbol} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} rawBuyIntentCanonicalWait=${String(rawBuyIntentCanonicalWait)} invariantOk=${String(!displayBuyWithNonExecutable)} reason=${displayBuyWithNonExecutable ? 'RAW_BUY_WITH_NON_EXECUTABLE_CANDIDATE' : 'status_consistent'}`);
+      }
       if (c.finalExecutable && !selectedForExecution) {
         const perCandidateFinalReason = display.exactSkipReason || displayParams.finalNoBuyReason || 'UNKNOWN_SKIP_REASON_BUG';
         const unknownSkipReason = perCandidateFinalReason === 'UNKNOWN_SKIP_REASON_BUG' || perCandidateFinalReason === 'UNKNOWN_EXECUTION_SELECTION_BUG' || perCandidateFinalReason === 'execution_not_triggered' || perCandidateFinalReason === 'Execution was not triggered';
         const auditLine = `TOP_CANDIDATE_BUY_READY_NOT_EXECUTED_AUDIT: symbol=${c.symbol} status=${display.status} why=${display.whyLabel} skipReason=${skipReason || perCandidateFinalReason} finalNoBuyReason=${perCandidateFinalReason}`;
-        if (unknownSkipReason) logger.warn(`${auditLine} candidateSnapshot=${JSON.stringify({ symbol: c.symbol, rank: c.rank, status: c.status, finalExecutable: c.finalExecutable, buyAllowed: c.buyAllowed, primaryBlocker: c.primaryBlocker, blockReasons: c.blockReasons })}`);
+        if (unknownSkipReason) logger.throttled('WARN', `${auditLine} candidateSnapshot=${JSON.stringify({ symbol: c.symbol, rank: c.rank, status: c.status, finalExecutable: c.finalExecutable, buyAllowed: c.buyAllowed, primaryBlocker: c.primaryBlocker, blockReasons: c.blockReasons })}`, `top_candidate_unknown_skip:${c.symbol}`, 60_000);
         else logger.info(auditLine);
         const skipAuditLine = `BUY_READY_EXECUTION_SKIP_UI_AUDIT: symbol=${c.symbol} rawStatus=${c.status} displayStatus=${display.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} selectedForExecution=false finalNoBuyReason=${display.exactSkipReason || perCandidateFinalReason} userMessage=${display.whyLabel}`;
-        if (unknownSkipReason) logger.warn(skipAuditLine);
+        if (unknownSkipReason) logger.throttled('WARN', skipAuditLine, `buy_ready_execution_skip_unknown:${c.symbol}`, 60_000);
         else logger.info(skipAuditLine);
         const d = c.executionDecision;
-        logger.warn(`BUY_READY_NOT_SELECTED_REASON_AUDIT: symbol=${c.symbol} finalExecutable=${String(d?.finalExecutable ?? c.finalExecutable)} buyAllowed=${String(d?.buyAllowed ?? c.buyAllowed)} setupResult=${d?.setupResult ?? 'SETUP_OK'} selectedForExecution=false submitAttempted=false adapterCalled=${String(d?.adapterCalled ?? false)} duplicateOpenPosition=${String(d?.duplicateOpenPosition ?? false)} pendingOrder=${String(d?.pendingOrderExists ?? false)} banned=${String(d?.banned ?? false)} spreadOk=${String(d?.spreadOk ?? true)} tpRoomOk=${String(d?.tpRoomOk ?? true)} priceFresh=${String(d?.priceFresh ?? true)} capitalOk=${String(d?.capitalOk ?? true)} maxOpenPositionsOk=${String(d?.maxOpenPositionsOk ?? true)} maxGroupPositionsOk=${String(d?.maxGroupPositionsOk ?? true)} maxGroupExposureOk=${String(d?.maxGroupExposureOk ?? true)} groupName=${d?.groupName ?? c.riskGroup ?? 'unknown'} groupOpenCount=${d?.groupOpenCount ?? 0} groupMaxOpen=${d?.groupMaxOpen ?? 0} groupExposure=${d?.groupExposure ?? 0} groupMaxExposure=${d?.groupMaxExposure ?? 0} finalNoBuyReason=${perCandidateFinalReason}`);
+        logger.info(`BUY_READY_NOT_SELECTED_REASON_AUDIT: symbol=${c.symbol} finalExecutable=${String(d?.finalExecutable ?? c.finalExecutable)} buyAllowed=${String(d?.buyAllowed ?? c.buyAllowed)} setupResult=${d?.setupResult ?? 'SETUP_OK'} selectedForExecution=false submitAttempted=false adapterCalled=${String(d?.adapterCalled ?? false)} duplicateOpenPosition=${String(d?.duplicateOpenPosition ?? false)} pendingOrder=${String(d?.pendingOrderExists ?? false)} banned=${String(d?.banned ?? false)} spreadOk=${String(d?.spreadOk ?? true)} tpRoomOk=${String(d?.tpRoomOk ?? true)} priceFresh=${String(d?.priceFresh ?? true)} capitalOk=${String(d?.capitalOk ?? true)} maxOpenPositionsOk=${String(d?.maxOpenPositionsOk ?? true)} maxGroupPositionsOk=${String(d?.maxGroupPositionsOk ?? true)} maxGroupExposureOk=${String(d?.maxGroupExposureOk ?? true)} groupName=${d?.groupName ?? c.riskGroup ?? 'unknown'} groupOpenCount=${d?.groupOpenCount ?? 0} groupMaxOpen=${d?.groupMaxOpen ?? 0} groupExposure=${d?.groupExposure ?? 0} groupMaxExposure=${d?.groupMaxExposure ?? 0} finalNoBuyReason=${perCandidateFinalReason}`);
       }
       const decisionReason = normalizeFinalNoBuyReason(c.executionDecision?.finalNoBuyReason);
       const skippedReason = normalizeFinalNoBuyReason(skippedMap.get(c.symbol));
@@ -448,7 +478,9 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
         decisionReason && displayReason && decisionReason !== displayReason ? 'row.finalNoBuyReason' : '',
         decisionReason && skippedReason && decisionReason !== skippedReason ? 'skippedCandidate.finalNoBuyReason' : '',
       ].filter(Boolean);
-      logger.info(`EXECUTION_DECISION_CONSUMER_INTEGRITY_AUDIT: symbol=${c.symbol} scanId=${c.executionDecision?.scanId ?? 'n/a'} rowSource=TopCandidatesPanel decisionSource=${c.executionDecision ? 'ExecutionDecision' : 'legacy_fallback'} rowDisplayStatus=${display.status} rowWhy=${display.whyLabel} rowFinalNoBuyReason=${displayReason || 'none'} executionDecisionFinalNoBuyReason=${decisionReason || 'none'} skippedCandidateFinalNoBuyReason=${skippedReason || 'none'} buyReadyNotSelectedFinalNoBuyReason=${displayReason || 'none'} renderedUserMessage=${display.whyLabel} mismatchFields=${mismatchFields.join('|') || 'none'} invariantOk=${String(mismatchFields.length === 0)}`);
+      if (DEBUG_UI_AUDITS || mismatchFields.length > 0 || shouldEmitCandidateAudit) {
+        logger.info(`EXECUTION_DECISION_CONSUMER_INTEGRITY_AUDIT: symbol=${c.symbol} scanId=${c.executionDecision?.scanId ?? 'n/a'} rowSource=TopCandidatesPanel decisionSource=${c.executionDecision ? 'ExecutionDecision' : 'legacy_fallback'} rowDisplayStatus=${display.status} rowWhy=${display.whyLabel} rowFinalNoBuyReason=${displayReason || 'none'} executionDecisionFinalNoBuyReason=${decisionReason || 'none'} skippedCandidateFinalNoBuyReason=${skippedReason || 'none'} buyReadyNotSelectedFinalNoBuyReason=${displayReason || 'none'} renderedUserMessage=${display.whyLabel} mismatchFields=${mismatchFields.join('|') || 'none'} invariantOk=${String(mismatchFields.length === 0)}`);
+      }
       const integrityViolation = c.status === 'BUY' && !c.finalExecutable && c.buyAllowed === true;
       if (integrityViolation) {
         logger.error(`BUY_STATUS_INTEGRITY_AUDIT: symbol=${c.symbol} status=${c.status} finalExecutable=${String(c.finalExecutable)} buyAllowed=${String(c.buyAllowed)} integrityViolation=true reason=finalExecutable_false_but_buyAllowed_true`);

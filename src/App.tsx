@@ -18,6 +18,7 @@ import { backupService } from './core/persistence/BackupService';
 import { refreshSystemTimeContext } from './utils/timeFormatter';
 import { AppShell } from './components/layout/AppShell';
 import { TradePage } from './ui/pages/TradePage';
+import { AirScannerPage } from './ui/pages/AirScannerPage';
 import { JournalPage } from './ui/pages/JournalPage';
 import { MLLabPage } from './ui/pages/MLLabPage';
 import { LogsPage } from './ui/pages/LogsPage';
@@ -31,7 +32,9 @@ import type { RefMode } from './core/scanner/ReferencePriceCalculator';
 import { SettingsPersistence } from './core/persistence/SettingsPersistence';
 import { TelegramNotifier } from './core/notifications/TelegramNotifier';
 import { buildEquityDisplayAudit, buildPaperBalancePositionIntegrityAudit, formatEquityDisplaySourceAudit, formatEquityZeroWithActiveRuntimeWarning, formatPaperBalancePositionIntegrityAudit } from './lib/execution/equityDisplayAudit';
-import { formatMemoryHealthAudit, getBrowserHeap, updateMemoryPressure } from './core/diagnostics/memoryLifecycle';
+import { formatMemoryBufferStatusAudit, formatMemoryGrowthReasonAudit, formatMemoryHealthAudit, formatMemoryPressureReasonAudit, getBrowserHeap, MEMORY_PRESSURE_WARNING_THRESHOLD, updateMemoryPressure } from './core/diagnostics/memoryLifecycle';
+import { formatOvernightStabilityAudit, getOvernightStabilityBootedAt, OVERNIGHT_STARTUP_GRACE_MS, updateOvernightStabilitySnapshot } from './core/diagnostics/overnightStability';
+import { getAirScannerCleanupStats } from './features/air-scanner-lab/utils/airScannerMemoryAudit';
 import type { MainTab } from './state/ui-store';
 import packageJson from '../package.json';
 
@@ -76,6 +79,7 @@ export default function App() {
     return new TradingEngine(adapter, ml, journal);
   });
   const [exporter] = useState(() => new JsonExporter(engine['journal'] as Journal));
+  const journal = engine['journal'] as Journal;
 
   const store = createUIStore();
   const storeRef = useRef(store);
@@ -102,10 +106,16 @@ export default function App() {
   }, [engine]);
   const lastPositionRenderAuditRef = useRef(0);
   const lastPositionUpdateRenderAtRef = useRef(0);
+  const lastStartupRecoveryAtRef = useRef<number | null>(null);
+  const lastOvernightStabilityAuditAtRef = useRef(0);
+  const lastMemoryGrowthSampleRef = useRef<{ heap: number | null; at: number } | null>(null);
   useEffect(() => {
     return engine.getPositionManager().subscribe((positions, reason, symbol) => {
       const structuralChange = reason !== 'update';
       const now = Date.now();
+      if (structuralChange && journal.isOpenPositionsHydrated()) {
+        void journal.reconcileOpenPositionsToPositionManager(positions, `position_manager_${reason}`);
+      }
       if (DEBUG_UI_AUDITS || structuralChange || now - lastPositionRenderAuditRef.current > 30000) {
         lastPositionRenderAuditRef.current = now;
         logger.info(`POSITION_MANAGER_REACTIVE_RENDER_AUDIT: target=App reason=${reason} symbol=${symbol ?? 'none'} openCount=${positions.length} symbols=${positions.map(p => p.coin).join('|') || 'none'} debugMode=${String(DEBUG_UI_AUDITS)} rateLimited=${String(!DEBUG_UI_AUDITS && !structuralChange)}`);
@@ -115,7 +125,7 @@ export default function App() {
         forceUpdate(n => n + 1);
       }
     });
-  }, [engine]);
+  }, [engine, journal]);
   const [perfGuard] = useState(() => new PerformanceGuard());
   const [diagSnapshot, setDiagSnapshot] = useState<DiagnosticsSnapshot | null>(null);
 
@@ -173,7 +183,6 @@ export default function App() {
     }
   }, []);
 
-  const journal = engine['journal'] as Journal;
   const paperAdapter = engine.getAdapter() as PaperExchangeAdapter;
   const [settingsPersistence] = useState(() => new SettingsPersistence());
   const telegramNotifierRef = useRef(new TelegramNotifier());
@@ -200,6 +209,7 @@ export default function App() {
           return { previousBoot: 'storage_unavailable', previousReason: 'unknown_storage_unavailable' };
         }
       })();
+      lastStartupRecoveryAtRef.current = Date.now();
       logger.warn(`STARTUP_RECOVERY_AUDIT: appBootId=${APP_BOOT_ID} previousBootState=${recovery.previousBoot ?? 'none'} previousCrashReason=${recovery.previousReason} scannerAutoResume=false scannerRunning=false action=verify_open_positions_before_restart`);
       logger.info(`APP_RELOAD_DETECTED_AUDIT: reloadType=F5_browser_reload wasExplicitReset=false hydrationStarted=false hydrationComplete=false openPositionsLoaded=0 closedTradesLoaded=0 journalTradesLoaded=0 mlRecordsLoaded=0 settingsLoaded=false attemptedEmptyOverwrite=false emptyOverwriteBlocked=false sourceUsed=localStorage storageKey=cryptobud_v4 backupKey=cryptobud_v4_critical resetMarkerPresent=false resetMarkerConsumed=false`);
       logger.info(`STORAGE_CONTEXT_AUDIT: runtimeMode=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'desktop' : 'browser'} isDesktop=${String(typeof (window as any).__TAURI_INTERNALS__ !== 'undefined')} storageOrigin=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri_sqlite' : 'browser_localStorage'} localStorageAvailable=${String(typeof localStorage !== 'undefined')} tauriStoreAvailable=${String(typeof (window as any).__TAURI_INTERNALS__ !== 'undefined')} positionStorageKey=cryptobud_v4:open_positions_primary backupStorageKey=cryptobud_v4:open_positions_critical loadedFrom=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri_then_localStorage' : 'localStorage'}`);
@@ -327,6 +337,7 @@ export default function App() {
         setTotalEquity(paperAdapter.getTotalEquity());
       }
       journal.markOpenPositionsHydrated();
+      await journal.reconcileOpenPositionsToPositionManager(engine.getPositionManager().getOpenPositions(), 'startup_hydration');
       const pmOpenCount = engine.getPositionManager().getOpenPositions().length;
       const pmSymbols = engine.getPositionManager().getOpenPositions().map(p => p.coin).sort();
       const persistedSymbols = savedPositions.map(p => p.symbol).sort();
@@ -731,7 +742,11 @@ export default function App() {
       const now = Date.now();
       storeRef.current.addEquityPoint(now, equity);
       const paperBal = paperAdapter.getCashBalance('USDT');
-      const posCount = engine.getPositionManager().getOpenPositions().length;
+      const openPositionsForEquity = engine.getPositionManager().getOpenPositions();
+      const posCount = openPositionsForEquity.length;
+      if (journal.isOpenPositionsHydrated() && journal.getOpenTrades().length !== posCount) {
+        void journal.reconcileOpenPositionsToPositionManager(openPositionsForEquity, 'paper_balance_sync');
+      }
       const totalExposure = engine.getPositionManager().getExposureSummary().totalExposure;
       const cashBalance = paperBal;
       const usedCapital = totalExposure;
@@ -824,6 +839,10 @@ export default function App() {
       const scannerMemory = engine.getAutoRuntime().getScanner().getRuntimeMemoryStats();
       const openPositions = engine.getPositionManager().getOpenPositions();
       const activeIntervalsCount = feed.getActiveIntervalCount() + (scannerMemory.revalidationLoopActive ? 1 : 0);
+      const activeTab = storeRef.current.state.activeMainTab;
+      const airScannerMounted = activeTab === 'air-scanner';
+      const closedPositionsCount = journal.getClosedTrades().length;
+      const openPositionStoreCount = journal.getOpenTrades().length;
       const pressure = updateMemoryPressure({
         heapRatio: heap.ratio,
         visibleLogCount: logStats.currentLogCount,
@@ -840,11 +859,106 @@ export default function App() {
         scannerSnapshotCount: scannerMemory.scannerSnapshotCount,
         activeIntervalsCount,
         activeSubscriptionsCount: feed.getActiveSubscriptionCount(),
-        airScannerObjectCount: Math.min(24, storeRef.current.state.scannerSnapshot?.candidates.length ?? 0),
+        airScannerMounted,
+        airScannerObjectCount: airScannerMounted
+          ? Math.min(40, storeRef.current.state.scannerSnapshot?.candidates.length ?? 0)
+          : 0,
         openPositionsCount: openPositions.length,
-        closedPositionsCount: journal.getClosedTrades().length,
+        closedPositionsCount,
       }));
-      if (pressure.active) {
+      const scanner = engine.getAutoRuntime().getScanner();
+      const canonicalAutoState = scanner.getCanonicalAutoExecutionState?.();
+      const cleanupStats = getAirScannerCleanupStats();
+      const uptimeMs = Date.now() - getOvernightStabilityBootedAt();
+      const isStartupGracePeriodActive = uptimeMs < OVERNIGHT_STARTUP_GRACE_MS && pressure.level !== 'critical';
+      const bufferAtCapacity =
+        logStats.currentLogCount >= logStats.maxLogCount ||
+        logStats.currentInternalAuditCount >= logStats.maxInternalAuditCount;
+      logger.info(formatMemoryBufferStatusAudit({
+        visibleLogCount: logStats.currentLogCount,
+        visibleLogMax: logStats.maxLogCount,
+        internalAuditCount: logStats.currentInternalAuditCount,
+        internalAuditMax: logStats.maxInternalAuditCount,
+        trimCount: logStats.trimCount,
+        lastTrimAt: logStats.lastMemoryBufferTrimAt,
+        bufferAtCapacity,
+        heapPressure: pressure.active,
+        pressureReason: pressure.reason,
+      }));
+      logger.info(formatMemoryPressureReasonAudit({
+        jsHeapUsed: heap.used,
+        jsHeapLimit: heap.limit,
+        heapUsedPct: heap.ratio != null ? heap.ratio * 100 : null,
+        pressureThresholdPct: MEMORY_PRESSURE_WARNING_THRESHOLD * 100,
+        visibleLogCount: logStats.currentLogCount,
+        internalAuditCount: logStats.currentInternalAuditCount,
+        candidateStoreCount: scannerMemory.scannerCandidateCount,
+        closedTradesCount: closedPositionsCount,
+        openPositionsCount: openPositions.length,
+        activeIntervalsCount,
+        activeSubscriptionsCount: feed.getActiveSubscriptionCount(),
+        airScannerMounted,
+        activeTab,
+        pressureReason: pressure.reason,
+        isStartupGracePeriodActive,
+      }));
+      const previousGrowthSample = lastMemoryGrowthSampleRef.current;
+      const previousHeapUsed = previousGrowthSample?.heap ?? null;
+      const heapDelta = heap.used != null && previousHeapUsed != null ? heap.used - previousHeapUsed : null;
+      const growthWindowMinutes = previousGrowthSample ? Math.max(0, (Date.now() - previousGrowthSample.at) / 60000) : 0;
+      const probableGrowthSource =
+        airScannerMounted ? 'air_scanner_active'
+        : openPositionStoreCount !== openPositions.length ? 'open_position_store_mismatch'
+        : scannerMemory.scannerSnapshotCount > 0 || scannerMemory.scannerCandidateCount > 0 ? 'scanner_runtime_bounded_store'
+        : logStats.currentInternalAuditCount >= logStats.maxInternalAuditCount ? 'bounded_internal_audit_buffer'
+        : 'none_detected';
+      logger.info(formatMemoryGrowthReasonAudit({
+        jsHeapUsed: heap.used,
+        previousHeapUsed,
+        heapDelta,
+        growthWindowMinutes,
+        activeTab,
+        airScannerMounted,
+        visibleLogCount: logStats.currentLogCount,
+        internalAuditCount: logStats.currentInternalAuditCount,
+        candidateStoreCount: scannerMemory.scannerCandidateCount,
+        scannerSnapshotCount: scannerMemory.scannerSnapshotCount,
+        openPositionStoreCount,
+        positionManagerOpenCount: openPositions.length,
+        closedTradesCount: closedPositionsCount,
+        activeIntervalsCount,
+        activeSubscriptionsCount: feed.getActiveSubscriptionCount(),
+        probableGrowthSource,
+      }));
+      lastMemoryGrowthSampleRef.current = { heap: heap.used, at: Date.now() };
+      const overnightSnapshot = updateOvernightStabilitySnapshot({
+        uptimeHours: Math.max(0, uptimeMs / 3_600_000),
+        activeTab,
+        scannerRunning: storeRef.current.state.scannerRunning,
+        autoBotsEnabled: canonicalAutoState?.resolvedAutoBotsEnabled ?? scanner.isPaperAutoEnabled?.() === true,
+        openPositionsCount: openPositions.length,
+        closedPositionsCount,
+        jsHeapUsed: heap.used,
+        visibleLogCount: logStats.currentLogCount,
+        internalAuditCount: logStats.currentInternalAuditCount,
+        airScannerMounted,
+        activeIntervalsCount,
+        activeSubscriptionsCount: feed.getActiveSubscriptionCount(),
+        memoryPressureActive: pressure.active,
+        memoryPressureLevel: pressure.level,
+        pressureReason: pressure.reason,
+        memoryGrowthReason: probableGrowthSource,
+        memoryGrowthWarmupActive: uptimeMs < 2 * 60 * 60 * 1000,
+        isStartupGracePeriodActive,
+        lastMemoryBufferTrimAt: logStats.lastMemoryBufferTrimAt,
+        lastStartupRecoveryAt: lastStartupRecoveryAtRef.current,
+        lastAirScannerCleanupAt: cleanupStats.lastAirScannerCleanupAt,
+      });
+      if (Date.now() - lastOvernightStabilityAuditAtRef.current >= 30 * 60 * 1000) {
+        lastOvernightStabilityAuditAtRef.current = Date.now();
+        logger.info(formatOvernightStabilityAudit(overnightSnapshot));
+      }
+      if (pressure.active && !isStartupGracePeriodActive) {
         logger.throttled('WARN', `MEMORY_PRESSURE_WARNING: level=${pressure.level} reason=${pressure.reason} heapRatio=${pressure.heapRatio != null ? pressure.heapRatio.toFixed(3) : 'n/a'} visibleLogCount=${logStats.currentLogCount}/${logStats.maxLogCount} internalAuditCount=${logStats.currentInternalAuditCount}/${logStats.maxInternalAuditCount} action=disable_non_critical_ui_audits_and_pause_extra_effects tradingLogicStopped=false`, 'memory-pressure-warning', 60000);
       }
     };
@@ -1255,6 +1369,8 @@ export default function App() {
             closedTradesBootRestoring={closedTradesBootRestoring}
           />
         );
+      case 'air-scanner':
+        return <AirScannerPage engine={engine} store={store} />;
       case 'journal':
         return <JournalPage journal={journal} />;
       case 'ml-lab':

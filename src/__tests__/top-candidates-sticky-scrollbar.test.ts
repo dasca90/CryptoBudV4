@@ -16,7 +16,7 @@ ok(css.includes('.top-candidates-columns-sticky') && css.includes('top: 10px'), 
 ok(css.includes('.top-candidates-scroll') && css.includes('overscroll-behavior: contain'), '7 scroll remains internal to top candidates container');
 ok(panel.includes("viewMode === 'compact'") && panel.includes("viewMode === 'detailed'"), '8 compact/detailed mode still wired');
 ok(panel.includes('setSourceFilter') && panel.includes('<select value={sourceFilter}'), '9 filter dropdown still wired');
-ok(page.includes('data-testid="market-groups-workspace"') && page.indexOf('data-testid="market-groups-workspace"') > page.indexOf('data-testid="top-candidates-panel"'), '10 Market Groups stays below Top Candidates (no overlap)');
+ok(page.includes('data-testid="top-candidates-panel"') && page.indexOf('data-testid="top-candidates-panel"') > page.indexOf('data-testid="trade-scanner-status-panel"'), '10 Top Candidates stays below Scanner Status in the wide center column');
 
 console.log(`top-candidates-sticky-scrollbar: ${p} passed, ${f} failed`);
 if (f > 0) process.exit(1);

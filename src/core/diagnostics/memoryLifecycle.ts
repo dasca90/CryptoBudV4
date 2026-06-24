@@ -47,6 +47,7 @@ export interface MemoryHealthAudit {
   scannerSnapshotCount: number;
   activeIntervalsCount: number;
   activeSubscriptionsCount: number;
+  airScannerMounted: boolean;
   airScannerObjectCount: number;
   openPositionsCount: number;
   closedPositionsCount: number;
@@ -58,6 +59,58 @@ export interface MemoryPressureState {
   reason: string;
   heapRatio: number | null;
   updatedAt: number;
+}
+
+export const MEMORY_PRESSURE_WARNING_THRESHOLD = 0.72;
+export const MEMORY_PRESSURE_CRITICAL_THRESHOLD = 0.86;
+
+export interface MemoryPressureReasonAudit {
+  jsHeapUsed: number | null;
+  jsHeapLimit: number | null;
+  heapUsedPct: number | null;
+  pressureThresholdPct: number;
+  visibleLogCount: number;
+  internalAuditCount: number;
+  candidateStoreCount: number;
+  closedTradesCount: number;
+  openPositionsCount: number;
+  activeIntervalsCount: number;
+  activeSubscriptionsCount: number;
+  airScannerMounted: boolean;
+  activeTab: string;
+  pressureReason: string;
+  isStartupGracePeriodActive: boolean;
+}
+
+export interface MemoryBufferStatusAudit {
+  visibleLogCount: number;
+  visibleLogMax: number;
+  internalAuditCount: number;
+  internalAuditMax: number;
+  trimCount: number;
+  lastTrimAt: number | null;
+  bufferAtCapacity: boolean;
+  heapPressure: boolean;
+  pressureReason: string;
+}
+
+export interface MemoryGrowthReasonAudit {
+  jsHeapUsed: number | null;
+  previousHeapUsed: number | null;
+  heapDelta: number | null;
+  growthWindowMinutes: number;
+  activeTab: string;
+  airScannerMounted: boolean;
+  visibleLogCount: number;
+  internalAuditCount: number;
+  candidateStoreCount: number;
+  scannerSnapshotCount: number;
+  openPositionStoreCount: number;
+  positionManagerOpenCount: number;
+  closedTradesCount: number;
+  activeIntervalsCount: number;
+  activeSubscriptionsCount: number;
+  probableGrowthSource: string;
 }
 
 let pressureState: MemoryPressureState = {
@@ -93,22 +146,19 @@ export function updateMemoryPressure(input: {
   internalAuditCount: number;
   internalAuditMax: number;
 }): MemoryPressureState {
-  const heapWarning = input.heapRatio != null && input.heapRatio >= 0.72;
-  const heapCritical = input.heapRatio != null && input.heapRatio >= 0.86;
-  const bufferWarning =
-    input.visibleLogCount >= input.visibleLogMax ||
-    input.internalAuditCount >= input.internalAuditMax;
+  const heapWarning = input.heapRatio != null && input.heapRatio >= MEMORY_PRESSURE_WARNING_THRESHOLD;
+  const heapCritical = input.heapRatio != null && input.heapRatio >= MEMORY_PRESSURE_CRITICAL_THRESHOLD;
 
   const level: MemoryPressureState['level'] = heapCritical
     ? 'critical'
-    : heapWarning || bufferWarning
+    : heapWarning
       ? 'warning'
       : 'normal';
 
   pressureState = {
     active: level !== 'normal',
     level,
-    reason: heapCritical ? 'heap_ratio_critical' : heapWarning ? 'heap_ratio_warning' : bufferWarning ? 'buffer_at_capacity' : 'none',
+    reason: heapCritical ? 'heap_ratio_critical' : heapWarning ? 'heap_ratio_warning' : 'none',
     heapRatio: input.heapRatio,
     updatedAt: Date.now(),
   };
@@ -132,5 +182,17 @@ export function isNonCriticalUiAudit(message: string): boolean {
 }
 
 export function formatMemoryHealthAudit(audit: MemoryHealthAudit): string {
-  return `MEMORY_HEALTH_AUDIT: jsHeapUsed=${audit.jsHeapUsed ?? 'n/a'} jsHeapLimit=${audit.jsHeapLimit ?? 'n/a'} visibleLogCount=${audit.visibleLogCount} internalAuditCount=${audit.internalAuditCount} scannerCandidateCount=${audit.scannerCandidateCount} scannerSnapshotCount=${audit.scannerSnapshotCount} activeIntervalsCount=${audit.activeIntervalsCount} activeSubscriptionsCount=${audit.activeSubscriptionsCount} airScannerObjectCount=${audit.airScannerObjectCount} openPositionsCount=${audit.openPositionsCount} closedPositionsCount=${audit.closedPositionsCount}`;
+  return `MEMORY_HEALTH_AUDIT: jsHeapUsed=${audit.jsHeapUsed ?? 'n/a'} jsHeapLimit=${audit.jsHeapLimit ?? 'n/a'} visibleLogCount=${audit.visibleLogCount} internalAuditCount=${audit.internalAuditCount} scannerCandidateCount=${audit.scannerCandidateCount} scannerSnapshotCount=${audit.scannerSnapshotCount} activeIntervalsCount=${audit.activeIntervalsCount} activeSubscriptionsCount=${audit.activeSubscriptionsCount} airScannerMounted=${String(audit.airScannerMounted)} airScannerObjectCount=${audit.airScannerObjectCount} openPositionsCount=${audit.openPositionsCount} closedPositionsCount=${audit.closedPositionsCount}`;
+}
+
+export function formatMemoryPressureReasonAudit(audit: MemoryPressureReasonAudit): string {
+  return `MEMORY_PRESSURE_REASON_AUDIT: jsHeapUsed=${audit.jsHeapUsed ?? 'n/a'} jsHeapLimit=${audit.jsHeapLimit ?? 'n/a'} heapUsedPct=${audit.heapUsedPct != null ? audit.heapUsedPct.toFixed(2) : 'n/a'} pressureThresholdPct=${audit.pressureThresholdPct} visibleLogCount=${audit.visibleLogCount} internalAuditCount=${audit.internalAuditCount} candidateStoreCount=${audit.candidateStoreCount} closedTradesCount=${audit.closedTradesCount} openPositionsCount=${audit.openPositionsCount} activeIntervalsCount=${audit.activeIntervalsCount} activeSubscriptionsCount=${audit.activeSubscriptionsCount} airScannerMounted=${String(audit.airScannerMounted)} activeTab=${audit.activeTab} pressureReason=${audit.pressureReason} isStartupGracePeriodActive=${String(audit.isStartupGracePeriodActive)}`;
+}
+
+export function formatMemoryBufferStatusAudit(audit: MemoryBufferStatusAudit): string {
+  return `MEMORY_BUFFER_STATUS_AUDIT: visibleLogCount=${audit.visibleLogCount} visibleLogMax=${audit.visibleLogMax} internalAuditCount=${audit.internalAuditCount} internalAuditMax=${audit.internalAuditMax} trimCount=${audit.trimCount} lastTrimAt=${audit.lastTrimAt ?? 'never'} bufferAtCapacity=${String(audit.bufferAtCapacity)} heapPressure=${String(audit.heapPressure)} pressureReason=${audit.pressureReason}`;
+}
+
+export function formatMemoryGrowthReasonAudit(audit: MemoryGrowthReasonAudit): string {
+  return `MEMORY_GROWTH_REASON_AUDIT: jsHeapUsed=${audit.jsHeapUsed ?? 'n/a'} previousHeapUsed=${audit.previousHeapUsed ?? 'n/a'} heapDelta=${audit.heapDelta ?? 'n/a'} growthWindowMinutes=${audit.growthWindowMinutes.toFixed(2)} activeTab=${audit.activeTab} airScannerMounted=${String(audit.airScannerMounted)} visibleLogCount=${audit.visibleLogCount} internalAuditCount=${audit.internalAuditCount} candidateStoreCount=${audit.candidateStoreCount} scannerSnapshotCount=${audit.scannerSnapshotCount} openPositionStoreCount=${audit.openPositionStoreCount} positionManagerOpenCount=${audit.positionManagerOpenCount} closedTradesCount=${audit.closedTradesCount} activeIntervalsCount=${audit.activeIntervalsCount} activeSubscriptionsCount=${audit.activeSubscriptionsCount} probableGrowthSource=${audit.probableGrowthSource}`;
 }

@@ -7,6 +7,7 @@ const ok = (c: boolean, m: string) => { if (c) p++; else { f++; console.error('F
 
 const tradePageSrc = readFileSync('src/ui/pages/TradePage.tsx', 'utf8');
 const tradeV4Src = readFileSync('src/components/trade-v4/TradeV4Page.tsx', 'utf8');
+const airScannerPageSrc = readFileSync('src/ui/pages/AirScannerPage.tsx', 'utf8');
 const openSrc = readFileSync('src/components/trade-v4/OpenPositionsPanel.tsx', 'utf8');
 const closedSrc = readFileSync('src/components/trade-v4/ClosedPositionsPanel.tsx', 'utf8');
 const topSrc = readFileSync('src/components/trade-v4/TopCandidatesPanel.tsx', 'utf8');
@@ -24,10 +25,11 @@ const coinLogoSrc = readFileSync('src/components/trade-v4/CoinLogo.tsx', 'utf8')
 const labCoinOrbSrc = readFileSync('src/features/air-scanner-lab/components/CoinOrb.tsx', 'utf8');
 
 ok((tradeV4Src.includes('trade-v4-right') || tradeV4Src.includes('right-column')) && tradeV4Src.includes('<SelectedCoinInspector'), 'A Selected Coin remains in right column');
-ok(tradeV4Src.includes('<TopCandidatesPanel') && tradeV4Src.indexOf('<TopCandidatesPanel') > tradeV4Src.indexOf('<SelectedCoinInspector'), 'B Top Candidates renders under Selected Coin in right column');
+ok(tradeV4Src.includes('<TopCandidatesPanel') && tradeV4Src.indexOf('<TopCandidatesPanel') > tradeV4Src.indexOf('data-testid="trade-scanner-status-panel"') && tradeV4Src.indexOf('<TopCandidatesPanel') < tradeV4Src.indexOf('<CandidatePoolSummaryPanel'), 'B Top Candidates renders wide under Scanner Status in center column');
 ok(tradeV4Src.includes('<CandidatePoolSummaryPanel'), 'B2 CandidatePoolSummaryPanel renders in center');
-ok(tradeV4Src.includes('<AirScanner3D') && tradeV4Src.indexOf('<CandidatePoolSummaryPanel') > tradeV4Src.indexOf('<AirScanner3D'), 'B3 Scanner is above Candidate Pool in center');
-ok(tradeV4Src.includes('scannerTelemetry={use3DScannerLabPreview') && candidatePoolSrc.includes('candidate-pool-scanner-telemetry'), 'B4 scanner telemetry card is moved into Candidate Pool for the 3D preview');
+ok(!tradeV4Src.includes('<AirScanner3D') && !tradeV4Src.includes('<AirScannerProductionPreview'), 'B3 Trade tab does not mount 3D scanner components');
+ok(airScannerPageSrc.includes('lazy(() => import') && airScannerPageSrc.includes('<AirScanner3DView') && airScannerPageSrc.includes('<AirScannerProductionPreview'), 'B3b isolated 3D Scanner tab lazy-loads visual scanner components');
+ok(tradeV4Src.includes('scannerTelemetry={{') && candidatePoolSrc.includes('candidate-pool-scanner-telemetry'), 'B4 scanner telemetry card remains lightweight in Candidate Pool');
 ok(openSrc.includes('PAGE_SIZE = 10') && openSrc.includes('Page {safePage} / {totalPages}'), 'C Open Positions paginates at 10 rows');
 ok(closedSrc.includes('PAGE_SIZE = 10') && closedSrc.includes('Page {safePage} / {totalPages}'), 'D Closed Positions paginates at 10 rows');
 ok(openSrc.includes('Prev') && openSrc.includes('Next') && closedSrc.includes('Prev') && closedSrc.includes('Next'), 'E pagination prev/next works');
@@ -50,17 +52,17 @@ ok(selectedSrc.includes('No coin selected'), 'N Selected Coin shows "No coin sel
 ok(candidateSrc.includes('toFixed(2)') && candidateSrc.includes('toFixed(1)') && candidateSrc.includes('n/a'), 'O candidate numeric formatting and n/a fallback present');
 ok(cssSrc.includes('table-scroll-x') && cssSrc.includes('reason-cell') && cssSrc.includes('text-overflow: ellipsis'), 'P table has overflow-x and reason truncation styles');
 ok(cssSrc.includes('right-column') && cssSrc.includes('flex-direction: column'), 'Q right stack uses non-overlapping vertical layout');
-ok(tradeV4Src.includes("scannerMode") && tradeV4Src.includes("scanner-mode-"), 'Q2 scanner mode state controls scanner layout class');
-ok(tradeV4Src.includes("setScannerMode('compact')") && tradeV4Src.includes("setScannerMode('normal')") && tradeV4Src.includes("setScannerMode('hidden')"), 'Q3 scanner size controls expose Compact/Normal/Hidden');
-ok(tradeV4Src.includes('data-testid="scanner-summary-bar"'), 'Q4 collapsed scanner renders summary bar');
-ok(cssSrc.includes('.scanner-v3') && cssSrc.includes('min-height: 320px'), 'Q5 scanner container has taller baseline guard');
+ok(tradeV4Src.includes('data-testid="trade-scanner-status-panel"') && tradeV4Src.includes('data-air-scanner-renderer="not-mounted-trade-tab"'), 'Q2 Trade tab renders lightweight scanner status instead of 3D');
+ok(!tradeV4Src.includes("setScannerMode('hidden')") && !tradeV4Src.includes("trade-v4-scanner-mode"), 'Q3 Trade tab removed CSS-only hidden scanner mode');
+ok(tradeV4Src.includes('data-testid="scanner-summary-bar"'), 'Q4 scanner summary bar renders without 3D');
+ok(cssSrc.includes('.scanner-v3.scanner-mode-status') && cssSrc.includes('min-height: 112px'), 'Q5 scanner status container has compact vertical guard');
 ok(cssSrc.includes('.center-top-v4') && cssSrc.includes('.center-bottom-v4'), 'Q6 center workspace splits into top and bottom priority zones');
 ok(cssSrc.includes('.open-v4 .data-table thead th') && cssSrc.includes('.closed-v4 .data-table thead th'), 'Q7 positions tables use sticky headers');
 ok((openSrc.includes('overflow: "hidden auto", flex: 1') || openSrc.includes('panel-scroll-v4')) && (closedSrc.includes('overflow: "hidden auto", flex: 1') || closedSrc.includes('panel-scroll-v4')), 'Q8 position tables scroll internally');
 ok(tradeV4Src.includes('data-testid="open-positions-workspace"') && tradeV4Src.includes('data-testid="closed-positions-workspace"'), 'Q9 open/closed workspaces are explicitly mounted in center layout');
-ok(tradeV4Src.includes('data-testid="market-groups-workspace"') && tradeV4Src.indexOf('data-testid="market-groups-workspace"') > tradeV4Src.indexOf('data-testid="top-candidates-panel"'), 'Q10 Market Groups renders below Top Candidates in right rail');
+ok(tradeV4Src.includes('data-testid="market-groups-workspace"') && tradeV4Src.indexOf('data-testid="market-groups-workspace"') > tradeV4Src.indexOf('<SelectedCoinInspector'), 'Q10 Market Groups renders below Selected Coin in right rail');
 ok(cssSrc.includes('.center-bottom-v4') && cssSrc.includes('grid-template-columns: minmax(320px, 38%) minmax(520px, 62%)'), 'Q11 center bottom is strict 2-column grid (pool | closed)');
-ok(cssSrc.includes('.trade-v4-right') && cssSrc.includes('grid-template-rows:'), 'Q12 right rail uses explicit vertical stack grid');
+ok(cssSrc.includes('.trade-v4-right') && cssSrc.includes('grid-template-rows: minmax(260px, 44%) minmax(240px, 56%)'), 'Q12 right rail uses explicit two-panel vertical stack grid');
 ok(!scannerSrc.includes('DEPTH 1000m'), 'Q13 scanner depth text removed');
 ok(scannerSrc.includes('position_opened_hold') && scannerSrc.includes('legend-item'), 'Q14 scanner legend uses canonical position-open state and explicit labels');
 ok(scannerSrc.includes('scanner-has-coins') && scannerSrc.includes('scanner-empty'), 'Q14b scanner core pulse state follows rendered coin count');
@@ -79,7 +81,7 @@ ok(openSrc.includes('panel-scroll-v4') && closedSrc.includes('panel-scroll-v4') 
 ok(openSrc.includes('No open positions.') && closedSrc.includes('No closed trades yet.'), 'Q24 empty open/closed states still render bordered shells with message');
 ok(tradeV4Src.includes('panel-shell-scanner') && tradeV4Src.includes('panel-shell-candidate'), 'Q25 scanner and candidate pool use visible shell contours');
 ok(tradeV4Src.includes('panel-shell-selected') && tradeV4Src.includes('panel-shell-top-candidates') && tradeV4Src.includes('panel-shell-market-groups'), 'Q26 selected/top/market panels use matching bordered shells');
-ok(tradeV4Src.includes('SELECTED COIN') && tradeV4Src.includes('TOP CANDIDATES') && tradeV4Src.includes('MARKET GROUPS'), 'Q27 right sidebar panels render explicit headers');
+ok(tradeV4Src.includes('SELECTED COIN') && tradeV4Src.includes('TOP CANDIDATES') && tradeV4Src.includes('MARKET GROUPS'), 'Q27 scanner/right/sidebar panels render explicit headers');
 ok(cssSrc.includes('grid-template-rows: minmax(340px, 50%) minmax(340px, 50%)'), 'Q28 center workspace rows are taller and balanced');
 ok(openSrc.includes('table-scroll-both') && openSrc.includes('data-table-wide-open'), 'Q29 open positions table supports internal horizontal scroll');
 ok(closedSrc.includes('table-scroll-both') && closedSrc.includes('data-table-wide-closed'), 'Q30 closed positions table supports internal horizontal scroll');

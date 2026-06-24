@@ -198,6 +198,9 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
 
   const previousExecutionDecisionFinalNoBuyReason = finalNoBuyReason;
   const canonicalExecutableForReasonPriority = params.finalExecutable && params.buyAllowed && previousExecutionDecisionFinalNoBuyReason === 'none';
+  const previousFinalNoBuyReasonForPriority = canonicalExecutableForReasonPriority
+    ? 'none'
+    : params.previousFinalNoBuyReason ?? previousExecutionDecisionFinalNoBuyReason;
   const priority = resolveFinalNoBuyReasonPriority({
     symbol: params.symbol,
     rawStatus: params.status,
@@ -207,7 +210,7 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
     primaryBlocker: params.primaryBlocker,
     setupResult: params.setupResult,
     candidateWhy: params.candidateWhy,
-    previousFinalNoBuyReason: params.previousFinalNoBuyReason ?? previousExecutionDecisionFinalNoBuyReason,
+    previousFinalNoBuyReason: previousFinalNoBuyReasonForPriority,
     blockReasons: params.blockReasons,
     entryGateBlocker: params.entryGateBlocker,
     strategyContractBlocker: params.strategyContractBlocker,

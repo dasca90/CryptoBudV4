@@ -9,6 +9,14 @@ import { formatFinalNoBuyReasonPriorityAudit, resolveFinalNoBuyReasonPriority } 
 
 const numOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
+function debugUiAuditsEnabled(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem('cryptobud_v4:debug_ui_audits') === 'true';
+  } catch {
+    return false;
+  }
+}
+
 function item(
   key: string,
   label: string,
@@ -483,7 +491,7 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     }
   };
   refreshStrategyDerived();
-  logger.info(`AUTOBOTS_STRATEGY_RESOLUTION_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} riskGroup=${resolution.riskGroup ?? candidate.riskGroup ?? 'n/a'} marketBestFit=${resolution.marketBestFit ?? marketBestFit ?? 'n/a'} groupRecommendedStrategy=${resolution.groupRecommendedStrategy ?? groupRecommendedStrategy ?? 'n/a'} userSelectedRuntimeStrategy=${resolution.userSelectedRuntimeStrategy ?? strategyRequested} dynamicPerCoinStrategy=${String(resolution.dynamicPerCoinStrategy)} strategySourceRawLegacy=${auto?.strategySource ?? candidate.strategySource ?? 'unknown'} strategySourceResolved=${resolution.strategySourceResolved} fallbackType=${resolution.fallbackType} routerPath=${resolution.routerPath} perCoinSelectedStrategy=${resolution.perCoinSelectedStrategy ?? autoBotsPerCoinStrategy ?? 'n/a'} finalExecutionStrategy=${resolution.finalExecutionStrategy} setupValidatorUsed=${strategySelected} fallbackApplied=${String(resolution.fallbackApplied)} fallbackReason=${resolution.fallbackReason ?? 'none'} overrideApplied=${String(resolution.overrideApplied)} overrideReason=${resolution.overrideReason ?? 'none'} mismatchDetected=${String(resolution.mismatchReason !== 'unchanged')} mismatchAllowed=${String(resolution.mismatchAllowed)} mismatchReason=${resolution.mismatchReason} finalBuyAllowed=pending finalBuyBlockedReason=pending strategyDecisionTrace=${resolution.strategyDecisionTrace.join('>')}`);
+  logger.info(`AUTOBOTS_STRATEGY_RESOLUTION_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} riskGroup=${resolution.riskGroup ?? candidate.riskGroup ?? 'n/a'} marketBestFit=${resolution.marketBestFit ?? marketBestFit ?? 'n/a'} groupRecommendedStrategy=${resolution.groupRecommendedStrategy ?? groupRecommendedStrategy ?? 'n/a'} userSelectedRuntimeStrategy=${resolution.userSelectedRuntimeStrategy ?? strategyRequested} dynamicPerCoinStrategy=${String(resolution.dynamicPerCoinStrategy)} strategySourceRawLegacy=${auto?.strategySource ?? candidate.strategySource ?? 'unknown'} strategySourceResolved=${resolution.strategySourceResolved} fallbackType=${resolution.fallbackType} routerPath=${resolution.routerPath} perCoinSelectedStrategy=${resolution.perCoinSelectedStrategy ?? autoBotsPerCoinStrategy ?? 'n/a'} finalExecutionStrategy=${resolution.finalExecutionStrategy} setupValidatorUsed=${strategySelected} fallbackApplied=${String(resolution.fallbackApplied)} fallbackReason=${resolution.fallbackReason ?? 'none'} fallbackCanSubmitBuy=false fallbackSubmitGuardReason=${resolution.fallbackSubmitGuardReason ?? 'pending_entry_gate_revalidation_required'} overrideApplied=${String(resolution.overrideApplied)} overrideReason=${resolution.overrideReason ?? 'none'} mismatchDetected=${String(resolution.mismatchReason !== 'unchanged')} mismatchAllowed=${String(resolution.mismatchAllowed)} mismatchReason=${resolution.mismatchReason} finalBuyAllowed=pending finalBuyBlockedReason=pending strategyDecisionTrace=${resolution.strategyDecisionTrace.join('>')}`);
   if (strategySelected === 'dip_and_rebound') {
     logger.info(`DIP_REBOUND_REQUIRED_PARAMS_AUDIT: symbol=${candidate.symbol} strategySource=${strategySource} strategyAtEntry=${strategySelected} userSettingDipAndReboundMinDipPct=n/a userSettingDipAndReboundMinReboundPct=n/a effectiveRequiredDipPct=${requiredDipPct ?? 'n/a'} effectiveRequiredReboundPct=${requiredReboundPct ?? 'n/a'} sourceOfRequiredDip=${dynamicSetup.requiredDipPctMin != null ? 'dynamic_bucket' : (strategyDef.minDipPct != null ? 'strategy_registry_default' : 'none')} sourceOfRequiredRebound=${dynamicSetup.requiredReboundPctMin != null ? 'dynamic_bucket' : (strategyDef.minReboundPct != null ? 'strategy_registry_default' : 'none')} settingsHydrated=false settingsAppliedToRouter=false settingsAppliedToBuilder=true settingsAppliedToExecutionPlanner=false settingsAppliedToTradingEngine=false`);
   }
@@ -907,7 +915,29 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     logger.info(`STRATEGY_HANDOFF_TRACE_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} riskGroup=${candidate.riskGroup ?? 'n/a'} marketBestFit=${marketBestFit ?? 'n/a'} groupRecommendedStrategy=${groupRecommendedStrategy ?? 'n/a'} userSelectedRuntimeStrategy=${strategyRequested} autoBotsDynamicPerCoinEnabled=true autoBotsPerCoinStrategy=${autoBotsPerCoinStrategy ?? 'n/a'} entryGateStrategyInput=${strategySelected} setupResult=${setupResult} finalExecutionStrategy=${strategySelected} strategyAtEntry=${strategySelected} positionStrategy=${strategySelected} strategyDecisionReason=${auto?.strategyReason ?? candidate.strategyReason ?? 'n/a'} strategyMismatchDetected=${String(strategyMismatchDetected)} mismatchAllowed=${String(mismatchAllowed)} mismatchReason=${mismatchReason} overrideApplied=${String(overrideApplied)} overrideReason=${overrideReason ?? 'none'}`);
   }
   logger.info(`FINAL_STRATEGY_SOURCE_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} marketBestFit=${marketBestFit ?? 'n/a'} userSelectedRuntimeStrategy=${strategyRequested} strategySource=${strategySource} dynamicPerCoinStrategy=${String(resolution.dynamicPerCoinStrategy)} perCoinSelectedStrategy=${autoBotsPerCoinStrategy ?? candidate.selectedStrategy ?? 'n/a'} strategyAfterAuditBuilder=${strategySelected} finalExecutionStrategy=${strategySelected} positionStrategyAtEntry=${strategySelected} strategyMismatchDetected=${String(strategyMismatchDetected)} mismatchAllowed=${String(mismatchAllowed)} mismatchReason=${mismatchReason} overrideApplied=${String(overrideApplied)} overrideReason=${overrideReason ?? 'none'} executionAllowed=${String(finalExecutable)}`);
-  logger.info(`AUTOBOTS_STRATEGY_RESOLUTION_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} riskGroup=${candidate.riskGroup ?? 'n/a'} marketBestFit=${marketBestFit ?? 'n/a'} groupRecommendedStrategy=${groupRecommendedStrategy ?? 'n/a'} userSelectedRuntimeStrategy=${strategyRequested} dynamicPerCoinStrategy=${String(resolution.dynamicPerCoinStrategy)} strategySourceRawLegacy=${auto?.strategySource ?? candidate.strategySource ?? 'unknown'} strategySourceResolved=${resolution.strategySourceResolved} fallbackType=${resolution.fallbackType} routerPath=${resolution.routerPath} perCoinSelectedStrategy=${autoBotsPerCoinStrategy ?? 'n/a'} finalExecutionStrategy=${strategySelected} setupValidatorUsed=${strategySelected} fallbackApplied=${String(resolution.fallbackApplied)} fallbackReason=${resolution.fallbackReason ?? 'none'} overrideApplied=${String(overrideApplied)} overrideReason=${overrideReason ?? 'none'} mismatchDetected=${String(strategyMismatchDetected)} mismatchAllowed=${String(mismatchAllowed)} mismatchReason=${mismatchReason} finalBuyAllowed=${String(buyAllowed)} finalBuyBlockedReason=${buyAllowed ? 'none' : (resolution.fallbackReason === 'NO_VALID_AUTOBOTS_STRATEGY' ? 'NO_VALID_AUTOBOTS_STRATEGY' : primaryBlocker)} strategyDecisionTrace=${resolution.strategyDecisionTrace.join('>')}`);
+  const fallbackCanSubmitBuy = Boolean(
+    buyAllowed
+    && finalExecutable
+    && candidate.entryGateDecision?.decision === 'ALLOW'
+    && professionalGateDecision.allowed
+    && marketSafetyValid
+    && executionFreshnessValid
+    && spreadOk
+    && tpRoomOk
+    && priceFresh
+  );
+  const fallbackSubmitGuardReason = fallbackCanSubmitBuy
+    ? 'entry_gate_revalidated_professional_freshness_spread_tp_room'
+    : resolution.fallbackReason === 'NO_VALID_AUTOBOTS_STRATEGY'
+      ? 'NO_VALID_AUTOBOTS_STRATEGY_BLOCKS_SUBMIT'
+      : !professionalGateDecision.allowed
+        ? professionalGateDecision.blocker
+        : !marketSafetyValid
+          ? marketSafetyBlocker
+          : !executionFreshnessValid
+            ? executionFreshnessBlocker
+            : primaryBlocker;
+  logger.info(`AUTOBOTS_STRATEGY_RESOLUTION_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? 'unknown'} riskGroup=${candidate.riskGroup ?? 'n/a'} marketBestFit=${marketBestFit ?? 'n/a'} groupRecommendedStrategy=${groupRecommendedStrategy ?? 'n/a'} userSelectedRuntimeStrategy=${strategyRequested} dynamicPerCoinStrategy=${String(resolution.dynamicPerCoinStrategy)} strategySourceRawLegacy=${auto?.strategySource ?? candidate.strategySource ?? 'unknown'} strategySourceResolved=${resolution.strategySourceResolved} fallbackType=${resolution.fallbackType} routerPath=${resolution.routerPath} perCoinSelectedStrategy=${autoBotsPerCoinStrategy ?? 'n/a'} finalExecutionStrategy=${strategySelected} setupValidatorUsed=${strategySelected} fallbackApplied=${String(resolution.fallbackApplied)} fallbackReason=${resolution.fallbackReason ?? 'none'} fallbackCanSubmitBuy=${String(fallbackCanSubmitBuy)} fallbackSubmitGuardReason=${fallbackSubmitGuardReason} overrideApplied=${String(overrideApplied)} overrideReason=${overrideReason ?? 'none'} mismatchDetected=${String(strategyMismatchDetected)} mismatchAllowed=${String(mismatchAllowed)} mismatchReason=${mismatchReason} finalBuyAllowed=${String(buyAllowed)} finalBuyBlockedReason=${buyAllowed ? 'none' : (resolution.fallbackReason === 'NO_VALID_AUTOBOTS_STRATEGY' ? 'NO_VALID_AUTOBOTS_STRATEGY' : primaryBlocker)} strategyDecisionTrace=${resolution.strategyDecisionTrace.join('>')}`);
   const strategyAuditMismatchFields = [
     resolution.finalExecutionStrategy !== strategySelected && finalExecutable ? 'AutoBots.finalExecutionStrategy_vs_audit.finalExecutionStrategy' : '',
     resolution.dynamicPerCoinStrategy !== true && String(strategySource).startsWith('AUTOBOTS_') && strategySource !== 'AUTOBOTS_WAIT' ? 'dynamicPerCoinStrategy' : '',
@@ -956,7 +986,7 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
     runtimeReason: executionFreshnessBlocker !== 'none' ? executionFreshnessBlocker : undefined,
     handoffMismatch: strategyMismatchDetected && !mismatchAllowed,
   }, noBuyPriority));
-  else logger.info(formatFinalNoBuyReasonPriorityAudit({
+  else if (debugUiAuditsEnabled()) logger.info(formatFinalNoBuyReasonPriorityAudit({
     symbol: candidate.symbol,
     rawStatus: candidate.status,
     displayStatus: candidate.lifecycleStatus ?? candidate.status,

@@ -895,18 +895,19 @@
   min-width: 280px;
   max-width: 440px;
   display: grid;
-  grid-template-rows: minmax(220px, 34%) minmax(260px, 42%) minmax(190px, 24%);
+  grid-template-rows: minmax(260px, 44%) minmax(240px, 56%);
   gap: 6px;
   min-height: 0;
   overflow: hidden;
 }
 
 .scanner-v3 {
-  min-height: 320px;
+  min-height: 112px;
   max-height: none;
   overflow: hidden;
   position: relative;
 }
+.scanner-v3.scanner-mode-status { min-height: 112px; }
 .scanner-v3.scanner-mode-compact { min-height: 300px; max-height: none; }
 .scanner-v3.scanner-mode-normal { min-height: 380px; max-height: none; }
 .scanner-v3.scanner-mode-hidden { min-height: 54px; max-height: 64px; }
@@ -927,8 +928,9 @@
 .scanner-summary-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
-  padding: 8px;
+  padding: 5px 8px;
   font-size: 10px;
   color: var(--text-muted);
 }
@@ -982,6 +984,10 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+.top-candidates-wide-v4 {
+  flex: 1 1 280px;
+  min-height: 220px;
 }
 .market-groups-v4 {
   min-height: 190px;
@@ -1216,7 +1222,7 @@
   }
   .center-top-v4 { grid-template-columns: 1fr; }
   .center-bottom-v4 { grid-template-columns: 1fr; }
-  .trade-v4-right { grid-template-rows: minmax(180px, 30%) minmax(200px, 44%) minmax(160px, 26%); }
+  .trade-v4-right { grid-template-rows: minmax(180px, 44%) minmax(160px, 56%); }
   .market-groups-v4 { min-height: 180px; }
 }
 

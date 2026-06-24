@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import type { ScannerSnapshot, ScalperSnapshot, UniverseMode, ManualAnalysisSnapshot } from '../core/types';
 
-export type MainTab = 'trade' | 'journal' | 'ml-lab' | 'logs' | 'settings';
+export type MainTab = 'trade' | 'air-scanner' | 'journal' | 'ml-lab' | 'logs' | 'settings';
 export type TradeMode = 'AUTO' | 'MANUAL' | 'SCALPER';
 export type LogLevel = 'ALL' | 'INFO' | 'WARN' | 'ERROR' | 'TRADE';
 export type JournalFilter = 'ALL' | 'WINNERS' | 'LOSERS' | 'GOOD' | 'MEDIUM' | 'BAD' | 'training' | 'excluded';

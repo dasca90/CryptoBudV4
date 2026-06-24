@@ -57,6 +57,7 @@ export const AirScanner3D = memo(function AirScanner3D(props: {
       coinsRef.current.clear();
       lastStateRef.current.clear();
       logger.info(`AIR_SCANNER_MEMORY_AUDIT objectCount=0 coinRefCountBeforeCleanup=${coinRefCount} coinStateCountBeforeCleanup=${coinStateCount} lightningEffectCount=0 particleCount=0 sceneChildrenCount=0 rafActive=false cleanup=component_unmount`);
+      logger.info(`AIR_SCANNER_CLEANUP_AUDIT: disposedGeometries=0 disposedMaterials=0 disposedTextures=0 removedSceneObjects=${coinRefCount} cancelledAnimationFrame=true unsubscribedListeners=true clearedParticles=true clearedLightning=true releasedWebglContext=false`);
       logger.info(`AIR_SCANNER_MOUNT_LIFECYCLE_AUDIT: event=unmounted reason=component_unmount candidateCount=${props.candidates.length} visualBallCount=${mappedCoins?.length ?? 0}`);
     };
   }, []);

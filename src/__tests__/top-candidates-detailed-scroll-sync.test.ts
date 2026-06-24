@@ -19,7 +19,7 @@ ok(css.includes('.top-candidates-columns-sticky') && css.includes('top: 10px'), 
 ok(css.includes('.top-candidates-scroll') && css.includes('overscroll-behavior: contain'), '10 scroll remains internal to top candidates container');
 ok(panel.includes("viewMode === 'compact'") && panel.includes("viewMode === 'detailed'"), '11 compact/detailed mode still wired');
 ok(panel.includes('setSourceFilter') && panel.includes('<select value={sourceFilter}'), '12 filter dropdown still wired');
-ok(page.includes('data-testid="market-groups-workspace"') && page.indexOf('data-testid="market-groups-workspace"') > page.indexOf('data-testid="top-candidates-panel"'), '13 Market Groups stays below Top Candidates (no overlap)');
+ok(page.includes('data-testid="top-candidates-panel"') && page.indexOf('data-testid="top-candidates-panel"') > page.indexOf('data-testid="trade-scanner-status-panel"'), '13 Top Candidates stays below Scanner Status in the wide center column');
 ok(page.includes('data-testid="top-candidates-panel"') && page.includes('SELECTED COIN'), '14 selected coin layout remains present');
 
 console.log(`top-candidates-detailed-scroll-sync: ${p} passed, ${f} failed`);

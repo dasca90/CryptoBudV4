@@ -7,6 +7,7 @@ interface Props {
 
 const TABS: { key: MainTab; label: string }[] = [
   { key: 'trade', label: 'Trade' },
+  { key: 'air-scanner', label: '3D Scanner' },
   { key: 'journal', label: 'Journal' },
   { key: 'ml-lab', label: 'ML Lab' },
   { key: 'logs', label: 'Logs' },

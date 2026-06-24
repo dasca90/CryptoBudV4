@@ -295,6 +295,32 @@ assertSmartHandoffSurvives({
   assert(resolution.evaluatedStrategies.every(s => s.eligible === false));
 }
 
+// Test 13b - legacy group fallback after Smart no-valid is diagnostics-only until EntryGate revalidates.
+{
+  const resolution = resolveAutoBotsFinalStrategy(
+    legacyWaitSmartCandidate({
+      symbol: 'GUARDFALLBACKUSDT',
+      candidateId: 'scan-guard:GUARDFALLBACKUSDT',
+      dipPercent: 0,
+      reboundPercent: 0,
+      reboundConfirmed: false,
+      momentumConfirmed: false,
+      spreadOk: false,
+      tpRoomOk: false,
+      priceFresh: false,
+      bookFresh: false,
+      groupRecommendedStrategy: 'balanced',
+    }),
+    { marketBestFit: 'wait' },
+    { groupRecommendedStrategy: 'balanced', groupTrend: 'sideways' },
+    runtime,
+  );
+  assert.equal(resolution.finalExecutionStrategy, 'balanced');
+  assert.equal(resolution.fallbackApplied, true);
+  assert.equal(resolution.fallbackCanSubmitBuy, false);
+  assert.equal(resolution.fallbackSubmitGuardReason, 'ENTRY_GATE_REVALIDATION_REQUIRED_AFTER_NO_VALID_SMART_STRATEGY');
+}
+
 // Test 14 - WLFIUSDT fixture: eligible dip_and_rebound cannot become wait.
 assertSmartHandoffSurvives({
   symbol: 'WLFIUSDT',
@@ -334,6 +360,11 @@ assertSmartHandoffSurvives({
   assert(routerSrc.includes('SMART_STRATEGY_HANDOFF_AUDIT'));
   assert(routerSrc.includes('SMART_EXECUTABLE_STRATEGY_LOST_BEFORE_RESOLUTION'));
   assert(routerSrc.includes('WAIT_STRATEGY_NON_EXECUTABLE_AUDIT'));
+  assert(routerSrc.includes('fallbackCanSubmitBuy'));
+  assert(routerSrc.includes('ENTRY_GATE_REVALIDATION_REQUIRED_AFTER_NO_VALID_SMART_STRATEGY'));
+  const builderSrc = readFileSync(`${process.cwd()}/src/core/strategy-audit/strategy-audit-builder.ts`, 'utf8');
+  assert(builderSrc.includes('fallbackCanSubmitBuy=') && builderSrc.includes('fallbackSubmitGuardReason='));
+  assert(builderSrc.includes('entry_gate_revalidated_professional_freshness_spread_tp_room'));
 }
 
 console.log('autobots smart strategy router tests passed');

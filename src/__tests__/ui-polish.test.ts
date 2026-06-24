@@ -10,9 +10,10 @@ const ok = (c: boolean, m: string) => { if (c) p++; else { f++; console.error('F
   const ml = readFileSync('src/ui/pages/MLLabPage.tsx', 'utf8');
   const logs = readFileSync('src/ui/pages/LogsPage.tsx', 'utf8');
   const tradeV4 = readFileSync('src/components/trade-v4/TradeV4Page.tsx', 'utf8');
+  const airScanner = readFileSync('src/ui/pages/AirScannerPage.tsx', 'utf8');
   const topCand = readFileSync('src/components/trade-v4/TopCandidatesPanel.tsx', 'utf8');
 
-  ok(tradeV4.includes('SelectedCoinInspector') && tradeV4.includes('AirScanner3D'), 'A TradeV4 core panels render');
+  ok(tradeV4.includes('SelectedCoinInspector') && tradeV4.includes('trade-scanner-status-panel') && airScanner.includes('AirScanner3DView'), 'A TradeV4 core panels render and 3D scanner is isolated');
   ok(!settings.includes('PAPER TRADING'), 'B Paper settings not in Settings page');
   ok(topCand.includes('Status') && topCand.includes('Strategy'), 'D Watch Pool table shows Status and Strategy columns');
   ok(topCand.includes('No BUY —'), 'E No BUY summary appears');
@@ -27,4 +28,3 @@ const ok = (c: boolean, m: string) => { if (c) p++; else { f++; console.error('F
   console.log(`ui-polish: ${p} passed, ${f} failed`);
   if (f > 0) process.exit(1);
 })();
-

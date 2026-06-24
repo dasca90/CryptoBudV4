@@ -180,6 +180,8 @@ export interface AutoBotsFinalStrategyResolution {
   selectionReason: string | null;
   noValidStrategyReason: string | null;
   noValidStrategyTrace: string[];
+  fallbackCanSubmitBuy: boolean;
+  fallbackSubmitGuardReason: string;
 }
 
 function normalizeAutoStrategy(value: unknown): AutoStrategyName | null {
@@ -412,6 +414,8 @@ export function resolveAutoBotsFinalStrategy(
       selectionReason: isExecutableAutoStrategy(manual) ? 'manual_override' : null,
       noValidStrategyReason: isExecutableAutoStrategy(manual) ? null : 'NO_VALID_MANUAL_STRATEGY',
       noValidStrategyTrace: [],
+      fallbackCanSubmitBuy: false,
+      fallbackSubmitGuardReason: isExecutableAutoStrategy(manual) ? 'manual_override_requires_final_entry_gate' : 'NO_VALID_MANUAL_STRATEGY',
     };
   }
 
@@ -571,6 +575,13 @@ export function resolveAutoBotsFinalStrategy(
   const evaluationTrace = smartStrategyDecision.evaluatedStrategies.length > 0
     ? smartStrategyDecision.noValidStrategyTrace
     : [];
+  const smartNoValidStrategy = smartStrategyDecision.noValidStrategyReason === 'NO_VALID_AUTOBOTS_STRATEGY';
+  const fallbackAfterSmartNoValid = fallbackApplied && smartNoValidStrategy && finalExecutionStrategy !== 'wait';
+  const fallbackSubmitGuardReason = fallbackAfterSmartNoValid
+    ? 'ENTRY_GATE_REVALIDATION_REQUIRED_AFTER_NO_VALID_SMART_STRATEGY'
+    : finalExecutionStrategy === 'wait'
+      ? (fallbackReason ?? smartStrategyDecision.noValidStrategyReason ?? 'WAIT_NON_EXECUTABLE')
+      : 'smart_strategy_or_legacy_route_requires_final_entry_gate';
   const invariantOk = finalExecutionStrategy !== 'wait'
     || fallbackReason !== 'NO_VALID_AUTOBOTS_STRATEGY'
     || smartStrategyDecision.evaluatedStrategies.length === 4;
@@ -655,6 +666,8 @@ export function resolveAutoBotsFinalStrategy(
     selectionReason: smartStrategyDecision.selectedStrategy ? smartStrategyDecision.selectionReason : null,
     noValidStrategyReason: finalExecutionStrategy === 'wait' ? (fallbackReason ?? smartStrategyDecision.noValidStrategyReason) : null,
     noValidStrategyTrace: evaluationTrace,
+    fallbackCanSubmitBuy: false,
+    fallbackSubmitGuardReason,
   };
 }
 

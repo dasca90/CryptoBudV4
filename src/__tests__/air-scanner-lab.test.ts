@@ -433,18 +433,21 @@ assert.ok(adapterSource.includes("if (candidate.status === 'BUY') return 'buy_ca
 assert.equal(adapterSource.includes('FOCUSED_COIN_FRONT_POSITION'), false, 'production adapter does not own the local visual focus slot');
 
 const tradeV4PageSource = readFileSync(join(process.cwd(), 'src', 'components', 'trade-v4', 'TradeV4Page.tsx'), 'utf8');
+const airScannerPageSource = readFileSync(join(process.cwd(), 'src', 'ui', 'pages', 'AirScannerPage.tsx'), 'utf8');
 const openPositionsPanelSource = readFileSync(join(process.cwd(), 'src', 'components', 'trade-v4', 'OpenPositionsPanel.tsx'), 'utf8');
 assert.ok(openPositionsPanelSource.includes('data-open-position-symbol={p.symbol}') && openPositionsPanelSource.includes('data-testid={`open-position-row-${p.symbol}`}'), 'Open Positions rows expose symbol anchors for buy transfer beams');
-assert.ok(tradeV4PageSource.includes('is3DScannerLabPreviewEnabled'), 'TradeV4Page gates lab scanner behind feature flag');
-assert.ok(tradeV4PageSource.includes('data-air-scanner-renderer'), 'TradeV4Page exposes a non-visual scanner renderer marker for QA');
-assert.ok(tradeV4PageSource.includes('scannerTelemetry={use3DScannerLabPreview'), 'TradeV4Page moves production scanner telemetry into Candidate Pool');
-assert.ok(tradeV4PageSource.includes('<AirScanner3D'), 'existing production scanner remains as fallback');
-assert.ok(tradeV4PageSource.includes('<AirScannerProductionPreview'), 'lab-derived scanner can mount behind flag');
-assert.ok(tradeV4PageSource.includes('<ProductionOpenPositionTransferOverlay'), 'production transfer overlay mounts behind flag');
+assert.equal(tradeV4PageSource.includes('<AirScanner3D'), false, 'TradeV4Page no longer mounts legacy 3D scanner');
+assert.equal(tradeV4PageSource.includes('<AirScannerProductionPreview'), false, 'TradeV4Page no longer mounts lab 3D scanner');
+assert.ok(tradeV4PageSource.includes('data-air-scanner-renderer="not-mounted-trade-tab"'), 'TradeV4Page exposes a non-visual scanner renderer marker for QA');
+assert.ok(tradeV4PageSource.includes('scannerTelemetry={{'), 'TradeV4Page keeps scanner telemetry lightweight in Candidate Pool');
+assert.ok(airScannerPageSource.includes('is3DScannerLabPreviewEnabled'), 'AirScannerPage gates lab scanner behind feature flag');
+assert.ok(airScannerPageSource.includes('<AirScanner3DView'), 'existing production scanner remains as isolated fallback');
+assert.ok(airScannerPageSource.includes('<AirScannerProductionPreview'), 'lab-derived scanner can mount only inside isolated tab');
+assert.equal(airScannerPageSource.includes('<ProductionOpenPositionTransferOverlay'), false, 'isolated 3D tab does not mount trade-transfer overlay on Trade tab');
 assert.match(
-  tradeV4PageSource,
-  /<AirScannerProductionPreview\s+model=\{props\.model\}\s+quality=\{graphicsQuality\}\s+onSelectSymbol=\{selectSymbol\}\s+onTransferSourceUpdate=\{setLabTransferSource\}\s+\/>/,
-  'TradeV4Page passes only read-only model/visual/select/telemetry props into lab-derived scanner',
+  airScannerPageSource,
+  /<AirScannerProductionPreview[\s\S]*model=\{model\}[\s\S]*quality=\{graphicsQuality\}[\s\S]*onSelectSymbol=\{selectSymbol\}[\s\S]*onTransferSourceUpdate=\{\(\) => \{\}\}/,
+  'AirScannerPage passes only read-only model/visual/select/telemetry props into lab-derived scanner',
 );
 assert.match(
   tradeV4PageSource,

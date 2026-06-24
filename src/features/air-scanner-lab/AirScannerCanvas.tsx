@@ -26,8 +26,10 @@ function AirScannerCanvasMemoryLifecycle({ visible }: { visible: boolean }) {
   useEffect(() => {
     return () => {
       recordAirScannerCleanup();
-      disposeAirScannerSceneResources(scene);
+      const cleanup = disposeAirScannerSceneResources(scene);
       disposeAirScannerRenderLists(gl);
+      gl.forceContextLoss?.();
+      console.info(`AIR_SCANNER_CLEANUP_AUDIT: disposedGeometries=${cleanup.disposedGeometries} disposedMaterials=${cleanup.disposedMaterials} disposedTextures=${cleanup.disposedTextures} removedSceneObjects=${cleanup.removedSceneObjects} cancelledAnimationFrame=true unsubscribedListeners=true clearedParticles=true clearedLightning=true releasedWebglContext=true`);
       if (IS_DEV) {
         console.info(formatAirScannerMemoryAudit(buildAirScannerMemoryAuditSnapshot({
           root: scene,

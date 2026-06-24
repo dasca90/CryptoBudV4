@@ -3060,6 +3060,52 @@ export class MarketScanner {
       const latestDecision = [...perSymbolDecisions].reverse().find((d) => d.symbol === symbol);
       return latestDecision?.reason ?? 'UNKNOWN';
     };
+    if (finalExecutionPool.length > 0 && submitAttemptedCount === 0) {
+      const selectedReasons = selectedBuyCandidates.map((candidate) => selectedDecisionReason(candidate.symbol));
+      const reasonText = [...selectedReasons, ...Object.values(skipReasonsBySymbol), ...executionPlan.noBuyReasons].join('|').toLowerCase();
+      const buyPacingActive = cooldownSkippedCount > 0 || reasonText.includes('spacing') || reasonText.includes('rate_limit') || reasonText.includes('pacing');
+      const cooldownActive = cooldownSkippedCount > 0 || reasonText.includes('cooldown');
+      const groupCapBlocked = reasonText.includes('group_cap') || reasonText.includes('group_position') || reasonText.includes('max_group');
+      const capitalBlocked = capitalSkippedCount > 0 || reasonText.includes('capital') || executionPlan.capitalAvailable < this.executionCapitalPerTrade;
+      const duplicateBlocked = duplicateSkippedCount > 0 || reasonText.includes('duplicate');
+      const maxPositionsBlocked = openPositionsBeforeHandoff >= this.executionMaxPositions || reasonText.includes('max_open') || reasonText.includes('max_positions');
+      const finalNoSubmitReason = !this.paperAutoEnabled && !(this as any).liveAutoEnabled
+        ? 'AUTO_EXECUTION_DISABLED'
+        : !this.paperAutoBuyFn && executionPlan.executionAdapter === 'paper_simulated'
+          ? 'PAPER_AUTO_BUY_FN_MISSING'
+          : selectedBuyCandidates.length === 0
+            ? (executionPlan.noBuyReasons[0] ?? 'NO_SELECTED_BUY_CANDIDATES')
+            : maxPositionsBlocked
+              ? 'MAX_POSITIONS_BLOCKED'
+              : duplicateSkippedCount >= selectedBuyCandidates.length
+                ? 'ALL_SELECTED_SYMBOLS_DUPLICATE'
+                : pendingSkippedCount >= selectedBuyCandidates.length
+                  ? 'ALL_SELECTED_SYMBOLS_PENDING_ORDER'
+                  : cooldownActive || buyPacingActive
+                    ? 'BUY_PACING_OR_COOLDOWN_ACTIVE'
+                    : groupCapBlocked
+                      ? 'GROUP_CAP_BLOCKED'
+                      : capitalBlocked
+                        ? 'CAPITAL_BLOCKED'
+                        : preAdapterAllowedCount === 0
+                          ? 'ALL_SELECTED_SYMBOLS_FAILED_PRE_ADAPTER_VALIDATION'
+                          : 'NO_ADAPTER_SUBMIT_AFTER_SELECTION';
+      logger.info(
+        `EXECUTION_NO_SUBMIT_REASON_AUDIT: ` +
+        `scanId=${scanId} ` +
+        `buyReadySymbols=${finalExecutionPool.map((candidate) => candidate.symbol).join('|') || 'none'} ` +
+        `executionSelectedCount=${selectedBuyCandidates.length} ` +
+        `submitAttemptedCount=${submitAttemptedCount} ` +
+        `openPositionsCount=${openPositionsBeforeHandoff} ` +
+        `maxPositions=${this.executionMaxPositions} ` +
+        `buyPacingActive=${String(buyPacingActive)} ` +
+        `cooldownActive=${String(cooldownActive)} ` +
+        `groupCapBlocked=${String(groupCapBlocked)} ` +
+        `capitalBlocked=${String(capitalBlocked)} ` +
+        `duplicateBlocked=${String(duplicateBlocked)} ` +
+        `finalNoSubmitReason=${finalNoSubmitReason}`
+      );
+    }
     const executionAttemptOutcomes = selectedBuyCandidates.map((candidate, index) => {
       const symbol = candidate.symbol;
       const lifecycle = perSymbolLifecycle.get(symbol);
@@ -3124,6 +3170,52 @@ export class MarketScanner {
       `invariantOk=${String(summaryInvariantOk)} ` +
       `failureReason=${summaryInvariantOk ? 'none' : 'EXECUTION_ATTEMPT_SUMMARY_INVARIANT_FAILED'}`
     );
+    {
+      const submittedSymbol = submitAttemptedSymbols[0] ?? 'none';
+      const notSubmittedSymbols = selectedBuyCandidates
+        .map((candidate) => candidate.symbol)
+        .filter((symbol) => !submitAttemptedSymbols.includes(symbol));
+      const notSubmittedReasons = notSubmittedSymbols
+        .map((symbol) => `${symbol}:${String(selectedDecisionReason(symbol)).replace(/\s+/g, '_')}`);
+      const submittedLifecycle = submittedSymbol !== 'none' ? perSymbolLifecycle.get(submittedSymbol) : undefined;
+      const executionResult = positionCreatedCount > 0
+        ? 'POSITION_CREATED'
+        : adapterAcceptedCount > 0
+          ? 'ADAPTER_ACCEPTED_NO_POSITION'
+          : adapterCalledCount > 0
+            ? 'ADAPTER_REJECTED_OR_FAILED'
+            : submitAttemptedCount > 0
+              ? 'SUBMIT_ATTEMPTED_NO_ADAPTER_CALL'
+              : 'NO_SUBMIT_ATTEMPTED';
+      const reasonOnlyOneSubmitted = submitAttemptedCount === 1 && selectedBuyCandidates.length > 1
+        ? notSubmittedReasons.join('|') || 'one_submit_due_to_runtime_revalidation_or_pacing'
+        : 'not_applicable';
+      const buyPacingActive = cooldownSkippedCount > 0
+        || Object.values(skipReasonsBySymbol).some((reason) => String(reason).toLowerCase().includes('cooldown'));
+      const groupCaps = selectedBuyCandidates
+        .map((candidate) => `${candidate.symbol}:${(candidate as any).riskGroup ?? 'unknown'}:${executionPlan.availableSlots}/${this.executionMaxPositions}`)
+        .join('|') || 'none';
+      const failureReason = executionResult === 'POSITION_CREATED'
+        ? 'none'
+        : (notSubmittedReasons[0] ?? paperAutoResult?.reason ?? liveExecutionResult?.reason ?? executionPlan.noBuyReasons[0] ?? 'unknown');
+      logger.info(
+        `EXECUTION_SUBMIT_RESULT_AUDIT: ` +
+        `scanId=${scanId} ` +
+        `selectedCount=${selectedBuyCandidates.length} ` +
+        `submitAttemptedCount=${submitAttemptedCount} ` +
+        `submittedSymbol=${submittedSymbol} ` +
+        `notSubmittedSymbols=${notSubmittedSymbols.join('|') || 'none'} ` +
+        `reasonOnlyOneSubmitted=${reasonOnlyOneSubmitted} ` +
+        `buyPacingActive=${String(buyPacingActive)} ` +
+        `maxPositions=${this.executionMaxPositions} ` +
+        `openPositionsCount=${openPositionsBeforeHandoff} ` +
+        `groupCaps=${groupCaps} ` +
+        `executionResult=${executionResult} ` +
+        `orderId=${submittedLifecycle?.orderId ?? 'none'} ` +
+        `demoTradeId=${submittedLifecycle?.positionId ?? 'none'} ` +
+        `failureReason=${String(failureReason).replace(/\s+/g, '_')}`
+      );
+    }
     logger.info(`ADAPTER_CALL_PROOF_AUDIT: scanId=${scanId} executionSelectedCount=${executionSelectedCount} submitAttemptedCount=${submitAttemptedCount} selectedCount=${selectedBuyCandidates.length} allowedForAdapterCount=${preAdapterAllowedCount} adapterCalledCount=${adapterCalledCount} adapterAcceptedCount=${adapterAcceptedCount} orderFilledCount=${orderFilledCount} controllerReceivedSymbols=${attemptedSymbols.join('|') || 'none'} submitAttemptedSymbols=${submitAttemptedSymbols.join('|') || 'none'} adapterAttemptedSymbols=${submitAttemptedSymbols.join('|') || 'none'} adapterRejectedSymbols=none positionCreatedSymbols=${positionCreatedCount > 0 ? submitAttemptedSymbols.join('|') : 'none'} journalPersistedCount=${journalPersistedCount} telegramSentCount=${telegramSentCount} openPositionsBefore=${openPositionsBeforeHandoff} openPositionsAfter=${openPositionsAfterHandoff} exactStopReason=${adapterCalledCount === 0 ? (selectedBuyCandidates.length === 0 ? 'no_candidates_selected' : preAdapterAllowedCount === 0 ? 'all_failed_revalidation' : 'post_revalidation_block') : positionCreatedCount === 0 ? 'adapter_called_but_no_fill' : 'ok'}`);
     logger.info(`BUY_EXECUTION_PIPELINE_LIFECYCLE_AUDIT: scanId=${scanId} scannerCandidates=${rankedCandidatesToAnnotate.length} executionPoolCandidates=${executionPlan.executionPoolSize} executionSelectedCount=${executionSelectedCount} submitAttemptedCount=${submitAttemptedCount} selectedForExecutionCandidates=${selectedBuyCandidates.length} adapterSubmittedCandidates=${submitAttemptedSymbols.length} adapterCalledCount=${adapterCalledCount} adapterAcceptedCount=${adapterAcceptedCount} orderFilledCount=${orderFilledCount} positionsCreated=${positionCreatedCount} journalPersistedCount=${journalPersistedCount} telegramSentCount=${telegramSentCount} scannerFinished=true scannerBuyReadyCount=${buyCount} selectedForExecutionCount=${selectedBuyCandidates.length} executionPlannerCreated=true controllerReceivedCount=${attemptedSymbols.length} controllerReceivedSymbols=${attemptedSymbols.join('|') || 'none'} submitAttemptedSymbols=${submitAttemptedSymbols.join('|') || 'none'} paperAutoBuyFnCalled=${String(adapterCalledCount > 0)} executePlannedScannerBuyCalled=${String(adapterCalledCount > 0)} preAdapterValidationPassedCount=${preAdapterAllowedCount} fillCreatedCount=${orderFilledCount} positionCreatedCount=${positionCreatedCount} openPositionsBefore=${openPositionsBeforeHandoff} openPositionsAfter=${openPositionsAfterHandoff} stopStage=${adapterCalledCount === 0 ? 'pre_adapter' : 'post_adapter'} exactStopReason=${adapterCalledCount === 0 ? (duplicateSkippedCount > 0 ? 'duplicate_symbols' : preAdapterAllowedCount === 0 ? 'all_blocked_by_revalidation' : 'all_blocked_by_paperAutoBuyFn') : 'see_adapter_call_proof'}`);
     logger.info(`MULTI_BUY_HANDOFF_AUDIT: scanId=${scanId} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} executionSelectedCount=${executionSelectedCount} submitAttemptedCount=${submitAttemptedCount} selectedCount=${selectedBuyCandidates.length} buyableCandidatesCount=${selectedBuyCandidates.length} controllerReceivedCount=${attemptedSymbols.length} attemptedSymbols=${attemptedSymbols.join('|') || 'none'} submitAttemptedSymbols=${submitAttemptedSymbols.join('|') || 'none'} skippedSymbols=${skippedSymbols.join('|') || 'none'} skipReasonsBySymbol=${Object.entries(skipReasonsBySymbol).map(([symbol, reason]) => `${symbol}:${String(reason).replace(/\s+/g, '_')}`).join('|') || 'none'} adapterCalledCount=${adapterCalledCount} adapterAcceptedCount=${adapterAcceptedCount} orderFilledCount=${orderFilledCount} positionCreatedCount=${positionCreatedCount} journalPersistedCount=${journalPersistedCount} telegramSentCount=${telegramSentCount} openPositionsBefore=${openPositionsBeforeHandoff} openPositionsAfter=${openPositionsAfterHandoff} availableSlotsBefore=${executionPlan.availableSlots} availableSlotsAfter=${Math.max(0, this.executionMaxPositions - openPositionsAfterHandoff)} safetyLimitApplied=${skippedSymbols.length > 0 ? 'per_candidate_revalidation' : 'none'}`);

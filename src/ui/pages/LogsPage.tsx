@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { logger, type LogEntry } from '../../utils/logger';
 import { formatSystemLocalTime, getRawUtcTooltip } from '../../utils/timeFormatter';
 import { useVirtualWindow } from '../../lib/ui/virtualization';
+import { getOvernightStabilitySnapshot, type OvernightStabilitySnapshot } from '../../core/diagnostics/overnightStability';
 
 type FilterLevel = 'ALL' | 'ERROR' | 'WARN' | 'INFO' | 'TRADE';
 type SourceOption = 'ALL' | 'Binance' | 'Scanner' | 'AutoBots' | 'EntryGate' | 'Market Analyzer' | 'Execution' | 'Exit' | 'UI' | 'Other';
@@ -20,8 +21,50 @@ function countByLevel(logs: LogEntry[]): Record<string, number> {
   return counts;
 }
 
+function OvernightStatusBadge({ snapshot }: { snapshot: OvernightStabilitySnapshot }) {
+  const lastCleanup = snapshot.lastAirScannerCleanupAt
+    ? formatSystemLocalTime(new Date(snapshot.lastAirScannerCleanupAt).toISOString())
+    : 'n/a';
+  const memoryColor = snapshot.memoryStatus === 'Pressure'
+    ? '#f85149'
+    : snapshot.memoryStatus === 'Growing'
+      ? '#d29922'
+      : snapshot.memoryStatus === 'Measuring' || snapshot.memoryStatus === 'Warm-up'
+        ? '#58a6ff'
+        : '#3fb950';
+  const pressureReason = snapshot.memoryStatus === 'Pressure' && snapshot.pressureReason !== 'none'
+    ? ` (${snapshot.pressureReason})`
+    : '';
+  return (
+    <div
+      data-testid="overnight-status-badge"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        flexWrap: 'wrap',
+        fontSize: 10,
+        padding: '4px 6px',
+        marginBottom: 3,
+        border: '1px solid #30363d',
+        borderRadius: 4,
+        background: 'rgba(13,17,23,0.9)',
+      }}
+      title="Overnight stability verification is read-only diagnostics. It does not change trading, AutoBots, TP/SL, or trailing behavior."
+    >
+      <strong style={{ color: '#c9d1d9' }}>Overnight Status</strong>
+      <span>Runtime: {snapshot.uptimeHours.toFixed(1)}h</span>
+      <span style={{ color: memoryColor }}>Memory: {snapshot.memoryStatus}{pressureReason}</span>
+      <span>3D Active: {snapshot.airScannerMounted ? 'Yes' : 'No'}</span>
+      <span>Scanner: {snapshot.scannerRunning ? 'Running' : 'Stopped'}</span>
+      <span>Last cleanup: {lastCleanup}</span>
+    </div>
+  );
+}
+
 export function LogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>(logger.getLogs());
+  const [overnightStatus, setOvernightStatus] = useState<OvernightStabilitySnapshot>(getOvernightStabilitySnapshot());
   const [levelFilter, setLevelFilter] = useState<FilterLevel>('ALL');
   const [sourceFilter, setSourceFilter] = useState<SourceOption>('ALL');
   const [search, setSearch] = useState('');
@@ -39,6 +82,7 @@ export function LogsPage() {
   useEffect(() => {
     const unsub = logger.subscribe(() => {
       if (paused) return;
+      setOvernightStatus(getOvernightStabilitySnapshot());
       queuedLogCountRef.current += 1;
       if (throttleTimerRef.current) return;
       throttleTimerRef.current = setTimeout(() => {
@@ -56,6 +100,11 @@ export function LogsPage() {
       if (throttleTimerRef.current) clearTimeout(throttleTimerRef.current);
     };
   }, [paused]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setOvernightStatus(getOvernightStabilitySnapshot()), 30_000);
+    return () => clearInterval(interval);
+  }, []);
 
   const filtered = useMemo(() => {
     let result = logs;
@@ -219,6 +268,7 @@ export function LogsPage() {
     <div className="logs-layout" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div className="page-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div className="filter-bar" style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-secondary)', paddingBottom: 4, paddingTop: 2, flexShrink: 0 }}>
+          <OvernightStatusBadge snapshot={overnightStatus} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap', marginBottom: 2 }}>
             {LEVELS.map(l => (
               <button

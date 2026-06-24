@@ -24,6 +24,8 @@ export interface LoggerStats {
   maxLogCount: number;
   currentInternalAuditCount: number;
   maxInternalAuditCount: number;
+  trimCount: number;
+  lastMemoryBufferTrimAt: number | null;
   byLevel: Record<LogLevel, { logged: number; suppressed: number }>;
   throttledKeys: number;
 }
@@ -38,6 +40,7 @@ class Logger {
   private totalLogged = 0;
   private totalSuppressed = 0;
   private lastBufferTrimAuditAt = 0;
+  private trimCount = 0;
   private byLevel: Record<LogLevel, { logged: number; suppressed: number }> = {
     INFO: { logged: 0, suppressed: 0 },
     WARN: { logged: 0, suppressed: 0 },
@@ -104,6 +107,9 @@ class Logger {
     this.totalLogged++;
     this.byLevel[level].logged++;
     const now = Date.now();
+    if (visibleTrim > 0 || auditTrim > 0) {
+      this.trimCount += visibleTrim + auditTrim;
+    }
     if ((visibleTrim > 0 || auditTrim > 0) && now - this.lastBufferTrimAuditAt > 30000) {
       this.lastBufferTrimAuditAt = now;
       const trimEntry: LogEntry = {
@@ -188,6 +194,7 @@ class Logger {
     this.totalSuppressed = 0;
     this.throttleMap.clear();
     this.lastBufferTrimAuditAt = 0;
+    this.trimCount = 0;
     for (const l of Object.keys(this.byLevel) as LogLevel[]) {
       this.byLevel[l] = { logged: 0, suppressed: 0 };
     }
@@ -209,6 +216,8 @@ class Logger {
       maxLogCount: this.maxLogs,
       currentInternalAuditCount: this.internalAuditLogs.length,
       maxInternalAuditCount: this.maxInternalAuditLogs,
+      trimCount: this.trimCount,
+      lastMemoryBufferTrimAt: this.lastBufferTrimAuditAt > 0 ? this.lastBufferTrimAuditAt : null,
       byLevel: { ...this.byLevel },
       throttledKeys: this.throttleMap.size,
     };
