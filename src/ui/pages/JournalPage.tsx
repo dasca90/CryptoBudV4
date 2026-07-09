@@ -41,6 +41,18 @@ const FILTERS: { key: JournalFilter; label: string }[] = [
 const JOURNAL_ROW_HEIGHT = 25;
 const JOURNAL_VIRTUALIZATION_THRESHOLD = 40;
 
+const formatJournalPnlUsd = (value: number | undefined) => (
+  typeof value === 'number' && Number.isFinite(value)
+    ? `${value >= 0 ? '+' : ''}${value.toFixed(2)}`
+    : '-'
+);
+
+const formatJournalPnlPercent = (value: number | undefined) => (
+  typeof value === 'number' && Number.isFinite(value)
+    ? `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+    : '-'
+);
+
 export function JournalPage({ journal }: Props) {
   const [trades, setTrades] = useState<TradeRecord[]>([]);
   const [filter, setFilter] = useState<JournalFilter>('ALL');
@@ -211,7 +223,7 @@ export function JournalPage({ journal }: Props) {
             <div className="journal-table">
               <div className="journal-row journal-header">
                 <span>Symbol</span><span>Mode</span><span>Adapter</span><span>Strategy</span>
-                <span>Entry</span><span>Exit</span><span>PnL</span><span>Exit Reason</span>
+                <span>Entry</span><span>Exit</span><span>PnL $</span><span>PnL %</span><span>Exit Reason</span>
                 <span>Quality</span><span>ML Use</span><span>Training</span>
               </div>
               {journalVirtual.topSpacerPx > 0 && <div className="virtual-spacer" style={{ height: journalVirtual.topSpacerPx }} />}
@@ -220,11 +232,12 @@ export function JournalPage({ journal }: Props) {
                   <span style={{ fontWeight: 600 }}>{t.coin.replace('USDT', '')}</span>
                   <span>{t.mode}</span>
                   <span>{t.adapter}</span>
-                  <span style={{ fontSize: 10 }}>{t.strategy}</span>
+                  <span className="journal-strategy-cell" title={t.strategy}>{t.strategy}</span>
                   <span>${t.entryPrice.toFixed(2)}</span>
                   <span>{t.exitPrice ? `$${t.exitPrice.toFixed(2)}` : '-'}</span>
-                  <span>{t.pnl ? `${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}` : '-'}</span>
-                  <span style={{ fontSize: 10 }}>{t.closeSnapshot?.exitReason ?? '-'}</span>
+                  <span>{formatJournalPnlUsd(t.pnl)}</span>
+                  <span>{formatJournalPnlPercent(t.pnlPercent)}</span>
+                  <span className="journal-exit-reason-cell" title={t.closeSnapshot?.exitReason ?? ''}>{t.closeSnapshot?.exitReason ?? '-'}</span>
                   <span><StatusBadge variant={qualityVariant(t.mlQuality?.dataQuality)} size="sm" /></span>
                   <span style={{ fontSize: 10 }}>{t.mlQuality?.mlUse ?? '-'}</span>
                   <span>{t.trainingEligible ? 'yes' : '-'}</span>

@@ -14,7 +14,7 @@
  * 10. ranking chooses higher-quality candidate
  * 11. no-buy summary includes SPREAD_TOO_HIGH
  * 12. no-buy summary includes DUPLICATE_POSITION
- * 13. no-buy summary includes MAX_POSITIONS_REACHED
+ * 13. no-buy summary scopes global max positions
  * 14. Build methods exist
  *
  * Run: npx tsx src/__tests__/execution-planner.test.ts
@@ -193,7 +193,8 @@ console.log('\n── 5. Duplicate open position → skipped ──\n');
   });
   assert(plan.selectedCandidates.length === 0, '5 duplicate = not selected');
   assert(plan.skippedCandidates.length >= 1, '5 duplicate = skipped');
-  assert(plan.skippedCandidates[0].gate === 'EntryGate', '5 gate = EntryGate');
+  assert(plan.skippedCandidates[0].gate === 'PositionManager', '5 already-open filter uses PositionManager');
+  assert(plan.skippedCandidates[0].reason === 'FILTERED_ALREADY_OPEN_POSITION', '5 duplicate is filtered before EntryGate');
 }
 
 // 6. duplicate pending order is skipped
@@ -376,13 +377,24 @@ console.log('\n── 12. No-buy summary includes DUPLICATE ──\n');
     watchPool: [],
     nearMissPool: [],
   });
-  const hasDupReason = plan.noBuyReasons.some(r => r.includes('DUPLICATE'));
-  assert(hasDupReason, '12 DUPLICATE in noBuyReasons');
+  const hasFilteredReason = plan.noBuyReasons.some(r => r.includes('FILTERED_ALREADY_OPEN_POSITION'))
+    || plan.skippedCandidates.some(c => String(c.reason).includes('FILTERED_ALREADY_OPEN_POSITION'));
+  assert(hasFilteredReason, '12 already-open duplicate is filtered in noBuyReasons');
 }
 
-// 13. no-buy summary includes MAX_POSITIONS_REACHED
-console.log('\n── 13. No-buy summary includes MAX_POSITIONS ──\n');
+// 13. no-buy summary scopes global max positions
+console.log('\n-- 13. No-buy summary scopes global max positions --\n');
 {
+  const notFullPlan = buildExecutionPlan({
+    ...BASE_PLAN_INPUT,
+    executionPool: [makeCandidate({ symbol: 'ROOMBTC', rank: 12 })],
+    openSymbols: Array(17).fill('X').map((_, i) => `POS${i}`),
+    maxPositions: 24,
+    watchPool: [],
+    nearMissPool: [],
+  });
+  assert(!notFullPlan.noBuyReasons.some(r => r.includes('MAX_GLOBAL_POSITIONS_REACHED')), '13a global max is false when open positions are 17/24');
+
   const plan = buildExecutionPlan({
     ...BASE_PLAN_INPUT,
     executionPool: [makeCandidate({ symbol: 'FULLBTC', rank: 12 })],
@@ -391,8 +403,9 @@ console.log('\n── 13. No-buy summary includes MAX_POSITIONS ──\n');
     watchPool: [],
     nearMissPool: [],
   });
-  const hasMaxReason = plan.noBuyReasons.some(r => r.includes('MAX') || r.includes('POSITION'));
-  assert(hasMaxReason, '13 MAX_POSITIONS in noBuyReasons');
+  const hasGlobalMaxReason = plan.noBuyReasons.some(r => r.includes('MAX_GLOBAL_POSITIONS_REACHED'));
+  assert(hasGlobalMaxReason, '13b full global positions reports MAX_GLOBAL_POSITIONS_REACHED');
+  assert(!plan.noBuyReasons.some(r => r === 'MAX_POSITIONS_REACHED'), '13c generic MAX_POSITIONS_REACHED is not used for scoped planner reason');
 }
 
 console.log('\n-- 14. Planner preserves actionable no-buy reason --\n');
@@ -451,7 +464,7 @@ console.log('\n-- 14. Planner preserves actionable no-buy reason --\n');
   assert(plan.selectedCandidates.length === 0, '14 non-executable setup candidate is not selected');
   assert(plan.skippedCandidates.length > 0, '14 non-executable setup candidate is skipped');
   assert(plan.skippedCandidates[0].finalNoBuyReason !== 'STRATEGY_HANDOFF_INTEGRITY_FAILED', '14 handoff does not mask concrete blocker');
-  assert(String(plan.skippedCandidates[0].finalNoBuyReason).includes('dip_not_confirmed') || String(plan.skippedCandidates[0].finalNoBuyReason).includes('rebound'), '14 skip reason is actionable');
+  assert(String(plan.skippedCandidates[0].finalNoBuyReason).includes('DIP_NOT_CONFIRMED') || String(plan.skippedCandidates[0].finalNoBuyReason).includes('dip_not_confirmed') || String(plan.skippedCandidates[0].finalNoBuyReason).includes('rebound'), '14 skip reason is actionable');
 }
 
 // ── Summary ──

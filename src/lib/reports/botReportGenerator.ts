@@ -39,6 +39,8 @@ export interface BotReport {
     losingClosedTrades: number;
     winRatePct: number | null;
     realizedPnlUsd: number | null;
+    realizedGrossPnlUsd: number | null;
+    realizedNetPnlUsd: number | null;
     realizedPnlPct: number | null;
     openUnrealizedPnlUsd: number | null;
     bestTrade: string | null;
@@ -178,7 +180,8 @@ export function formatReportDuration(ms: number | null): string {
 
 function labelTrade(trade: TradeRecord | null): string | null {
   if (!trade) return null;
-  const pnl = typeof trade.pnl === 'number' ? ` ${formatMoney(trade.pnl)}` : '';
+  const pnlValue = tradeNetPnlUsd(trade);
+  const pnl = typeof pnlValue === 'number' ? ` ${formatMoney(pnlValue)}` : '';
   return `${trade.coin}${pnl}`;
 }
 
@@ -250,6 +253,22 @@ function collectBlockers(logs: LogEntry[]): Array<{ reason: string; count: numbe
     .sort((a, b) => b.count - a.count);
 }
 
+function tradeGrossPnlUsd(trade: TradeRecord): number | null {
+  return trade.grossPnlUsd ?? trade.closeSnapshot?.grossPnlUsd ?? trade.pnl ?? null;
+}
+
+function tradeFeeUsd(trade: TradeRecord): number | null {
+  return trade.feeUsdTotal ?? trade.closeSnapshot?.feeUsdTotal ?? trade.closeSnapshot?.fees ?? null;
+}
+
+function tradeNetPnlUsd(trade: TradeRecord): number | null {
+  const explicit = trade.netPnlUsd ?? trade.closeSnapshot?.netPnlUsd;
+  if (typeof explicit === 'number' && Number.isFinite(explicit)) return explicit;
+  const gross = tradeGrossPnlUsd(trade);
+  const fees = tradeFeeUsd(trade);
+  return gross == null ? null : gross - (fees ?? 0);
+}
+
 function buildBreakdown(
   keys: readonly string[],
   labelByKey: Record<string, string>,
@@ -261,13 +280,13 @@ function buildBreakdown(
   return keys.map((key) => {
     const opened = openedTrades.filter((trade) => getKey(trade) === key);
     const closed = closedTrades.filter((trade) => getKey(trade) === key);
-    const closedWithPnl = closed.filter((trade) => typeof trade.pnl === 'number');
+    const closedWithPnl = closed.filter((trade) => typeof tradeNetPnlUsd(trade) === 'number');
     const best = closedWithPnl.reduce<TradeRecord | null>((winner, trade) => {
-      if (!winner || (trade.pnl ?? 0) > (winner.pnl ?? 0)) return trade;
+      if (!winner || (tradeNetPnlUsd(trade) ?? 0) > (tradeNetPnlUsd(winner) ?? 0)) return trade;
       return winner;
     }, null);
     const worst = closedWithPnl.reduce<TradeRecord | null>((loser, trade) => {
-      if (!loser || (trade.pnl ?? 0) < (loser.pnl ?? 0)) return trade;
+      if (!loser || (tradeNetPnlUsd(trade) ?? 0) < (tradeNetPnlUsd(loser) ?? 0)) return trade;
       return loser;
     }, null);
 
@@ -276,10 +295,10 @@ function buildBreakdown(
       label: labelByKey[key] ?? key,
       buys: opened.length,
       sells: closed.length,
-      wins: closed.filter((trade) => (trade.pnl ?? 0) > 0).length,
-      losses: closed.filter((trade) => (trade.pnl ?? 0) < 0).length,
-      pnlUsd: sum(closed.map((trade) => trade.pnl)),
-      avgPnlUsd: avg(closed.map((trade) => trade.pnl)),
+      wins: closed.filter((trade) => (tradeNetPnlUsd(trade) ?? 0) > 0).length,
+      losses: closed.filter((trade) => (tradeNetPnlUsd(trade) ?? 0) < 0).length,
+      pnlUsd: sum(closed.map(tradeNetPnlUsd)),
+      avgPnlUsd: avg(closed.map(tradeNetPnlUsd)),
       bestTrade: labelTrade(best),
       worstTrade: labelTrade(worst),
       avgHoldMs: avg(closed.map(getHoldMs)),
@@ -312,9 +331,9 @@ export function generateBotReport(input: GenerateBotReportInput): BotReport {
   const activeOpenTrades = input.trades.filter((trade) => trade.status === 'open' && parseTime(trade.entryTime) <= endMs);
   const relatedTrades = [...new Map([...openedTrades, ...closedTrades, ...activeOpenTrades].map((trade) => [trade.tradeId, trade])).values()];
   const scannerEvents = logsInWindow.filter((log) => /SCANNER|CANDIDATE|ENTRY|BUY|BLOCK|RANKING|PROFESSIONAL|ANCHOR/i.test(log.message));
-  const closedWithPnl = closedTrades.filter((trade) => typeof trade.pnl === 'number');
-  const bestTrade = closedWithPnl.reduce<TradeRecord | null>((best, trade) => (!best || (trade.pnl ?? 0) > (best.pnl ?? 0) ? trade : best), null);
-  const worstTrade = closedWithPnl.reduce<TradeRecord | null>((worst, trade) => (!worst || (trade.pnl ?? 0) < (worst.pnl ?? 0) ? trade : worst), null);
+  const closedWithPnl = closedTrades.filter((trade) => typeof tradeNetPnlUsd(trade) === 'number');
+  const bestTrade = closedWithPnl.reduce<TradeRecord | null>((best, trade) => (!best || (tradeNetPnlUsd(trade) ?? 0) > (tradeNetPnlUsd(best) ?? 0) ? trade : best), null);
+  const worstTrade = closedWithPnl.reduce<TradeRecord | null>((worst, trade) => (!worst || (tradeNetPnlUsd(trade) ?? 0) < (tradeNetPnlUsd(worst) ?? 0) ? trade : worst), null);
   const holdTimes = closedTrades.map(getHoldMs);
   const blockers = collectBlockers(logsInWindow);
   const professionalLogs = logsInWindow.filter((log) => /PROFESSIONAL|professionalScore|STRONG_BUY|AVOID|WAIT/i.test(log.message));
@@ -330,9 +349,12 @@ export function generateBotReport(input: GenerateBotReportInput): BotReport {
   ].filter((value): value is string => Boolean(value));
 
   const performanceWarnings = countLogs(logsInWindow, [/PERFORMANCE/i, /RENDER_FREQUENCY/i, /THROTTLE_AUDIT/i]);
-  const realizedPnlUsd = sum(closedTrades.map((trade) => trade.pnl));
+  const realizedGrossPnlUsd = sum(closedTrades.map(tradeGrossPnlUsd));
+  const feesUsd = sum(closedTrades.map(tradeFeeUsd));
+  const realizedNetPnlUsd = sum(closedTrades.map(tradeNetPnlUsd));
+  const realizedPnlUsd = realizedNetPnlUsd;
   const winRatePct = closedTrades.length > 0
-    ? (closedTrades.filter((trade) => (trade.pnl ?? 0) > 0).length / closedTrades.length) * 100
+    ? (closedTrades.filter((trade) => (tradeNetPnlUsd(trade) ?? 0) > 0).length / closedTrades.length) * 100
     : null;
   const conclusion = buildConclusion({
     closedTrades: closedTrades.length,
@@ -359,10 +381,12 @@ export function generateBotReport(input: GenerateBotReportInput): BotReport {
       tradesOpened: openedTrades.length,
       tradesClosed: closedTrades.length,
       currentlyOpen: activeOpenTrades.length,
-      winningClosedTrades: closedTrades.filter((trade) => (trade.pnl ?? 0) > 0).length,
-      losingClosedTrades: closedTrades.filter((trade) => (trade.pnl ?? 0) < 0).length,
+      winningClosedTrades: closedTrades.filter((trade) => (tradeNetPnlUsd(trade) ?? 0) > 0).length,
+      losingClosedTrades: closedTrades.filter((trade) => (tradeNetPnlUsd(trade) ?? 0) < 0).length,
       winRatePct,
       realizedPnlUsd,
+      realizedGrossPnlUsd,
+      realizedNetPnlUsd,
       realizedPnlPct: avg(closedTrades.map((trade) => trade.pnlPercent ?? trade.closeSnapshot?.pnlPercent)),
       openUnrealizedPnlUsd: null,
       bestTrade: labelTrade(bestTrade),
@@ -370,7 +394,7 @@ export function generateBotReport(input: GenerateBotReportInput): BotReport {
       avgHoldMs: avg(holdTimes),
       fastestSellMs: holdTimes.filter((value): value is number => value !== null).reduce<number | null>((fastest, value) => fastest === null || value < fastest ? value : fastest, null),
       longestTradeMs: holdTimes.filter((value): value is number => value !== null).reduce<number | null>((longest, value) => longest === null || value > longest ? value : longest, null),
-      feesUsd: sum(closedTrades.map((trade) => trade.closeSnapshot?.fees)),
+      feesUsd,
     },
     strategyBreakdown: buildBreakdown(STRATEGY_KEYS, {
       momentum: 'Momentum',
@@ -529,14 +553,15 @@ export function botReportToMarkdown(report: BotReport): string {
     `- Currently open: ${report.performance.currentlyOpen}`,
     `- Wins/Losses: ${report.performance.winningClosedTrades}/${report.performance.losingClosedTrades}`,
     `- Win rate: ${formatPercent(report.performance.winRatePct)}`,
-    `- Realized PnL: ${formatMoney(report.performance.realizedPnlUsd)}`,
+    `- Realized Gross: ${formatMoney(report.performance.realizedGrossPnlUsd)}`,
+    `- Fees Paid: ${formatMoney(report.performance.feesUsd)}`,
+    `- Realized Net: ${formatMoney(report.performance.realizedNetPnlUsd ?? report.performance.realizedPnlUsd)}`,
     `- Average realized PnL %: ${formatPercent(report.performance.realizedPnlPct)}`,
     `- Best trade: ${report.performance.bestTrade ?? 'Unavailable'}`,
     `- Worst trade: ${report.performance.worstTrade ?? 'Unavailable'}`,
     `- Average hold: ${formatReportDuration(report.performance.avgHoldMs)}`,
     `- Fastest sell: ${formatReportDuration(report.performance.fastestSellMs)}`,
     `- Longest trade: ${formatReportDuration(report.performance.longestTradeMs)}`,
-    `- Fees: ${formatMoney(report.performance.feesUsd)}`,
     '',
     '## Strategy Breakdown',
     '| Strategy | Buys | Sells | Wins/Losses | PnL | Avg PnL | Best | Worst | Avg Hold |',

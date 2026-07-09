@@ -13,6 +13,7 @@ export interface ScannerBrainLookupResult {
 export class ScannerBrainService {
   private tempBrains: Map<string, TraderBrain> = new Map();
   private brainAccessOrder: string[] = [];
+  private brainLastAccessAt: Map<string, number> = new Map();
   private maxTempBrains = 250;
   private btcAnchorEnabled = true;
   private ethAnchorEnabled = true;
@@ -80,22 +81,42 @@ export class ScannerBrainService {
   clearTempBrains(): void {
     this.tempBrains.clear();
     this.brainAccessOrder = [];
+    this.brainLastAccessAt.clear();
   }
 
   getTempBrainCount(): number {
     return this.tempBrains.size;
   }
 
+  pruneStaleTempBrains(now = Date.now(), maxIdleMs = 30 * 60 * 1000, protectedSymbols: string[] = []): number {
+    const protectedSet = new Set(protectedSymbols.map((symbol) => symbol.toUpperCase().trim()));
+    let removed = 0;
+    for (const symbol of Array.from(this.tempBrains.keys())) {
+      if (protectedSet.has(symbol)) continue;
+      const lastAccessAt = this.brainLastAccessAt.get(symbol) ?? 0;
+      if (now - lastAccessAt < maxIdleMs) continue;
+      this.tempBrains.delete(symbol);
+      this.brainLastAccessAt.delete(symbol);
+      this.brainAccessOrder = this.brainAccessOrder.filter((key) => key !== symbol);
+      removed++;
+    }
+    return removed;
+  }
+
   private recordAccess(key: string): void {
     const idx = this.brainAccessOrder.indexOf(key);
     if (idx !== -1) this.brainAccessOrder.splice(idx, 1);
     this.brainAccessOrder.push(key);
+    this.brainLastAccessAt.set(key, Date.now());
   }
 
   private evictIfNeeded(): void {
     while (this.tempBrains.size >= this.maxTempBrains) {
       const oldest = this.brainAccessOrder.shift();
-      if (oldest) this.tempBrains.delete(oldest);
+      if (oldest) {
+        this.tempBrains.delete(oldest);
+        this.brainLastAccessAt.delete(oldest);
+      }
     }
   }
 

@@ -129,6 +129,7 @@ export class TraderBrain {
         confidenceAdjustment: 0,
         suggestedAction: 'ALLOW',
         reasons: ['ML runtime mode is OFF'],
+        rowsUsed: 0,
       };
     }
 

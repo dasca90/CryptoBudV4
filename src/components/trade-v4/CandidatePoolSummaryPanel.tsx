@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import type { TradeV4CandidateView, TradeV4NoBuyDisplay } from "./types";
+import { logger } from "../../utils/logger";
 
 export function CandidatePoolSummaryPanel(props: {
   candidates: TradeV4CandidateView[];
@@ -17,10 +19,25 @@ export function CandidatePoolSummaryPanel(props: {
   } | null;
   executionPlan?: {
     selectedCandidates?: Array<{ symbol: string }>;
-    skippedCandidates?: Array<{ symbol: string; reason: string }>;
+    skippedCandidates?: Array<{ symbol: string; reason: string; finalNoBuyReason?: string }>;
     noBuyReasons?: string[];
     canExecute?: boolean;
     decisionMode?: string;
+    maxExecutionQueuePerScan?: number;
+    queueAcceptedCount?: number;
+    deferredByQueueLimitCount?: number;
+    queueRejectedCount?: number;
+    queueAcceptedSymbols?: string[];
+    deferredByQueueLimitSymbols?: string[];
+    queueRejectedReasons?: string[];
+    autoBotsSubmitAttemptedThisCycle?: number;
+    unicornSubmitAttemptedThisCycle?: number;
+    globalSubmitAttemptedThisCycle?: number;
+    maxAutoBotsBuysPerCycle?: number;
+    maxUnicornBuysPerCycle?: number;
+    unicornSelectedThisCycle?: number;
+    unicornSelectedExecutableCount?: number;
+    unicornSelectedButNotSubmittedReason?: string;
   } | null;
 }) {
   const buyCount = props.candidates.filter(c => c.status === 'BUY').length;
@@ -29,6 +46,103 @@ export function CandidatePoolSummaryPanel(props: {
   const avoidCount = props.candidates.filter(c => c.status === 'AVOID').length;
   const pool = props.noBuyDisplay;
   const hasPoolData = props.executionPoolSize != null;
+  const detectedBuyCandidateCount = pool?.buyCandidateCount ?? buyCount;
+  const actionableBuyCountNow = pool?.actionableBuyCountNow ?? props.candidates.filter(c => c.status === 'BUY' && c.finalExecutable === true && c.buyAllowed === true).length;
+  const blockedByPacingCount = pool?.blockedByPacingCount ?? 0;
+  const blockedByCooldownCount = pool?.blockedByCooldownCount ?? 0;
+  const blockedByPacingOrCooldownCount = Math.max(blockedByPacingCount, blockedByCooldownCount);
+  const maxExecutionQueuePerScan = pool?.maxExecutionQueuePerScan ?? props.executionPlan?.maxExecutionQueuePerScan ?? 10;
+  const deferredByQueueLimitCount = pool?.deferredByQueueLimitCount
+    ?? props.executionPlan?.deferredByQueueLimitCount
+    ?? props.executionPlan?.skippedCandidates?.filter((candidate) => (candidate.finalNoBuyReason ?? candidate.reason) === 'MAX_EXECUTION_QUEUE_REACHED').length
+    ?? 0;
+  const executionQueueAcceptedCount = pool?.executionQueueAcceptedCount
+    ?? props.executionPlan?.queueAcceptedCount
+    ?? Math.min(maxExecutionQueuePerScan, detectedBuyCandidateCount);
+  const submittedThisCycleCount = pool?.submitAttemptedCount ?? 0;
+  const nextQueueRetry = deferredByQueueLimitCount > 0 ? (pool?.nextQueueRetry ?? 'next scan') : 'none';
+  const buyPacingActive = pool?.buyPacingActive === true || pool?.buyCooldownActive === true || (pool?.selectedButNotSubmittedReasons ?? []).includes('BUY_PACING_OR_COOLDOWN_ACTIVE');
+  const nextBuyAllowedLabel = (() => {
+    const ms = pool?.msUntilNextBuyAllowed;
+    if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) return `${Math.ceil(ms / 1000)}s`;
+    const nextAt = pool?.nextBuyAllowedAt;
+    if (typeof nextAt === 'number' && Number.isFinite(nextAt) && nextAt > Date.now()) {
+      return new Date(nextAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    return buyPacingActive ? 'waiting for pacing release' : 'now';
+  })();
+  const candidatePoolInvariantOk = actionableBuyCountNow <= detectedBuyCandidateCount
+    && executionQueueAcceptedCount <= maxExecutionQueuePerScan
+    && (!buyPacingActive || blockedByPacingOrCooldownCount > 0 || detectedBuyCandidateCount === 0);
+  const pipelineQueueAccepted = props.executionPlan?.queueAcceptedCount ?? executionQueueAcceptedCount;
+  const pipelineDeferredCount = props.executionPlan?.deferredByQueueLimitCount ?? deferredByQueueLimitCount;
+  const queueParityMismatch = pipelineQueueAccepted !== executionQueueAcceptedCount || pipelineDeferredCount !== deferredByQueueLimitCount;
+  const isUnicornCandidate = (candidate: TradeV4CandidateView) => [
+    (candidate as any).source,
+    (candidate as any).candidateSource,
+    (candidate as any).sourceOwner,
+    (candidate as any).ownerType,
+    (candidate as any).sourcePresentation,
+  ].some((value) => String(value ?? '').toLowerCase().includes('unicorn'));
+  const unicornCandidateCount = props.candidates.filter(isUnicornCandidate).length;
+  const unicornReadyCount = props.candidates.filter((candidate) => isUnicornCandidate(candidate) && candidate.status === 'BUY').length;
+  const unicornExecutableCount = props.executionPlan?.unicornSelectedExecutableCount
+    ?? props.candidates.filter((candidate) => isUnicornCandidate(candidate) && candidate.status === 'BUY' && candidate.finalExecutable === true && candidate.buyAllowed === true).length;
+  const autoBotsReadyCount = Math.max(0, buyCount - unicornReadyCount);
+  const autoBotsSubmitted = props.executionPlan?.autoBotsSubmitAttemptedThisCycle ?? Math.max(0, submittedThisCycleCount - (props.executionPlan?.unicornSubmitAttemptedThisCycle ?? 0));
+  const unicornSubmitted = props.executionPlan?.unicornSubmitAttemptedThisCycle ?? 0;
+  const globalSubmitted = props.executionPlan?.globalSubmitAttemptedThisCycle ?? submittedThisCycleCount;
+  const maxAutoBotsBuysPerCycle = props.executionPlan?.maxAutoBotsBuysPerCycle ?? Math.max(1, actionableBuyCountNow);
+  const maxUnicornBuysPerCycle = props.executionPlan?.maxUnicornBuysPerCycle ?? 1;
+  const unicornBlockedReason = props.executionPlan?.unicornSelectedButNotSubmittedReason ?? 'none';
+
+  useEffect(() => {
+    logger.info(
+      `CANDIDATE_POOL_UI_BINDING_AUDIT: ` +
+      `rawBuyCandidateCount=${detectedBuyCandidateCount} ` +
+      `uiBuyReadyCount=${actionableBuyCountNow} ` +
+      `finalActionableBuyCount=${actionableBuyCountNow} ` +
+      `executionQueueAccepted=${executionQueueAcceptedCount} ` +
+      `maxExecutionQueuePerScan=${maxExecutionQueuePerScan} ` +
+      `deferredByQueueLimit=${deferredByQueueLimitCount} ` +
+      `nextQueueRetry=${nextQueueRetry} ` +
+      `blockedByPacingCount=${blockedByPacingCount} ` +
+      `blockedByCooldownCount=${blockedByCooldownCount} ` +
+      `selectedButNotSubmittedReasons=${pool?.selectedButNotSubmittedReasons?.join('|') || 'none'} ` +
+      `nextBuyAllowedAt=${pool?.nextBuyAllowedAt ?? 'none'} ` +
+      `msUntilNextBuyAllowed=${pool?.msUntilNextBuyAllowed ?? 'n/a'} ` +
+      `sourceUsed=${pool?.countSourceUsed ?? 'ui_fallback_no_canonical_summary'} ` +
+      `invariantOk=${String(candidatePoolInvariantOk)}`
+    );
+    logger.info(
+      `EXECUTION_QUEUE_PARITY_AUDIT: ` +
+      `uiQueueAccepted=${executionQueueAcceptedCount} ` +
+      `pipelineQueueAccepted=${pipelineQueueAccepted} ` +
+      `maxExecutionQueuePerScan=${maxExecutionQueuePerScan} ` +
+      `uiDeferredCount=${deferredByQueueLimitCount} ` +
+      `pipelineDeferredCount=${pipelineDeferredCount} ` +
+      `mismatchDetected=${String(queueParityMismatch)} ` +
+      `invariantOk=${String(!queueParityMismatch)} ` +
+      `failureReason=${queueParityMismatch ? 'execution_queue_ui_pipeline_mismatch' : 'none'}`
+    );
+  }, [
+    detectedBuyCandidateCount,
+    actionableBuyCountNow,
+    executionQueueAcceptedCount,
+    maxExecutionQueuePerScan,
+    deferredByQueueLimitCount,
+    nextQueueRetry,
+    blockedByPacingCount,
+    blockedByCooldownCount,
+    pool?.selectedButNotSubmittedReasons,
+    pool?.nextBuyAllowedAt,
+    pool?.msUntilNextBuyAllowed,
+    pool?.countSourceUsed,
+    candidatePoolInvariantOk,
+    pipelineQueueAccepted,
+    pipelineDeferredCount,
+    queueParityMismatch,
+  ]);
 
   // Find closest-to-BUY candidate: highest score WAIT or BLOCK (not AVOID)
   const closestBuyCandidates = props.candidates
@@ -63,28 +177,52 @@ export function CandidatePoolSummaryPanel(props: {
   return (
     <section className="panel panel-fill" style={{ padding: '8px 10px', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
       <div className="panel-title" style={{ fontSize: 10 }}>CANDIDATE POOL / ENTRY PIPELINE</div>
+      <div className="muted" data-testid="candidate-pool-source-legend" style={{ fontSize: 8, marginTop: 3 }}>
+        Source: AutoBots · 🦄 Unicorn Hunter · ML Predict
+      </div>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 6, flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4, fontSize: 10, overflow: 'hidden auto' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 4 }}>
+            <PoolBox label="BUY candidates" value={String(detectedBuyCandidateCount)} color="#58a6ff" />
+            <PoolBox label="Execution queue" value={`${executionQueueAcceptedCount} / ${maxExecutionQueuePerScan}`} color={executionQueueAcceptedCount >= maxExecutionQueuePerScan ? "#d29922" : "#3fb950"} />
+            <PoolBox label="Actionable now" value={String(actionableBuyCountNow)} color={actionableBuyCountNow > 0 ? "#3fb950" : "#f85149"} />
+            <PoolBox label="Submitted" value={`${submittedThisCycleCount}/${Math.max(1, actionableBuyCountNow)}`} color={submittedThisCycleCount > 0 ? "#3fb950" : "#8b949e"} />
+            <PoolBox label="AutoBots ready" value={String(autoBotsReadyCount)} color={autoBotsReadyCount > 0 ? "#58a6ff" : "#8b949e"} />
+            <PoolBox label="AutoBots submit" value={`${autoBotsSubmitted}/${maxAutoBotsBuysPerCycle}`} color={autoBotsSubmitted > 0 ? "#3fb950" : "#8b949e"} />
+            <PoolBox label="Unicorn pool" value={String(unicornCandidateCount)} color={unicornCandidateCount > 0 ? "#b985ff" : "#8b949e"} />
+            <PoolBox label="Unicorn submit" value={`${unicornSubmitted}/${maxUnicornBuysPerCycle}`} color={unicornSubmitted > 0 ? "#3fb950" : unicornReadyCount > 0 ? "#d29922" : "#8b949e"} />
+            <PoolBox label="Unicorn READY" value={`${unicornReadyCount}/${unicornExecutableCount}`} color={unicornExecutableCount > 0 ? "#3fb950" : unicornReadyCount > 0 ? "#d29922" : "#8b949e"} />
+            <PoolBox label="Unicorn block" value={unicornBlockedReason} color={unicornBlockedReason !== 'none' ? "#d29922" : "#8b949e"} />
+            <PoolBox label="Global submit" value={String(globalSubmitted)} color={globalSubmitted > 0 ? "#3fb950" : "#8b949e"} />
+            <PoolBox label="Global queue" value={`${executionQueueAcceptedCount}/${maxExecutionQueuePerScan}`} color={executionQueueAcceptedCount >= maxExecutionQueuePerScan ? "#d29922" : "#58a6ff"} />
+            <PoolBox label="Deferred queue" value={String(deferredByQueueLimitCount)} color={deferredByQueueLimitCount > 0 ? "#d29922" : "#8b949e"} />
+            <PoolBox label="Next retry" value={nextQueueRetry} color={deferredByQueueLimitCount > 0 ? "#d29922" : "#8b949e"} />
+            <PoolBox label="Blocked pacing" value={String(blockedByPacingOrCooldownCount)} color={blockedByPacingOrCooldownCount > 0 ? "#d29922" : "#8b949e"} />
+            <PoolBox label="Next buy" value={nextBuyAllowedLabel} color={buyPacingActive ? "#d29922" : "#3fb950"} />
             <PoolBox label="Exec Pool" value={hasPoolData ? String(props.executionPoolSize) : 'n/a'} color="#58a6ff" />
             <PoolBox label="Watch Pool" value={hasPoolData ? String(props.watchPoolSize) : 'n/a'} color="#d29922" />
             <PoolBox label="Near Miss" value={hasPoolData ? String(props.nearMissPoolSize) : 'n/a'} color="#f0883e" />
-            <PoolBox label="BUY" value={String(buyCount)} color="#3fb950" />
             <PoolBox label="WAIT" value={String(waitCount)} color="#d29922" />
             <PoolBox label="BLOCK" value={String(blockCount)} color="#f85149" />
             <PoolBox label="AVOID" value={String(avoidCount)} color="#8b949e" />
             <PoolBox label="Ref Period" value={props.referencePeriod ?? '1h'} color="#8b949e" />
           </div>
 
+          {buyPacingActive && detectedBuyCandidateCount > 0 && actionableBuyCountNow === 0 && (
+            <div style={{ background: 'rgba(210,153,34,0.10)', border: '1px solid rgba(210,153,34,0.24)', borderRadius: 4, padding: '4px 6px', marginTop: 2, fontSize: 8, color: '#d29922', lineHeight: '12px' }}>
+              BUY_PACING_OR_COOLDOWN_ACTIVE: {detectedBuyCandidateCount} BUY candidates detected, {actionableBuyCountNow} actionable now. Next buy allowed: {nextBuyAllowedLabel}.
+            </div>
+          )}
+
           {props.executionPlan && (
             <div style={{ background: 'rgba(0,234,255,0.04)', borderRadius: 4, padding: '3px 6px', marginTop: 2, display: 'flex', gap: 8, alignItems: 'center', fontSize: 8 }}>
               <span style={{ color: '#8b949e' }}>Exec:</span>
               <span style={{ color: (props.executionPlan.selectedCandidates?.length ?? 0) > 0 ? '#3fb950' : '#f85149', fontWeight: 700 }}>
-                {props.executionPlan.selectedCandidates?.length ?? 0} selected
+                {executionQueueAcceptedCount}/{maxExecutionQueuePerScan} queued
               </span>
               <span style={{ color: '#d29922' }}>
-                {props.executionPlan.skippedCandidates?.length ?? 0} skipped
+                {deferredByQueueLimitCount} deferred
               </span>
               {(props.executionPlan.noBuyReasons?.length ?? 0) > 0 && (
                 <span style={{ color: '#f85149', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -202,7 +340,7 @@ function PoolBox(props: { label: string; value: string; color: string }) {
   return (
     <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 4, padding: '3px 6px', textAlign: 'center' }}>
       <div style={{ fontSize: 8, color: props.color }}>{props.label}</div>
-      <div style={{ fontSize: 13, fontWeight: 700, color: '#d8e6ff', lineHeight: 1.2 }}>{props.value}</div>
+      <div style={{ fontSize: props.value.length > 9 ? 10 : 13, fontWeight: 700, color: '#d8e6ff', lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{props.value}</div>
     </div>
   );
 }

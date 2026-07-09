@@ -4,6 +4,7 @@ import { tauriDb, isTauriAvailable } from './TauriBridge';
 import { logger } from '../../utils/logger';
 import { resolveMaxSelectedPerScanConfig } from '../settings/max-selected-per-scan';
 import { normalizeAutoPerformanceMode, normalizePerformanceSettings, savePerformanceSettings } from '../../lib/performance/performanceSettings';
+import { normalizeUnicornHunterSettings } from '../unicorn/UnicornHunterTypes';
 
 const SETTINGS_KEY = 'app_settings';
 const API_CONFIG_KEY = 'api_config';
@@ -111,6 +112,7 @@ export class SettingsPersistence {
       ...settings,
       strategySource: invalidAutoBotsManualStateFound ? 'autobots' : (settings.strategySource ?? 'autobots'),
       paperAutoExecutionEnabled: effectiveAutoBots,
+      unicornHunter: normalizeUnicornHunterSettings((settings as any).unicornHunter),
     };
     (normalized as any).settingsVersion = currentVersion;
     if (invalidAutoBotsManualStateFound || badInstallerDefaultAutoBotsOff || previousVersion !== currentVersion) {

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { mapTradeRecordToClosedPositionView, mapPositionToOpenPositionView } from '../lib/air-scanner/tradeV4DataAdapter';
-import { V3_OPEN_POSITION_COLUMNS } from '../components/trade-v4/OpenPositionsPanel';
-import { V3_CLOSED_POSITION_COLUMNS } from '../components/trade-v4/ClosedPositionsPanel';
+import { OPEN_POSITION_COLUMNS } from '../components/trade-v4/openPositionsPanelModel';
+import { CLOSED_POSITION_COLUMNS } from '../components/trade-v4/closedPositionsPanelModel';
 
 let p = 0, f = 0;
 const ok = (c: boolean, m: string) => { if (c) p++; else { f++; console.error('FAIL', m); } };
@@ -10,10 +10,10 @@ const openPanel = readFileSync('src/components/trade-v4/OpenPositionsPanel.tsx',
 const closedPanel = readFileSync('src/components/trade-v4/ClosedPositionsPanel.tsx', 'utf8');
 const adapter = readFileSync('src/lib/air-scanner/tradeV4DataAdapter.ts', 'utf8');
 
-ok(JSON.stringify(V3_OPEN_POSITION_COLUMNS) === JSON.stringify(['Symbol','State','Strategy','Qty','Entry Value','Entry','Ref','Last','Dip','Trend','PnL%','Unrealized','TP1 (%)','TP2 (%)','Stop (%)','Stop Trigger','Decision','Owner','Opened At','Hold']), '1 open panel keeps exact V3 core columns');
-ok(closedPanel.includes('Realized Total:') && closedPanel.includes('Win Rate:') && closedPanel.includes('Closed:'), '2 closed panel header summary is visible');
-ok(adapter.includes('OPEN_POSITIONS_V3_MAPPING_AUDIT') && adapter.includes('CLOSED_POSITIONS_V3_MAPPING_AUDIT'), '3 adapter emits V3 mapping audits');
-ok(JSON.stringify(V3_CLOSED_POSITION_COLUMNS) === JSON.stringify(['Symbol','Owner','Strategy','Mode','Qty','Entry Value','Entry Price','Exit Price','Exit Value','Realized PnL %','Realized PnL $','Gross Result','Opened At','Closed At','Hold','Exit Reason','Ref@Entry','Dip@Entry','Rebound@Entry','Trend@Entry','Notes']), '3b closed panel keeps exact V3 core columns');
+ok(JSON.stringify(OPEN_POSITION_COLUMNS) === JSON.stringify(['Symbol','State','Strategy','Trend','Qty','Entry Value','Entry Fee $','Est. Exit Fee $','Dip','Rebound','PnL%','Unrealized','Risk','TP1 (%)','TP2 (%)','Stop (%)','Entry','Ref','Last','Stop Trigger','Decision','Owner','Opened At','Hold']), '1 open panel keeps exact V4 core columns');
+ok(closedPanel.includes('Realized Gross:') && closedPanel.includes('Fees Paid:') && closedPanel.includes('Realized Net:') && closedPanel.includes('Operator:') && closedPanel.includes('Win Rate:') && closedPanel.includes('Closed:'), '2 closed panel fee summary is visible');
+ok(adapter.includes('OPEN_POSITIONS_V4_MAPPING_AUDIT') && adapter.includes('CLOSED_POSITIONS_V4_MAPPING_AUDIT'), '3 adapter emits V4 mapping audits');
+ok(JSON.stringify(CLOSED_POSITION_COLUMNS) === JSON.stringify(['Symbol','Owner','Strategy','Mode','Qty','Entry Value','Entry Price','Exit Price','Exit Value','Realized PnL %','Gross PnL $','Fees $','Net PnL $','Opened At','Closed At','Hold','Exit Reason','Ref@Entry','Dip@Entry','Rebound@Entry','Trend@Entry','Notes']), '3b closed panel keeps exact V4 core columns');
 
 const open = mapPositionToOpenPositionView({
   coin: 'AAAUSDT', quantity: 1, avgEntryPrice: 10, currentPrice: 11, pnl: 1, pnlPercent: 10, unrealizedPnlPercent: 10,

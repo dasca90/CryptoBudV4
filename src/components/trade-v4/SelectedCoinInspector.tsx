@@ -5,6 +5,9 @@ import { getCoinRepresentative, getTitleSymbol } from "../../lib/ui/uiSymbolMapp
 import { getBlockerExplanation } from "../../lib/ui/blockerExplanations";
 import { getExecutionStageDisplay, sanitizeExecutionDisplayText } from "../../lib/execution/executionDisplay";
 import { resolveFinalNoBuyReasonPriority } from "../../core/scanner/finalNoBuyReasonPriority";
+import { mlRuntimeGuard } from "../../core/ml/ml-runtime-guard";
+import { TradeSourceBadge } from "./TradeSourceBadge";
+import { getTradeSourcePresentation } from "../../core/notifications/trade-source";
 
 type Verdict = "BUY READY" | "WAIT" | "BLOCKED" | "AVOID";
 
@@ -70,6 +73,9 @@ export function getTpRiskExplanation(candidate: TradeV4CandidateView): string {
 }
 
 export function getMlGuardExplanation(candidate: TradeV4CandidateView): string {
+  if (mlRuntimeGuard.getMode() === "shadow_only" || !mlRuntimeGuard.canBlockBuy()) {
+    return "ML Shadow Only — not blocking";
+  }
   if (candidate.mlBadEntryRisk == null) {
     return "ML Guard active, but no usable ML score for this coin.";
   }
@@ -125,7 +131,7 @@ export function SelectedCoinInspector(props: {
   closedPosition?: TradeV4ClosedPositionView;
   executionPlan?: {
     selectedCandidates: Array<{ symbol: string; plannedAction: string; reason: string; score: number }>;
-    skippedCandidates: Array<{ symbol: string; reason: string; gate: string; isRetryable: boolean }>;
+    skippedCandidates: Array<{ symbol: string; reason: string; gate: string; isRetryable: boolean; finalNoBuyReason?: string }>;
   };
   paperAutoResult?: {
     attempted: boolean;
@@ -145,6 +151,7 @@ export function SelectedCoinInspector(props: {
   const selectedContext = useMemo(() => {
     if (!c) return null;
     const planSkip = props.executionPlan?.skippedCandidates?.find(sc => sc.symbol === c.symbol);
+    const isUnicornCandidate = /unicorn/i.test(`${c.source} ${c.sourceLabel ?? ""} ${c.sourcePresentation?.canonicalLabel ?? ""} ${c.strategySource ?? ""}`);
     const priority = resolveFinalNoBuyReasonPriority({
       symbol: c.symbol,
       rawStatus: c.status,
@@ -180,6 +187,15 @@ export function SelectedCoinInspector(props: {
     return {
       verdict: getSelectedCoinVerdict(c),
       planSkip,
+      exactUnicornNoBuyReason: isUnicornCandidate
+        ? normalizeExactUnicornNoBuyReason(
+            planSkip?.finalNoBuyReason
+            ?? c.executionDecision?.finalNoBuyReason
+            ?? c.finalNoBuyReason
+            ?? priority.resolvedFinalNoBuyReason
+            ?? planSkip?.reason
+          )
+        : null,
       rawReasons,
       friendlyReasons,
       mainReason: buildSelectedCoinMainReason(c, rawReasons),
@@ -213,6 +229,11 @@ export function SelectedCoinInspector(props: {
   const statusTone = selectedContext.verdict === "BUY READY" ? "pill-green"
     : selectedContext.verdict === "AVOID" || selectedContext.verdict === "BLOCKED" ? "pill-red"
       : "pill-yellow";
+  const selectedSourcePresentation = c.sourcePresentation ?? getTradeSourcePresentation({
+    source: c.source,
+    ownerName: c.sourceLabel,
+    strategySource: c.strategySource,
+  });
 
   return (
     <aside className="selected-coin-card" ref={cardRef}>
@@ -230,6 +251,7 @@ export function SelectedCoinInspector(props: {
               <div style={{ fontSize: 22, fontWeight: 800, display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ color: "var(--cyan)" }}>{getCoinRepresentative(c.symbol)}</span>
                 {c.symbol}
+                <TradeSourceBadge presentation={selectedSourcePresentation} compact />
               </div>
               <div className="selected-main-reason">{selectedContext.mainReason}</div>
             </div>
@@ -245,6 +267,7 @@ export function SelectedCoinInspector(props: {
             <Metric label="Verdict" value={selectedContext.verdict} good={selectedContext.verdict === "BUY READY"} />
             <Metric label="Market setup" value={selectedContext.strategyLayers.marketSetup} />
             <Metric label="Runtime mode" value={selectedContext.strategyLayers.runtimeMode} />
+            <Metric label="Source" value={selectedSourcePresentation.compactLabel} />
             <Metric label="Trend" value={c.displayTrend || c.groupTrend || "n/a"} />
           </div>
           <div className="selected-summary-grid" style={{ marginTop: 6 }}>
@@ -255,6 +278,9 @@ export function SelectedCoinInspector(props: {
           <ReadableList items={selectedContext.friendlyReasons.slice(0, 4)} fallback="No blocking reason is active." tone={selectedContext.verdict === "BUY READY" ? "good" : "warn"} />
           {selectedContext.planSkip && (
             <div className="selected-note status-warn">Execution plan skipped this coin at {translateBlocker(selectedContext.planSkip.gate)}.</div>
+          )}
+          {selectedContext.exactUnicornNoBuyReason && selectedContext.exactUnicornNoBuyReason !== "none" && (
+            <div className="selected-note status-warn">Unicorn no-submit reason: {selectedContext.exactUnicornNoBuyReason}</div>
           )}
           {planSelected && <div className="selected-note status-good">Execution plan selected this coin for {planSelected.plannedAction}.</div>}
         </InspectorSection>
@@ -285,6 +311,7 @@ export function SelectedCoinInspector(props: {
           <div className="selected-summary-grid">
             <Metric label="Data" value={c.dataQuality || "n/a"} good={c.dataQuality === "GOOD"} />
             <Metric label="Risk" value={c.mlBadEntryRisk != null ? `${c.mlBadEntryRisk.toFixed(1)}x` : "n/a"} />
+            <Metric label="Can Block BUY" value={mlRuntimeGuard.canBlockBuy() ? "YES" : "NO"} good={!mlRuntimeGuard.canBlockBuy()} />
             <Metric label="Conf" value={c.confidence > 0 ? `${Math.round(c.confidence)}%` : "n/a"} good={c.confidence >= 70} />
           </div>
         </InspectorSection>
@@ -299,11 +326,13 @@ export function SelectedCoinInspector(props: {
           {props.openPosition && (
             <div className="selected-note">
               Open position: entry {props.openPosition.entryPrice.toFixed(4)}, live {props.openPosition.livePrice.toFixed(4)}, PnL {props.openPosition.pnlPct.toFixed(2)}%.
+              {' '}<TradeSourceBadge presentation={props.openPosition.sourcePresentation} compact />
             </div>
           )}
           {props.closedPosition && (
             <div className="selected-note">
               Last close: {translateBlocker(props.closedPosition.closeReason)} with {props.closedPosition.pnlPct.toFixed(2)}% PnL.
+              {' '}<TradeSourceBadge presentation={props.closedPosition.sourcePresentation} compact />
             </div>
           )}
         </InspectorSection>
@@ -329,6 +358,7 @@ export function SelectedCoinInspector(props: {
             strategyAudit: c.strategyAudit,
             noBuyDisplay: props.noBuyDisplay,
             autoTpDecision: c.autoTpDecision,
+            sourcePresentation: selectedSourcePresentation,
           }, null, 2)}</pre>
         </details>
 
@@ -380,6 +410,20 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
     result.push(normalized);
   }
   return result;
+}
+
+function normalizeExactUnicornNoBuyReason(value: string | null | undefined): string | null {
+  const raw = String(value ?? "").trim();
+  const lower = raw.toLowerCase();
+  if (!raw || /^n\/a$|^ok$|^allow$|^none$/i.test(raw)) return null;
+  if (lower.includes("duplicate") || lower.includes("already") || lower.includes("open_position")) return "UNICORN_BLOCK_DUPLICATE_POSITION";
+  if (lower.includes("group") && (lower.includes("limit") || lower.includes("cap") || lower.includes("max"))) return "UNICORN_BLOCK_GROUP_LIMIT";
+  if (lower.includes("max_unicorn") || lower.includes("max_open") || lower.includes("position_limit") || (lower.includes("unicorn") && lower.includes("position"))) return "UNICORN_BLOCK_OPEN_POSITION_LIMIT";
+  if (lower.includes("capital") || lower.includes("budget") || lower.includes("queue") || lower.includes("cycle")) return "UNICORN_BLOCK_MAX_NEW_BUYS_PER_CYCLE_REACHED";
+  if (lower.includes("confirmation") || lower.includes("pullback") || lower.includes("watch") || lower.includes("wait") || lower.includes("score") || lower.includes("confidence")) return "UNICORN_BLOCK_WAITING_CONFIRMATION";
+  if (lower.includes("no_executable") || lower.includes("no_candidate")) return "UNICORN_BLOCK_NO_EXECUTABLE_CANDIDATE";
+  if (lower.includes("risk_off") || (lower.includes("risk") && lower.includes("off")) || lower.includes("ath") || lower.includes("overextended") || lower.includes("candle") || lower.includes("entry") || lower.includes("gate") || lower.includes("book") || lower.includes("price") || lower.includes("stale") || lower.includes("spread") || lower.includes("tp")) return "UNICORN_BLOCK_RISK";
+  return raw.toUpperCase().replace(/[^A-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "") || null;
 }
 
 function baseSymbol(symbol: string): string {

@@ -1,6 +1,6 @@
 [package]
 name = "cryptobud-v4"
-version = "4.0.0"
+version = "4.0.1"
 description = "CryptoBud V4 - Stable Crypto Trading App"
 authors = ["CryptoBud"]
 edition = "2021"
@@ -13,7 +13,14 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2", features = [] }
 
 [package.metadata]
-icons = ["icons/icon.ico"]
+icons = [
+  "icons/32x32.png",
+  "icons/128x128.png",
+  "icons/128x128@2x.png",
+  "icons/icon.ico",
+  "icons/icon.icns",
+  "icons/icon.png"
+]
 
 [dependencies]
 tauri = { version = "2", features = [] }

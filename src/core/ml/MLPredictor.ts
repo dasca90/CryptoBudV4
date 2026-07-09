@@ -108,6 +108,7 @@ export class MLPredictor {
         confidenceAdjustment: 0,
         suggestedAction: 'ALLOW',
         reasons: ['ML brain not trained yet'],
+        rowsUsed: this.brain?.trainingRowCount ?? 0,
       };
     }
     const result = evaluateModelOnFeatures(this.brain, coin, marketFeatures);

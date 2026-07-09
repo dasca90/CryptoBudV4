@@ -28,7 +28,7 @@ assert.ok(scannerSrc.includes('STRATEGY_SETUP_SUMMARY_AUDIT'), 'strategy setup s
 assert.ok(scannerSrc.includes('REBOUND_FRESHNESS_SUMMARY_AUDIT'), 'rebound freshness summary audit exists');
 assert.ok(scannerSrc.includes('REF_PERIOD_PARITY_SUMMARY_AUDIT'), 'ref-period parity summary audit exists');
 
-assert.ok(scannerSrc.includes('if (this.shouldEmitPerSymbolAudit()) logger.info(`V3_REFERENCE_CONTRACT_AUDIT'), 'large normal scans suppress V3 reference per-symbol audit');
+assert.ok(scannerSrc.includes('if (this.shouldEmitPerSymbolAudit()) logger.info(`REFERENCE_CONTRACT_AUDIT'), 'large normal scans suppress reference-contract per-symbol audit');
 assert.ok(scannerSrc.includes('if (this.shouldEmitPerSymbolAudit()) logger.info(`ENTRY_CONFIRMATION_TRACE'), 'large normal scans suppress entry confirmation per-symbol audit');
 assert.ok(scannerSrc.includes('currentScanSymbolCount <= 10'), 'small fixture scans keep detailed audit compatibility');
 assert.ok(scannerSrc.includes('if (this.shouldEmitVerboseAudit()) for (const c of allRanked.slice(0, 20))'), 'verbose/debug keep detailed top-candidate audit path');

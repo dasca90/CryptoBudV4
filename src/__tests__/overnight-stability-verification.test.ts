@@ -42,6 +42,7 @@ for (const field of [
   'isStartupGracePeriodActive',
   'lastMemoryBufferTrimAt',
   'lastStartupRecoveryAt',
+  'lastRuntimeCleanupAt',
 ]) {
   assert.ok(diagnosticsSource.includes(field), `OVERNIGHT_STABILITY_AUDIT includes ${field}`);
 }
@@ -78,6 +79,7 @@ updateOvernightStabilitySnapshot({
   isStartupGracePeriodActive: false,
   lastMemoryBufferTrimAt: null,
   lastStartupRecoveryAt: null,
+  lastRuntimeCleanupAt: null,
   lastAirScannerCleanupAt: null,
 });
 assert.equal(classifyOvernightMemory({ jsHeapUsed: 180 * 1024 * 1024, memoryPressureActive: false, memoryGrowthWarmupActive: true }), 'Warm-up');
@@ -103,6 +105,7 @@ const snapshot = updateOvernightStabilitySnapshot({
   isStartupGracePeriodActive: false,
   lastMemoryBufferTrimAt: null,
   lastStartupRecoveryAt: 111,
+  lastRuntimeCleanupAt: 222,
   lastAirScannerCleanupAt: null,
 });
 const audit = formatOvernightStabilityAudit(snapshot);
@@ -110,5 +113,6 @@ assert.ok(audit.startsWith('OVERNIGHT_STABILITY_AUDIT:'), 'formats overnight aud
 assert.ok(audit.includes('activeTab=trade') && audit.includes('airScannerMounted=false') && audit.includes('scannerRunning=true'), 'audit formats key acceptance fields');
 assert.ok(audit.includes('pressureReason=none') && audit.includes('isStartupGracePeriodActive=false'), 'overnight audit includes pressure reason and startup grace state');
 assert.ok(audit.includes('memoryGrowthReason=none_detected') && audit.includes('memoryGrowthWarmupActive=false'), 'overnight audit includes memory growth reason and warm-up state');
+assert.ok(audit.includes('lastRuntimeCleanupAt=222'), 'overnight audit includes runtime cleanup timestamp');
 
 console.log('overnight-stability-verification tests passed');

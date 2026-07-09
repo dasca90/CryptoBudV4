@@ -12,7 +12,10 @@ const items: { key: NavTabKey; label: string; tooltip: string }[] = [
 
 export const SideNavigation = memo(function SideNavigation() {
   return (
-    <nav className="side-nav panel">
+    <nav className="side-nav panel" aria-label="Trade navigation">
+      <div className="side-nav-brand" title="CryptoBud V4">
+        <img src="/assets/slow-unicorn.png" alt="CryptoBud V4" className="side-nav-brand-img" />
+      </div>
       {items.map((item, index) => (
         <div
           key={item.key}

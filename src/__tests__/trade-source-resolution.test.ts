@@ -73,7 +73,7 @@ async function main() {
   ok(unknown.label === 'Unknown / Legacy', 'D unknown fallback is unknown/legacy');
 
   const buyMsg = formatBuyNotification(baseTrade());
-  ok(buyMsg.includes('Source: AutoBots'), 'E buy notification shows source');
+  ok(buyMsg.includes('\uD83E\uDD16 AUTOBOTS BUY OPENED'), 'E buy notification shows source in header');
   ok(!buyMsg.includes('Source: Micro Scalping'), 'F no wrong micro default for autobots');
 
   const sellMsg = formatSellNotification(baseTrade({
@@ -84,7 +84,10 @@ async function main() {
     pnlPercent: 10,
     closeSnapshot: { exitReason: 'TP1_FIXED', fees: 0.01, ownerType: 'scanner', ownerName: 'AutoBots', source: 'autobots' },
   }));
-  ok(sellMsg.includes('Source: AutoBots'), 'G sell preserves entry source');
+  ok(sellMsg.includes('\uD83E\uDD16 AUTOBOTS SELL PROFIT'), 'G sell preserves entry source in header');
+
+  const ml = resolveTradeSourceLabel(baseTrade({ buySnapshot: { ...baseTrade().buySnapshot, source: 'ML_PREDICT_BUY', strategySource: 'ML_PREDICT_BUY', candidateSource: 'ML_PREDICT_BUY', ownerName: 'ML Predict Buy' } }));
+  ok(ml.label === 'ML Predict Buy', 'G2 resolves ML Predict Buy source');
 
   const autobotsWithMicroSettings = resolveTradeSourceLabel(baseTrade({
     buySnapshot: {

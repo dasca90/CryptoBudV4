@@ -16,14 +16,14 @@ ok(!topCandidatesSrc.includes("'selection_limit_reached'"), 'Test A1: TopCandida
 ok(!scannerSrc.includes("'selection_limit_reached'"), 'Test A2: MarketScanner no longer references selection_limit_reached');
 ok(!plannerSrc.includes("'selection_limit_reached'"), 'Test A3: ExecutionPlanner no longer references selection_limit_reached');
 
-// Test B: SELECTION_LIMIT_REMOVED_AUDIT confirms artificial limit is gone
-ok(plannerSrc.includes('SELECTION_LIMIT_REMOVED_AUDIT'), 'Test B1: selection limit removed audit exists');
-ok(plannerSrc.includes('selectionLimitApplied=false'), 'Test B2: audit confirms selection limit not applied');
-ok(plannerSrc.includes('maxSelectedPerScan=unlimited'), 'Test B3: audit shows maxSelectedPerScan is unlimited');
+// Test B: ExecutionPlanner applies the configured AutoBots buy budget
+ok(plannerSrc.includes('EXECUTION_SELECTION_LIMIT_AUDIT'), 'Test B1: execution selection limit audit exists');
+ok(plannerSrc.includes('effectiveSelectionLimit'), 'Test B2: audit exposes effective selection limit');
+ok(plannerSrc.includes('maxSelectedPerScan=${maxSelectedPerScan}'), 'Test B3: audit shows configured maxSelectedPerScan');
 
 // Test C: Max open positions still enforced (real safety gate)
 ok(plannerSrc.includes('availableSlots') && plannerSrc.includes('maxPositions'), 'Test C1: availableSlots based on maxPositions still enforced');
-ok(plannerSrc.includes("'BLOCK_MAX_POSITIONS'") || plannerSrc.includes('MAX_POSITIONS_REACHED'), 'Test C2: max positions block label exists');
+ok(plannerSrc.includes('MAX_GLOBAL_POSITIONS_REACHED') || plannerSrc.includes('MAX_GROUP_POSITIONS_REACHED'), 'Test C2: max positions block label exists');
 
 // Test D: Duplicate position protection still works
 ok(entryGateSrc.includes('BLOCK_DUPLICATE_POSITION'), 'Test D1: BLOCK_DUPLICATE_POSITION gate exists in EntryGate');
@@ -47,8 +47,10 @@ ok(plannerSrc.includes('tpRoomOk'), 'Test H: TP room check still active');
 // Test I: Selection limit backfill variable renamed
 ok(scannerSrc.includes('backfillRejectedSymbols') && !scannerSrc.includes('selectionLimitRejectedSymbols'), 'Test I: selectionLimitRejectedSymbols renamed to backfillRejectedSymbols');
 
-// Test J: ExecutionPlanner no longer has artificial maxSelectedPerScan cap
-ok(plannerSrc.includes('No artificial maxSelectedPerScan cap'), 'Test J: planner explicitly says no artificial cap');
+// Test J: ExecutionPlanner enforces separate module buy budgets, with shared safety gates only
+ok(plannerSrc.includes('const maxAutoBotsSelectedPerScan = maxSelectedPerScan'), 'Test J1: planner applies maxSelectedPerScan to AutoBots only');
+ok(plannerSrc.includes('maxUnicornSelectedPerScan') && plannerSrc.includes('maxAutoBotsSelectedPerScan + maxUnicornSelectedPerScan'), 'Test J2: planner combines separate module budgets instead of reusing one shared cap');
+ok(plannerSrc.includes('globalSafetySelectionLimit') && plannerSrc.includes('Math.min(availableSlots, capitalLimitedSlots)'), 'Test J3: planner still applies max-position and capital safety gates');
 
 // Test K: skippedBySelectionLimit in audit is false
 ok(scannerSrc.includes('skippedBySelectionLimit=${String(false)}'), 'Test K: skippedBySelectionLimit is always false');

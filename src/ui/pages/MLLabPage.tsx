@@ -3,7 +3,7 @@ import { StatusBadge } from '../../components/ui/StatusBadge';
 import { EquityCurveChart } from '../../components/charts/EquityCurveChart';
 import { formatLocalTime } from '../../utils/timeFormatter';
 import type { Journal } from '../../core/persistence/Journal';
-import type { MLBrainModel, ImportedMLRow, MlRuntimeMode, MlRuntimeGuardState, MlRuntimeEvent } from '../../core/types';
+import type { MLBrainModel, ImportedMLRow, MlRuntimeMode, MlRuntimeGuardState, MlRuntimeEvent, MLPredictBuyMode, MLPredictBuySettings } from '../../core/types';
 import { importMLJson } from '../../core/ml/ml-importer';
 import { trainMLModel } from '../../core/ml/ml-trainer';
 import { logger } from '../../utils/logger';
@@ -23,6 +23,10 @@ interface Props {
   events: MlRuntimeEvent[];
   onRuntimeModeChange: (mode: MlRuntimeMode) => void;
   onMlExitsEnabledChange: (enabled: boolean) => void;
+  mlPredictBuySettings: MLPredictBuySettings;
+  onMlPredictBuySettingsChange: (settings: MLPredictBuySettings) => void;
+  activeExecutionMode: 'Demo' | 'Live';
+  activeExecutionAdapter: 'demo_simulated' | 'binance_live';
 }
 
 type BrainStatus = 'UNTRAINED' | 'TRAINED' | 'ERROR';
@@ -40,6 +44,13 @@ const MODE_STYLE: Record<MlRuntimeMode, { bg: string; border: string; text: stri
   advisory_only: { bg: 'rgba(210,153,34,0.08)', border: 'rgba(210,153,34,0.25)', text: '#d29922' },
   active_guarded: { bg: 'rgba(248,81,73,0.1)', border: 'rgba(248,81,73,0.35)', text: '#f85149' },
 };
+
+const PREDICT_BUY_MODE_OPTIONS: { key: MLPredictBuyMode; label: string; desc: string }[] = [
+  { key: 'OFF', label: 'Off', desc: 'ML Predict / Buy has no influence.' },
+  { key: 'PREDICT_ONLY', label: 'Predict Only', desc: 'Predictions are logged and shown, without promotion.' },
+  { key: 'SUGGEST_BUY', label: 'Suggest BUY', desc: 'BUY predictions can be marked as candidates, without execution.' },
+  { key: 'AUTO_BUY', label: 'Auto Buy', desc: 'BUY_READY promotion requires every hard gate and EntryGate approval.' },
+];
 
 function eventRowColor(ev: MlRuntimeEvent): string {
   if (ev.mode === 'active_guarded' && ev.wouldHaveChangedDecision) return '#f85149';
@@ -59,6 +70,8 @@ export function MLLabPage({
   journal, onExportML, onExportTraining, onExportAdvisory, onExportExcluded,
   equityHistory, brain, onBrainUpdate, importedRows, onImportedRowsUpdate,
   guardState, events, onRuntimeModeChange, onMlExitsEnabledChange,
+  mlPredictBuySettings, onMlPredictBuySettingsChange,
+  activeExecutionMode, activeExecutionAdapter,
 }: Props) {
   const [, forceUpdate] = useState(0);
   const [importResult, setImportResult] = useState<string | null>(null);
@@ -227,6 +240,26 @@ export function MLLabPage({
   const canTriggerSell = mode === 'active_guarded' && mlExitsEnabled;
 
   const modeLabel = MODE_OPTIONS.find(o => o.key === mode)?.label ?? 'Shadow Only';
+  const rowsUsed = brain?.trainingRowCount ?? 0;
+  const predictBuyMode = mlPredictBuySettings.mlPredictBuyMode;
+  const predictBuyModeEnabled = mlPredictBuySettings.mlPredictBuyEnabled && predictBuyMode !== 'OFF';
+  const canPredictBuy = predictBuyModeEnabled && brainStatus === 'TRAINED' && rowsUsed >= mlPredictBuySettings.minTrainingRowsForPredict;
+  const canSuggestBuy = canPredictBuy && (predictBuyMode === 'SUGGEST_BUY' || predictBuyMode === 'AUTO_BUY');
+  const canSubmitBuy = canPredictBuy && predictBuyMode === 'AUTO_BUY' && rowsUsed >= mlPredictBuySettings.minTrainingRowsForAutoBuy;
+  const lowSampleWarning = rowsUsed > 0 && rowsUsed < 100;
+  const belowPredictRows = predictBuyModeEnabled && rowsUsed < mlPredictBuySettings.minTrainingRowsForPredict;
+  const belowAutoBuyRows = rowsUsed < mlPredictBuySettings.minTrainingRowsForAutoBuy;
+  const predictBuyBlockedReason = !predictBuyModeEnabled ? 'mode_off'
+    : brainStatus !== 'TRAINED' ? 'model_untrained'
+    : belowPredictRows ? 'rows_used'
+    : 'none';
+  const handlePredictBuyModeChange = (nextMode: MLPredictBuyMode) => {
+    onMlPredictBuySettingsChange({
+      ...mlPredictBuySettings,
+      mlPredictBuyMode: nextMode,
+      mlPredictBuyEnabled: nextMode !== 'OFF',
+    });
+  };
 
   const netPnl = tradePnLHistory.length > 0
     ? tradePnLHistory[tradePnLHistory.length - 1].cumulativePnl
@@ -281,7 +314,7 @@ export function MLLabPage({
         </div>
 
         {/* ── ROW 2: ML TRAINING CARD + BRAIN STATUS ── */}
-        <div style={{ marginTop: 16 }}>
+        <div className="ml-training-impact-row" style={{ marginTop: 16 }}>
           <div className="ml-training-card">
             <div className="panel-section-title">ML TRAINING</div>
             <div className="ml-training-body">
@@ -338,6 +371,35 @@ export function MLLabPage({
               Uses only GOOD eligible rows. Training is manual only. ML Runtime Mode controls whether ML affects trading.
             </div>
           </div>
+
+          <div className="ml-impact-panel">
+            <div className="panel-section-title">ML Impact Summary</div>
+            <div className="ml-impact-grid">
+              <div className="ml-impact-card">
+                <span className="ml-impact-value">{counters.shadowDecisions + counters.advisoryEvents + counters.activeDowngrades + counters.mlExitTriggers}</span>
+                <span className="ml-impact-label">Total Evaluations</span>
+              </div>
+              <div className="ml-impact-card">
+                <span className="ml-impact-value" style={{ color: '#00eaff' }}>{counters.shadowDecisions}</span>
+                <span className="ml-impact-label">Would-have-blocked</span>
+              </div>
+              <div className="ml-impact-card">
+                <span className="ml-impact-value" style={{ color: '#f85149' }}>{counters.activeDowngrades}</span>
+                <span className="ml-impact-label">Blocked by ML</span>
+              </div>
+              <div className="ml-impact-card">
+                <span className="ml-impact-value" style={{ color: '#bc8cff' }}>{counters.mlExitTriggers}</span>
+                <span className="ml-impact-label">ML exit signals</span>
+              </div>
+              <div className="ml-impact-card">
+                <span className="ml-impact-value" style={{ color: '#8b949e' }}>{counters.blockedMutations + counters.upgradeAttemptsBlocked}</span>
+                <span className="ml-impact-label">Upgrades blocked</span>
+              </div>
+            </div>
+            <div style={{ fontSize: 10, color: '#3fb950', marginTop: 6 }}>
+              ML cannot upgrade to BUY. This protection is always active.
+            </div>
+          </div>
         </div>
 
         {/* ── IMPORTED DATA ── */}
@@ -392,6 +454,95 @@ export function MLLabPage({
           ML cannot force BUY. ML can only WAIT/BLOCK/reduce confidence.
         </div>
 
+        <div style={{ marginTop: 16 }}>
+          <div className="panel-section-title">ML Predict / Buy</div>
+          <div className="ml-training-card">
+            <div className="ml-mode-selector">
+              {PREDICT_BUY_MODE_OPTIONS.map(opt => (
+                <button
+                  key={opt.key}
+                  className={`ml-mode-btn ml-predict-buy-mode-btn ml-predict-buy-mode-btn--${opt.key.toLowerCase()}${predictBuyMode === opt.key ? ' ml-mode-btn--active ml-predict-buy-mode-btn--active' : ''}`}
+                  onClick={() => handlePredictBuyModeChange(opt.key)}
+                  title={opt.desc}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <div className="ml-safety-grid" style={{ marginTop: 10 }}>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Selected Mode</span>
+                <span className="ml-safety-value" style={{ color: predictBuyModeEnabled ? '#d29922' : '#8b949e' }}>{predictBuyMode}</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Predict Mode</span>
+                <span className="ml-safety-value" style={{ color: predictBuyModeEnabled ? '#3fb950' : '#8b949e' }}>{predictBuyModeEnabled ? 'ON' : 'OFF'}</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Can Predict BUY</span>
+                <span className="ml-safety-value" style={{ color: canPredictBuy ? '#3fb950' : '#f85149' }}>{canPredictBuy ? 'YES' : 'BLOCKED'}</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Can Suggest BUY</span>
+                <span className="ml-safety-value" style={{ color: canSuggestBuy ? '#d29922' : '#8b949e' }}>{canSuggestBuy ? 'YES' : 'NO'}</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Can Submit BUY</span>
+                <span className="ml-safety-value" style={{ color: canSubmitBuy ? '#d29922' : '#8b949e' }}>{canSubmitBuy ? 'GATED' : 'NO'}</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Rows For Predict</span>
+                <span className="ml-safety-value">{rowsUsed} / {mlPredictBuySettings.minTrainingRowsForPredict}</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Rows For Auto Buy</span>
+                <span className="ml-safety-value">{rowsUsed} / {mlPredictBuySettings.minTrainingRowsForAutoBuy}</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Active Execution Mode</span>
+                <span className="ml-safety-value">{activeExecutionMode}</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Execution Adapter</span>
+                <span className="ml-safety-value">{activeExecutionAdapter}</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Last ML Prediction</span>
+                <span className="ml-safety-value">Pending scanner evaluation</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Last ML Auto-Buy Decision</span>
+                <span className="ml-safety-value">None</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Last Blocked Reason</span>
+                <span className="ml-safety-value" style={{ color: predictBuyBlockedReason === 'none' ? '#3fb950' : '#d29922' }}>{predictBuyBlockedReason}</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">Parity Status</span>
+                <span className="ml-safety-value" style={{ color: '#3fb950' }}>Shared decision object</span>
+              </div>
+              <div className="ml-safety-item">
+                <span className="ml-safety-label">ML Guard Status</span>
+                <span className="ml-safety-value">{mode === 'active_guarded' ? 'Active Guarded' : 'No active block'}</span>
+              </div>
+            </div>
+            {belowAutoBuyRows && (
+              <div style={{ fontSize: 11, color: '#d29922', marginTop: 8 }}>
+                Rows used below Auto Buy threshold. ML can predict/suggest, but AUTO_BUY is blocked globally.
+              </div>
+            )}
+            {lowSampleWarning && (
+              <div style={{ fontSize: 11, color: '#d29922', marginTop: 4 }}>
+                Low sample size. ML Predict / Buy is experimental.
+              </div>
+            )}
+            <div style={{ fontSize: 10, color: '#8b949e', marginTop: 8 }}>
+              AUTO_BUY still requires Post-ML hard gates and final EntryGate approval before the execution adapter.
+            </div>
+          </div>
+        </div>
+
         {/* ── ML RUNTIME MODE SELECTOR ── */}
         <div style={{ marginTop: 16 }}>
           <div className="panel-section-title">ML Runtime Mode</div>
@@ -415,8 +566,9 @@ export function MLLabPage({
           <div style={{ fontSize: 10, color: '#8b949e', marginTop: 4 }}>
             {MODE_OPTIONS.find(o => o.key === mode)?.desc}
           </div>
-          <label className="ml-safety-item" style={{ marginTop: 8, cursor: 'pointer' }}>
+          <label className={`ml-exit-toggle ${mlExitsEnabled ? 'ml-exit-toggle--on' : 'ml-exit-toggle--off'}`} style={{ marginTop: 8 }}>
             <span className="ml-safety-label">ML Exit Enabled</span>
+            <span className="ml-exit-toggle-state">{mlExitsEnabled ? 'ON' : 'OFF'}</span>
             <input
               type="checkbox"
               checked={mlExitsEnabled}
@@ -561,7 +713,7 @@ export function MLLabPage({
         </div>
 
         {/* ── BOTTOM: IMPACT SUMMARY + EQUITY CURVE ── */}
-        <div style={{ marginTop: 12 }}>
+        <div style={{ display: 'none' }}>
           <div className="panel-section-title">ML Impact Summary</div>
           <div className="ml-impact-grid">
             <div className="ml-impact-card">

@@ -29,10 +29,16 @@ import type { ReferencePeriodConfig } from './ReferencePeriodConfig';
 import { calculateReferencePrice } from './ReferencePriceCalculator';
 import type { RefMode } from './ReferencePriceCalculator';
 import { evaluateSmartLateEntryGuard } from './SmartModeGuard';
-import { autoBuyQueue } from '../trading/AutoBuyExecutionQueue';
+import { autoBuyQueue, type AutoBuyExecutionModule } from '../trading/AutoBuyExecutionQueue';
 import { computeProfessionalAnalysis } from './ProfessionalSpotAnalysis';
 import { mlRuntimeEvents } from '../ml/ml-runtime-events';
+import { loadMLPredictBuySettings } from '../ml/ml-brain-store';
+import { buildMLPredictBuyPredictionFromBrain, evaluateMLPredictBuy } from '../ml/ml-predict-buy-router';
 import { resolveAutoBotsCanonicalState, type AutoBotsCanonicalState } from '../runtime/autobots-state';
+import type { ExecutionDecision } from './executionDecision';
+import { createOrUpdateUnicornWatchState, evaluateUnicornEntryGate, getUnicornExpiration, isUnicornEligibleSymbol, resolveUnicornDpConfirmation, scoreUnicornCandidate, shouldTrackUnicornEarly } from '../unicorn/UnicornScoreEngine';
+import { createDefaultUnicornHunterSettings, normalizeUnicornHunterSettings, type UnicornHunterSettings, type UnicornLifecycleStage, type UnicornRadarRow, type UnicornWatchState, type UnicornWatchlistSummary } from '../unicorn/UnicornHunterTypes';
+import { normalizeUnicornFinalBlockReason, unicornStageForFinalBlockReason } from '../unicorn/unicornExecutionBlockers';
 import {
   applyCandidatePromotionGuard,
   assertCandidateRuntimeReady,
@@ -42,6 +48,8 @@ import {
   buildCandidateStrategyDecisionSnapshot,
   finalizeCandidateStatus,
 } from './CandidateLifecycle';
+import { buildSelectedToExecutionHandoffAccounting } from './selectedToExecutionHandoffAccounting';
+import { buildCandidatePoolActionabilityCounts } from './candidatePoolActionability';
 
 
 let _scanIdCounter = 0;
@@ -66,6 +74,10 @@ const MARKET_SCANNER_BUILD_TIME = typeof __BUILD_TIMESTAMP__ !== 'undefined' ? _
 const MARKET_SCANNER_APP_VERSION = '4.0.0';
 const MARKET_SCANNER_GIT_COMMIT = typeof __GIT_COMMIT__ !== 'undefined' ? __GIT_COMMIT__ : 'unknown';
 const MARKET_SCANNER_LOG_SINK_NAME = 'logger.getLogs/logger.export';
+const DEFAULT_UNICORN_CANDIDATE_BUFFER_MAX = 20;
+const DEFAULT_UNICORN_DECISION_CACHE_MAX = 250;
+const DEFAULT_UNICORN_AUDIT_BUFFER_MAX = 500;
+const DEFAULT_UNICORN_HISTORY_MAX_SCANS = 5;
 const normalizeCurrentStrategySourceForAudit = (source: unknown): string =>
   String(source ?? 'unknown') === 'AutoBots_SafeFallback' ? 'AUTOBOTS_GROUP_FALLBACK' : String(source ?? 'unknown');
 
@@ -81,6 +93,7 @@ type ExecutionAttemptFinalOutcome =
   | 'SKIPPED_BOOK_STALE_REVALIDATION'
   | 'SKIPPED_SPREAD_REVALIDATION'
   | 'SKIPPED_TP_ROOM_REVALIDATION'
+  | 'SKIPPED_GLOBAL_RISK_OFF'
   | 'ADAPTER_REJECTED'
   | 'UNKNOWN';
 
@@ -88,6 +101,7 @@ function resolveExecutionAttemptFinalOutcome(reason: unknown, adapterCalled: boo
   if (positionCreated) return 'FILLED';
   const text = String(reason ?? '').toLowerCase();
   if (adapterCalled) return 'ADAPTER_REJECTED';
+  if (text.includes('global_risk_off') || (text.includes('risk') && text.includes('off'))) return 'SKIPPED_GLOBAL_RISK_OFF';
   if (text.includes('cooldown') || text.includes('spacing') || text.includes('rate_limit')) return 'SKIPPED_BUY_SPACING';
   if (text.includes('duplicate open') || text.includes('duplicate_position') || text.includes('duplicate symbol')) return 'SKIPPED_DUPLICATE_POSITION';
   if (text.includes('pending')) return 'SKIPPED_PENDING_ORDER';
@@ -104,6 +118,31 @@ function resolveExecutionAttemptFinalOutcome(reason: unknown, adapterCalled: boo
 
 export type BrainDecideFn = (symbol: string, price: MarketPrice) => Promise<TraderBrainDecision>;
 export type ScannerDiagnosticsLevel = 'normal' | 'verbose' | 'debug';
+export type UnicornHunterRuntimeStatusValue = 'OFF' | 'ON' | 'SCANNING' | 'BLOCKED' | 'ERROR';
+export interface UnicornHunterRuntimeStatus {
+  enabled: boolean;
+  mode: UnicornHunterSettings['mode'];
+  status: UnicornHunterRuntimeStatusValue;
+  scannerRunning: boolean;
+  lastScanCycleId: string | null;
+  lastCycleStartedAt: number | null;
+  lastCycleCompletedAt: number | null;
+  lastCycleDurationMs: number | null;
+  lastSymbolsSeen: number;
+  lastSymbolsEvaluated: number;
+  lastCandidatesProduced: number;
+  lastBuyAllowed: boolean;
+  reasonIfSkipped: string;
+  lastUnicornCandidateSymbol: string | null;
+  lastUnicornStage: string;
+  lastUnicornBlockReason: string;
+  lastUnicornConfirmationReason: string;
+  lastUnicornExecutionDecision: string;
+  lastUnicornSubmitAttempted: boolean;
+  lastUnicornAdapterCalled: boolean;
+  lastCalledAt: number | null;
+  notWiredDetected: boolean;
+}
 
 type ScannerStageTimings = {
   universeBuildMs: number;
@@ -126,6 +165,25 @@ type ScannerCacheMetrics = {
   staleRejectedCount: number;
   fetchMsTotal: number;
   computeMsTotal: number;
+};
+
+type UnicornCompactAudit = {
+  ts: number;
+  scanId?: string;
+  event: 'scan' | 'candidate' | 'handoff' | 'submitted' | 'memory';
+  symbol?: string;
+  decision?: string;
+  reason?: string;
+};
+
+type UnicornScanHistorySummary = {
+  scanId: string;
+  ts: number;
+  evaluatedCount: number;
+  unicornCandidates: number;
+  executableUnicornCandidates: number;
+  blockedUnicornCandidates: number;
+  topSymbols: string[];
 };
 
 export class MarketScanner {
@@ -211,7 +269,9 @@ export class MarketScanner {
   private executionCapitalPerTrade = 100;
   private executionUsedCapitalFn: (() => number) | null = null;
   private executionOpenSymbolsFn: (() => string[]) | null = null;
+  private executionOpenPositionSourcesFn: (() => Array<{ symbol: string; tradeId?: string | null; source?: string | null; ownerName?: string | null }>) | null = null;
   private executionPendingSymbolsFn: (() => string[]) | null = null;
+  private mlPredictBuySubmittedAt: number[] = [];
   private scannerBanlist: string[] = [];
   private scannerCandidatePoolSize = 20;
   private min24hQuoteVolumeUsdt = 100000;
@@ -227,6 +287,43 @@ export class MarketScanner {
   private breakoutWeight = 0.20;
   private newMoverBonus = 18;
   private enableNewMoverBonus = true;
+  private unicornHunterSettings: UnicornHunterSettings = createDefaultUnicornHunterSettings();
+  private readonly unicornCandidateBufferMax = DEFAULT_UNICORN_CANDIDATE_BUFFER_MAX;
+  private readonly unicornDecisionCacheMax = DEFAULT_UNICORN_DECISION_CACHE_MAX;
+  private readonly unicornAuditBufferMax = DEFAULT_UNICORN_AUDIT_BUFFER_MAX;
+  private readonly unicornHistoryMaxScans = DEFAULT_UNICORN_HISTORY_MAX_SCANS;
+  private unicornWatchlistBySymbol: Map<string, UnicornWatchState> = new Map();
+  private unicornRadar: UnicornRadarRow[] = [];
+  private unicornAuditRingBuffer: UnicornCompactAudit[] = [];
+  private unicornScanHistory: UnicornScanHistorySummary[] = [];
+  private lastUnicornFullScanAt: number | null = null;
+  private lastUnicornWatchlistRecheckAt: number | null = null;
+  private unicornTradesToday = 0;
+  private unicornTradesDayKey = new Date().toISOString().slice(0, 10);
+  private unicornRuntimeStatus: UnicornHunterRuntimeStatus = {
+    enabled: false,
+    mode: 'watch',
+    status: 'OFF',
+    scannerRunning: false,
+    lastScanCycleId: null,
+    lastCycleStartedAt: null,
+    lastCycleCompletedAt: null,
+    lastCycleDurationMs: null,
+    lastSymbolsSeen: 0,
+    lastSymbolsEvaluated: 0,
+    lastCandidatesProduced: 0,
+    lastBuyAllowed: false,
+    reasonIfSkipped: 'settings_enabled_false',
+    lastUnicornCandidateSymbol: null,
+    lastUnicornStage: 'OFF',
+    lastUnicornBlockReason: 'settings_enabled_false',
+    lastUnicornConfirmationReason: 'none',
+    lastUnicornExecutionDecision: 'OFF',
+    lastUnicornSubmitAttempted: false,
+    lastUnicornAdapterCalled: false,
+    lastCalledAt: null,
+    notWiredDetected: false,
+  };
 
   // Momentum pocket config — defaults align with entry quality settings
   private minMomentumPocketPct = 0.0;
@@ -396,6 +493,47 @@ export class MarketScanner {
     this.userTrailPullbackPct = config.trailPullbackPct;
     this.runtimeConfigAppliedAt = Date.now();
     logger.info(`AUTOBOTS_MANUAL_OVERRIDE_INVARIANT_AUDIT: autoBotsEnabled=${String(this.paperAutoEnabled)} manualOverrideEnabled=${String(requestedManual && !this.paperAutoEnabled)} manualControlsDisabled=${String(this.paperAutoEnabled)} manualStrategyApplied=${String(!this.paperAutoEnabled && requestedManual)} runtimeStrategySource=${this.strategySourceMode === 'autobots' ? 'AutoBots' : 'Manual'} invariantOk=true`);
+  }
+
+  setUnicornHunterSettings(settings: Partial<UnicornHunterSettings>): void {
+    this.unicornHunterSettings = normalizeUnicornHunterSettings(settings);
+    autoBuyQueue.setModuleCooldownMs('unicorn_hunter', this.unicornHunterSettings.unicornMinSecondsBetweenBuys * 1000);
+    this.runtimeConfigAppliedAt = Date.now();
+    const disabledReason = this.getUnicornDisabledReason();
+    this.updateUnicornRuntimeStatus({
+      enabled: disabledReason === null,
+      mode: this.unicornHunterSettings.mode,
+      status: disabledReason === null ? 'ON' : 'OFF',
+      reasonIfSkipped: disabledReason ?? 'settings_applied',
+      notWiredDetected: false,
+    });
+    logger.info(`UNICORN_SETTINGS_APPLIED_AUDIT enabled=${String(this.unicornHunterSettings.enabled)} mode=${this.unicornHunterSettings.mode} maxUnicornBuysPerCycle=${this.unicornHunterSettings.maxUnicornBuysPerCycle} maxOpenUnicornPositions=${this.unicornHunterSettings.maxOpenUnicornPositions} maxUnicornTradesPerDay=${this.unicornHunterSettings.maxUnicornTradesPerDay} unicornMinSecondsBetweenBuys=${this.unicornHunterSettings.unicornMinSecondsBetweenBuys} capitalPctPerTrade=${this.unicornHunterSettings.capitalPctPerTrade} minUnicornScore=${this.unicornHunterSettings.minUnicornScore} antiAthGuardEnabled=${String(this.unicornHunterSettings.antiAthGuardEnabled)} requirePullbackRebound=${String(this.unicornHunterSettings.requirePullbackRebound)} defaultOffSafe=${String(!this.unicornHunterSettings.enabled || this.unicornHunterSettings.mode !== 'live')}`);
+  }
+
+  getUnicornRadar(): UnicornRadarRow[] {
+    return [...this.unicornRadar];
+  }
+
+  getUnicornHunterRuntimeStatus(): UnicornHunterRuntimeStatus {
+    const disabledReason = this.getUnicornDisabledReason();
+    const scannerRunning = this.isScannerRuntimeRunning();
+    const enabled = disabledReason === null;
+    return {
+      ...this.unicornRuntimeStatus,
+      enabled,
+      mode: this.unicornHunterSettings.mode,
+      scannerRunning,
+      status: this.unicornRuntimeStatus.notWiredDetected
+        ? 'ERROR'
+        : !enabled
+          ? 'OFF'
+          : this.unicornRuntimeStatus.status === 'SCANNING'
+            ? 'SCANNING'
+            : this.unicornRuntimeStatus.status === 'BLOCKED'
+              ? 'BLOCKED'
+              : 'ON',
+      reasonIfSkipped: enabled ? this.unicornRuntimeStatus.reasonIfSkipped : disabledReason ?? 'disabled',
+    };
   }
 
   getManualStrategy(): string | null { return this.manualStrategy; }
@@ -594,10 +732,12 @@ export class MarketScanner {
   setExecutionContextProviders(providers: {
     getUsedCapital?: (() => number) | null;
     getOpenSymbols?: (() => string[]) | null;
+    getOpenPositionSources?: (() => Array<{ symbol: string; tradeId?: string | null; source?: string | null; ownerName?: string | null }>) | null;
     getPendingSymbols?: (() => string[]) | null;
   }): void {
     this.executionUsedCapitalFn = providers.getUsedCapital ?? null;
     this.executionOpenSymbolsFn = providers.getOpenSymbols ?? null;
+    this.executionOpenPositionSourcesFn = providers.getOpenPositionSources ?? null;
     this.executionPendingSymbolsFn = providers.getPendingSymbols ?? null;
   }
   getLastPaperAutoResult(): PaperAutoExecutionResult | null { return this.lastPaperAutoResult; }
@@ -660,6 +800,1064 @@ export class MarketScanner {
     return [...this.snapshots];
   }
 
+  private resetUnicornDailyCounterIfNeeded(): void {
+    const key = new Date().toISOString().slice(0, 10);
+    if (key !== this.unicornTradesDayKey) {
+      this.unicornTradesDayKey = key;
+      this.unicornTradesToday = 0;
+      logger.info(`UNICORN_DAILY_LIMIT_AUDIT day=${key} reset=true maxTrades=${this.unicornHunterSettings.maxUnicornTradesPerDay}`);
+    }
+  }
+
+  private emptyUnicornStageCounts(): Record<UnicornLifecycleStage, number> {
+    return {
+      SCOUT: 0,
+      EARLY_WATCH: 0,
+      ACCUMULATING: 0,
+      MOMENTUM_BUILDING: 0,
+      PULLBACK_WAIT: 0,
+      REBOUND_CONFIRM: 0,
+      RADAR_READY: 0,
+      ENTRY_READY: 0,
+      EXECUTION_SELECTED: 0,
+      SUBMIT_ATTEMPTED: 0,
+      BUY_OPENED: 0,
+      BLOCKED_BY_DIP_NOT_CONFIRMED: 0,
+      BLOCKED_BY_BUY_BUDGET: 0,
+      BLOCKED_BY_RISK: 0,
+      BLOCKED_BY_OPEN_POSITION_LIMIT: 0,
+      READY: 0,
+      READY_WAIT: 0,
+      READY_BLOCKED: 0,
+      EXPIRED: 0,
+      DANGEROUS: 0,
+    };
+  }
+
+  private getUnicornWatchlistSummary(): UnicornWatchlistSummary {
+    const stageCounts = this.emptyUnicornStageCounts();
+    for (const state of this.unicornWatchlistBySymbol.values()) {
+      stageCounts[state.stage] = (stageCounts[state.stage] ?? 0) + 1;
+    }
+    return {
+      visibleRowsCount: Math.min(6, this.unicornRadar.length),
+      radarRowsCount: this.unicornRadar.length,
+      internalWatchlistCount: this.unicornWatchlistBySymbol.size,
+      stageCounts,
+      lastFullScanAt: this.lastUnicornFullScanAt,
+      lastWatchlistRecheckAt: this.lastUnicornWatchlistRecheckAt,
+    };
+  }
+
+  private recordUnicornAudit(audit: Omit<UnicornCompactAudit, 'ts'>): void {
+    this.unicornAuditRingBuffer.push({ ...audit, ts: Date.now() });
+    if (this.unicornAuditRingBuffer.length > this.unicornAuditBufferMax) {
+      this.unicornAuditRingBuffer.splice(0, this.unicornAuditRingBuffer.length - this.unicornAuditBufferMax);
+    }
+  }
+
+  private recordUnicornScanHistory(summary: UnicornScanHistorySummary): void {
+    this.unicornScanHistory.push(summary);
+    if (this.unicornScanHistory.length > this.unicornHistoryMaxScans) {
+      this.unicornScanHistory.splice(0, this.unicornScanHistory.length - this.unicornHistoryMaxScans);
+    }
+  }
+
+  private compactUnicornWatchState(state: UnicornWatchState): UnicornWatchState {
+    return {
+      ...state,
+      metrics: {
+        change24hPct: state.metrics.change24hPct,
+        change5mPct: state.metrics.change5mPct,
+        change15mPct: state.metrics.change15mPct,
+        change1hPct: state.metrics.change1hPct,
+        quoteVolume: state.metrics.quoteVolume,
+        spreadPct: state.metrics.spreadPct,
+        distanceToHighPct: state.metrics.distanceToHighPct,
+        pullbackPct: state.metrics.pullbackPct,
+        reboundPct: state.metrics.reboundPct,
+        volumeExpansion: state.metrics.volumeExpansion,
+        price: state.metrics.price,
+        high24h: state.metrics.high24h,
+      },
+      reasons: state.reasons.slice(0, 5),
+    };
+  }
+
+  private setUnicornDecisionState(symbol: string, state: UnicornWatchState): void {
+    this.unicornWatchlistBySymbol.set(symbol, this.compactUnicornWatchState(state));
+    this.pruneUnicornDecisionCache();
+  }
+
+  private pruneUnicornDecisionCache(): void {
+    if (this.unicornWatchlistBySymbol.size <= this.unicornDecisionCacheMax) return;
+    const stageRank: Record<UnicornLifecycleStage, number> = {
+      READY: 0,
+      BUY_OPENED: 0,
+      SUBMIT_ATTEMPTED: 1,
+      EXECUTION_SELECTED: 2,
+      ENTRY_READY: 3,
+      RADAR_READY: 4,
+      READY_WAIT: 5,
+      READY_BLOCKED: 6,
+      BLOCKED_BY_BUY_BUDGET: 7,
+      BLOCKED_BY_OPEN_POSITION_LIMIT: 8,
+      BLOCKED_BY_RISK: 9,
+      BLOCKED_BY_DIP_NOT_CONFIRMED: 10,
+      REBOUND_CONFIRM: 11,
+      PULLBACK_WAIT: 12,
+      MOMENTUM_BUILDING: 13,
+      ACCUMULATING: 14,
+      EARLY_WATCH: 15,
+      SCOUT: 16,
+      DANGEROUS: 17,
+      EXPIRED: 18,
+    };
+    const retained = [...this.unicornWatchlistBySymbol.entries()]
+      .sort(([, a], [, b]) => {
+        const expiredDelta = (a.stage === 'EXPIRED' ? 1 : 0) - (b.stage === 'EXPIRED' ? 1 : 0);
+        return expiredDelta
+          || (stageRank[a.stage] - stageRank[b.stage])
+          || (b.bestScoreSeen - a.bestScoreSeen)
+          || (b.lastSeenAt - a.lastSeenAt);
+      })
+      .slice(0, this.unicornDecisionCacheMax);
+    this.unicornWatchlistBySymbol = new Map(retained);
+  }
+
+  private emitUnicornMemoryAudit(input: {
+    scanId: string;
+    evaluatedCount: number;
+    retainedCandidateCount: number;
+    temporaryObjectsCleared: boolean;
+  }): void {
+    const maxLimitsRespected = input.retainedCandidateCount <= this.unicornCandidateBufferMax
+      && this.unicornWatchlistBySymbol.size <= this.unicornDecisionCacheMax
+      && this.unicornAuditRingBuffer.length <= this.unicornAuditBufferMax
+      && this.unicornScanHistory.length <= this.unicornHistoryMaxScans
+      && this.unicornRadar.length <= this.unicornCandidateBufferMax;
+    this.recordUnicornAudit({ event: 'memory', scanId: input.scanId, decision: maxLimitsRespected ? 'ok' : 'limit_violation' });
+    logger.info(`UNICORN_HUNTER_MEMORY_AUDIT: scanId=${input.scanId} evaluatedCount=${input.evaluatedCount} retainedCandidateCount=${input.retainedCandidateCount} decisionCacheSize=${this.unicornWatchlistBySymbol.size} auditBufferSize=${this.unicornAuditRingBuffer.length} historyScanCount=${this.unicornScanHistory.length} temporaryObjectsCleared=${String(input.temporaryObjectsCleared)} maxLimitsRespected=${String(maxLimitsRespected)} invariantOk=${String(maxLimitsRespected && input.temporaryObjectsCleared)}`);
+  }
+
+  private shouldEmitUnicornCandidateAudit(index: number): boolean {
+    return index < this.unicornCandidateBufferMax || this.shouldEmitVerboseAudit();
+  }
+
+  private normalizeUnicornBlockedReason(reason: string): string {
+    return normalizeUnicornFinalBlockReason(reason);
+  }
+
+  private unicornStageForBlockReason(reason: string): UnicornLifecycleStage {
+    return unicornStageForFinalBlockReason(reason);
+  }
+
+  private updateUnicornExecutionRuntimeStatus(input: {
+    scanId: string;
+    symbol: string | null;
+    stage: string;
+    blockReason: string;
+    confirmationReason: string;
+    executionDecision: string;
+    submitAttempted: boolean;
+    adapterCalled: boolean;
+    buyAllowed: boolean;
+  }): void {
+    const blockReason = input.blockReason && input.blockReason !== 'none'
+      ? this.normalizeUnicornBlockedReason(input.blockReason)
+      : input.buyAllowed
+        ? 'none'
+        : 'UNICORN_BLOCK_NO_EXECUTABLE_CANDIDATE';
+    this.updateUnicornRuntimeStatus({
+      status: input.buyAllowed || input.submitAttempted ? 'ON' : 'BLOCKED',
+      lastScanCycleId: input.scanId,
+      lastBuyAllowed: input.buyAllowed,
+      reasonIfSkipped: input.buyAllowed ? 'none' : blockReason,
+      lastUnicornCandidateSymbol: input.symbol,
+      lastUnicornStage: input.stage,
+      lastUnicornBlockReason: blockReason,
+      lastUnicornConfirmationReason: input.confirmationReason || 'none',
+      lastUnicornExecutionDecision: input.executionDecision,
+      lastUnicornSubmitAttempted: input.submitAttempted,
+      lastUnicornAdapterCalled: input.adapterCalled,
+    });
+    logger.info(`UNICORN_PIPELINE_AUDIT: scanId=${input.scanId} lastUnicornCandidateSymbol=${input.symbol ?? 'none'} lastUnicornStage=${input.stage} lastUnicornBlockReason=${blockReason} lastUnicornConfirmationReason=${input.confirmationReason || 'none'} lastUnicornExecutionDecision=${input.executionDecision} lastUnicornSubmitAttempted=${String(input.submitAttempted)} lastUnicornAdapterCalled=${String(input.adapterCalled)} buyAllowed=${String(input.buyAllowed)}`);
+  }
+
+  private getUnicornDisabledReason(): string | null {
+    if (!this.unicornHunterSettings.enabled) return 'settings_enabled_false';
+    if (this.unicornHunterSettings.mode === 'off') return 'mode_off';
+    return null;
+  }
+
+  private isScannerRuntimeRunning(): boolean {
+    return this.state !== 'OFF' || this.scanInFlight;
+  }
+
+  private updateUnicornRuntimeStatus(patch: Partial<UnicornHunterRuntimeStatus>): void {
+    const disabledReason = this.getUnicornDisabledReason();
+    const enabled = disabledReason === null;
+    const scannerRunning = this.isScannerRuntimeRunning();
+    const nextStatus = patch.status
+      ?? (patch.notWiredDetected || this.unicornRuntimeStatus.notWiredDetected
+        ? 'ERROR'
+        : !enabled
+          ? 'OFF'
+          : this.unicornRuntimeStatus.status);
+    this.unicornRuntimeStatus = {
+      ...this.unicornRuntimeStatus,
+      ...patch,
+      enabled,
+      mode: this.unicornHunterSettings.mode,
+      scannerRunning,
+      status: enabled ? nextStatus : 'OFF',
+      reasonIfSkipped: patch.reasonIfSkipped ?? (enabled ? this.unicornRuntimeStatus.reasonIfSkipped : disabledReason ?? 'disabled'),
+    };
+  }
+
+  private emitUnicornRuntimeStateAudit(input: {
+    scanId: string;
+    stage: 'scan_entry' | 'scan_start' | 'empty_universe' | 'scan_builder' | 'brain_missing' | 'scan_overlap' | 'watchlist_empty';
+    sourceCandidateCount?: number;
+    symbolsSeen?: number;
+    symbolsEvaluated?: number;
+    candidatesProduced?: number;
+    buyAllowed?: boolean;
+    reasonIfSkipped?: string;
+    reason?: string;
+  }): void {
+    const disabledReason = this.getUnicornDisabledReason();
+    const enabled = disabledReason === null;
+    const symbolsSeen = input.symbolsSeen ?? input.sourceCandidateCount ?? this.unicornRuntimeStatus.lastSymbolsSeen ?? 0;
+    const symbolsEvaluated = input.symbolsEvaluated ?? this.unicornRuntimeStatus.lastSymbolsEvaluated ?? 0;
+    const candidatesProduced = input.candidatesProduced ?? this.unicornRuntimeStatus.lastCandidatesProduced ?? 0;
+    const buyAllowed = input.buyAllowed ?? this.unicornRuntimeStatus.lastBuyAllowed ?? false;
+    const rawReasonIfSkipped = input.reasonIfSkipped ?? input.reason ?? disabledReason ?? (candidatesProduced > 0 ? 'candidate_found' : 'running');
+    const reasonIfSkipped = rawReasonIfSkipped === 'scanner_cycle_started' ? 'evaluating' : rawReasonIfSkipped;
+    this.updateUnicornRuntimeStatus({
+      lastScanCycleId: input.scanId,
+      lastSymbolsSeen: symbolsSeen,
+      lastSymbolsEvaluated: symbolsEvaluated,
+      lastCandidatesProduced: candidatesProduced,
+      lastBuyAllowed: buyAllowed,
+      reasonIfSkipped,
+    });
+    logger.info(`UNICORN_HUNTER_RUNTIME_AUDIT: scanId=${input.scanId} stage=${input.stage} enabled=${String(enabled)} scannerRunning=${String(this.isScannerRuntimeRunning())} mode=${this.unicornHunterSettings.mode} symbolsSeen=${symbolsSeen} symbolsEvaluated=${symbolsEvaluated} candidatesProduced=${candidatesProduced} buyAllowed=${String(buyAllowed)} reasonIfSkipped=${reasonIfSkipped} sourceCandidateCount=${input.sourceCandidateCount ?? 'n/a'} decisionCacheSize=${this.unicornWatchlistBySymbol.size} radarRows=${this.unicornRadar.length} reason=${input.reason ?? disabledReason ?? 'running'}`);
+    if (!enabled && this.isScannerRuntimeRunning()) {
+      logger.throttled('INFO', `UNICORN_HUNTER_DISABLED_AUDIT scanId=${input.scanId} enabled=false reason=${disabledReason} scannerRunning=true mode=${this.unicornHunterSettings.mode} symbolsSeen=${symbolsSeen} symbolsEvaluated=0 sourceCandidateCount=${input.sourceCandidateCount ?? 0} decisionCacheSize=${this.unicornWatchlistBySymbol.size} radarRows=${this.unicornRadar.length}`, 'unicorn_hunter_disabled_audit', 60000);
+    }
+  }
+
+  private emitUnicornScanCycleAudit(input: {
+    scanId: string;
+    cycleStartedAt: number;
+    evaluatedCount: number;
+    candidateCount: number;
+    symbolsSeen: number;
+    buyAllowed: boolean;
+    reasonIfSkipped: string;
+    completed?: boolean;
+  }): void {
+    const completedAt = Date.now();
+    const durationMs = Math.max(0, completedAt - input.cycleStartedAt);
+    const completed = input.completed !== false;
+    const disabledReason = this.getUnicornDisabledReason();
+    const enabled = disabledReason === null;
+    const status: UnicornHunterRuntimeStatusValue = !enabled
+      ? 'OFF'
+      : input.reasonIfSkipped === 'not_wired'
+        ? 'ERROR'
+        : input.buyAllowed || input.candidateCount > 0 || input.reasonIfSkipped === 'none'
+          ? 'ON'
+          : input.reasonIfSkipped === 'no_candidate'
+            ? 'ON'
+            : 'BLOCKED';
+    this.updateUnicornRuntimeStatus({
+      status,
+      lastScanCycleId: input.scanId,
+      lastCycleStartedAt: input.cycleStartedAt,
+      lastCycleCompletedAt: completed ? completedAt : null,
+      lastCycleDurationMs: completed ? durationMs : null,
+      lastSymbolsSeen: input.symbolsSeen,
+      lastSymbolsEvaluated: input.evaluatedCount,
+      lastCandidatesProduced: input.candidateCount,
+      lastBuyAllowed: input.buyAllowed,
+      reasonIfSkipped: input.reasonIfSkipped,
+    });
+    logger.info(`UNICORN_HUNTER_SCAN_CYCLE_AUDIT: scanCycleId=${input.scanId} cycleStarted=true cycleCompleted=${String(completed)} durationMs=${durationMs} evaluatedCount=${input.evaluatedCount} candidateCount=${input.candidateCount} enabled=${String(enabled)} scannerRunning=${String(this.isScannerRuntimeRunning())} symbolsSeen=${input.symbolsSeen} buyAllowed=${String(input.buyAllowed)} reasonIfSkipped=${input.reasonIfSkipped}`);
+  }
+
+  private emitUnicornNotWiredAuditIfNeeded(scanId: string, symbolsSeen: number, invoked: boolean): void {
+    if (this.getUnicornDisabledReason() !== null || invoked) return;
+    this.updateUnicornRuntimeStatus({
+      status: 'ERROR',
+      lastScanCycleId: scanId,
+      lastSymbolsSeen: symbolsSeen,
+      lastSymbolsEvaluated: 0,
+      lastCandidatesProduced: 0,
+      lastBuyAllowed: false,
+      reasonIfSkipped: 'not_wired',
+      notWiredDetected: true,
+    });
+    logger.error(`UNICORN_HUNTER_NOT_WIRED_AUDIT: scanCycleId=${scanId} enabled=true scannerRunning=${String(this.isScannerRuntimeRunning())} symbolsSeen=${symbolsSeen} symbolsEvaluated=0 candidatesProduced=0 buyAllowed=false reasonIfSkipped=not_wired action=verify_scanner_loop_registration`);
+  }
+
+  private emitUnicornSkippedScanAudit(input: {
+    scanId: string;
+    reason: string;
+    evaluatedCount: number;
+  }): void {
+    const cycleStartedAt = Date.now();
+    this.recordUnicornScanHistory({ scanId: input.scanId, ts: Date.now(), evaluatedCount: input.evaluatedCount, unicornCandidates: 0, executableUnicornCandidates: 0, blockedUnicornCandidates: 0, topSymbols: [] });
+    this.recordUnicornAudit({ event: 'scan', scanId: input.scanId, decision: 'skipped', reason: input.reason });
+    logger.info(`UNICORN_HUNTER_SCAN_AUDIT: scanId=${input.scanId} enabled=${String(this.getUnicornDisabledReason() === null)} skipped=true skipReason=${input.reason} totalEvaluated=${input.evaluatedCount} unicornCandidates=0 executableUnicornCandidates=0 blockedUnicornCandidates=0 blockedReason=${input.reason} topSymbols=none`);
+    this.emitUnicornScanCycleAudit({ scanId: input.scanId, cycleStartedAt, evaluatedCount: input.evaluatedCount, candidateCount: 0, symbolsSeen: input.evaluatedCount, buyAllowed: false, reasonIfSkipped: input.reason });
+    this.emitUnicornMemoryAudit({ scanId: input.scanId, evaluatedCount: input.evaluatedCount, retainedCandidateCount: this.unicornRadar.length, temporaryObjectsCleared: true });
+  }
+
+  private projectUnicornRadarRows(): UnicornRadarRow[] {
+    return [...this.unicornWatchlistBySymbol.values()]
+      .filter((state) => state.stage !== 'EXPIRED')
+      .sort((a, b) => {
+        const stageRank: Record<UnicornLifecycleStage, number> = {
+          READY: 0,
+          BUY_OPENED: 0,
+          SUBMIT_ATTEMPTED: 1,
+          EXECUTION_SELECTED: 2,
+          ENTRY_READY: 3,
+          RADAR_READY: 4,
+          READY_WAIT: 5,
+          READY_BLOCKED: 6,
+          BLOCKED_BY_BUY_BUDGET: 7,
+          BLOCKED_BY_OPEN_POSITION_LIMIT: 8,
+          BLOCKED_BY_RISK: 9,
+          BLOCKED_BY_DIP_NOT_CONFIRMED: 10,
+          REBOUND_CONFIRM: 11,
+          PULLBACK_WAIT: 12,
+          MOMENTUM_BUILDING: 13,
+          ACCUMULATING: 14,
+          EARLY_WATCH: 15,
+          SCOUT: 16,
+          DANGEROUS: 17,
+          EXPIRED: 18,
+        };
+        return (stageRank[a.stage] - stageRank[b.stage])
+          || (b.bestScoreSeen - a.bestScoreSeen)
+          || (b.growthSinceFirstSeenPct - a.growthSinceFirstSeenPct)
+          || (b.lastSeenAt - a.lastSeenAt);
+      })
+      .slice(0, this.unicornCandidateBufferMax)
+      .map((state) => {
+        const executionReady = state.stage === 'READY' || state.stage === 'ENTRY_READY' || state.stage === 'EXECUTION_SELECTED' || state.stage === 'SUBMIT_ATTEMPTED' || state.stage === 'BUY_OPENED';
+        const canonicalNoBuyReason = executionReady ? 'none' : this.normalizeUnicornBlockedReason(state.lastReason);
+        const blockerSource = /duplicate/i.test(canonicalNoBuyReason)
+          ? 'PositionManager'
+          : /max|capital|risk/i.test(canonicalNoBuyReason)
+            ? 'RiskGuard'
+            : /entry|price|book|spread|tp/i.test(canonicalNoBuyReason)
+              ? 'EntryGate'
+              : 'UnicornRadar';
+        return {
+          symbol: state.symbol,
+          score: state.currentScore,
+          action: executionReady ? 'ready' : state.stage === 'DANGEROUS' || state.stage === 'READY_BLOCKED' || state.stage.startsWith('BLOCKED_BY_') ? 'block' : 'watch',
+          reasons: state.reasons,
+          metrics: state.metrics,
+          reasonCode: canonicalNoBuyReason,
+          rawReasonCode: state.lastReason,
+          canonicalNoBuyReason,
+          blockerSource,
+          mode: this.unicornHunterSettings.mode,
+          stage: state.stage,
+          firstSeenAt: state.firstSeenAt,
+          lastSeenAt: state.lastSeenAt,
+          growthSinceFirstSeenPct: state.growthSinceFirstSeenPct,
+          pullbackFromHighPct: state.pullbackFromHighPct,
+          reboundFromLocalLowPct: state.reboundFromLocalLowPct,
+          bestScoreSeen: state.bestScoreSeen,
+          dp: state.dp ?? resolveUnicornDpConfirmation(this.unicornHunterSettings, state.metrics),
+        };
+      });
+  }
+
+  private expireUnicornWatchlist(now: number): void {
+    for (const [symbol, state] of this.unicornWatchlistBySymbol) {
+      const expiredReason = getUnicornExpiration({ state, now });
+      if (!expiredReason) continue;
+      const expired: UnicornWatchState = {
+        ...state,
+        stage: 'EXPIRED',
+        stageChangedAt: now,
+        lastSeenAt: now,
+        expiredReason,
+        lastReason: expiredReason,
+      };
+      this.setUnicornDecisionState(symbol, expired);
+      logger.info(`UNICORN_WATCHLIST_EXPIRE_AUDIT symbol=${symbol} previousStage=${state.stage} expiredReason=${expiredReason} firstSeenAt=${new Date(state.firstSeenAt).toISOString()} lastSeenAt=${new Date(state.lastSeenAt).toISOString()} growthSinceFirstSeenPct=${state.growthSinceFirstSeenPct.toFixed(2)} bestScoreSeen=${state.bestScoreSeen}`);
+    }
+  }
+
+  private revalidateUnicornWatchlist(reason: string): void {
+    if (this.unicornWatchlistBySymbol.size === 0) return;
+    const now = Date.now();
+    let updated = 0;
+    for (const [symbol, state] of this.unicornWatchlistBySymbol) {
+      if (state.stage === 'EXPIRED') continue;
+      const livePrice = this.feed.getLastPrice(symbol);
+      if (!(livePrice > 0)) continue;
+      const metrics = {
+        ...state.metrics,
+        price: livePrice,
+        pullbackPct: state.maxPriceSinceSeen > 0 ? ((Math.max(state.maxPriceSinceSeen, livePrice) - livePrice) / Math.max(state.maxPriceSinceSeen, livePrice)) * 100 : state.pullbackFromHighPct,
+        reboundPct: state.minPriceSinceSeen > 0 ? ((livePrice - Math.min(state.minPriceSinceSeen, livePrice)) / Math.min(state.minPriceSinceSeen, livePrice)) * 100 : state.reboundFromLocalLowPct,
+      };
+      const score = scoreUnicornCandidate({ symbol, settings: this.unicornHunterSettings, metrics });
+      const next = createOrUpdateUnicornWatchState({
+        previous: state,
+        symbol,
+        now,
+        price: livePrice,
+        metrics,
+        score,
+        reasonCode: state.lastReason,
+        settings: this.unicornHunterSettings,
+        finalGateReady: false,
+        dangerous: state.stage === 'DANGEROUS',
+      });
+      this.setUnicornDecisionState(symbol, next);
+      updated++;
+      if (next.stage !== state.stage) {
+        logger.info(`UNICORN_CANDIDATE_LIFECYCLE_AUDIT symbol=${symbol} previousStage=${state.stage} nextStage=${next.stage} reason=fast_revalidation_${reason} firstSeenPrice=${next.firstSeenPrice} lastPrice=${next.lastPrice} growthSinceFirstSeenPct=${next.growthSinceFirstSeenPct.toFixed(2)} pullbackFromHighPct=${next.pullbackFromHighPct.toFixed(2)} reboundFromLocalLowPct=${next.reboundFromLocalLowPct.toFixed(2)} bestScoreSeen=${next.bestScoreSeen} currentScore=${next.currentScore}`);
+      }
+    }
+    this.lastUnicornWatchlistRecheckAt = now;
+      this.expireUnicornWatchlist(now);
+      this.pruneUnicornDecisionCache();
+      this.unicornRadar = this.projectUnicornRadarRows();
+    const summary = this.getUnicornWatchlistSummary();
+    logger.info(`UNICORN_FAST_REVALIDATION_AUDIT reason=${reason} updatedCount=${updated} internalWatchlistCount=${summary.internalWatchlistCount} radarRowsCount=${summary.radarRowsCount} visibleRowsCount=${summary.visibleRowsCount} stageCounts=${Object.entries(summary.stageCounts).map(([k, v]) => `${k}:${v}`).join('|')}`);
+  }
+
+  private async buildUnicornCandidates(input: {
+    scanId: string;
+    candidates: ScannerCandidate[];
+    openSymbols: string[];
+    pendingSymbols: string[];
+    usedCapital: number;
+  }): Promise<{ executable: ScannerCandidate[]; radar: UnicornRadarRow[] }> {
+    this.resetUnicornDailyCounterIfNeeded();
+    const settings = this.unicornHunterSettings;
+    const cycleStartedAt = Date.now();
+    const now = cycleStartedAt;
+    this.lastUnicornFullScanAt = now;
+    this.updateUnicornRuntimeStatus({
+      status: settings.enabled && settings.mode !== 'off' ? 'SCANNING' : 'OFF',
+      lastScanCycleId: input.scanId,
+      lastCycleStartedAt: cycleStartedAt,
+      lastCalledAt: cycleStartedAt,
+      lastSymbolsSeen: input.candidates.length,
+      lastSymbolsEvaluated: 0,
+      lastCandidatesProduced: 0,
+      lastBuyAllowed: false,
+      reasonIfSkipped: settings.enabled && settings.mode !== 'off' ? 'evaluating' : 'unicorn_hunter_off',
+      lastUnicornCandidateSymbol: null,
+      lastUnicornStage: settings.enabled && settings.mode !== 'off' ? 'SCANNING' : 'OFF',
+      lastUnicornBlockReason: settings.enabled && settings.mode !== 'off' ? 'evaluating' : 'unicorn_hunter_off',
+      lastUnicornConfirmationReason: 'none',
+      lastUnicornExecutionDecision: 'SCANNING',
+      lastUnicornSubmitAttempted: false,
+      lastUnicornAdapterCalled: false,
+      notWiredDetected: false,
+    });
+    this.emitUnicornRuntimeStateAudit({ scanId: input.scanId, stage: 'scan_builder', sourceCandidateCount: input.candidates.length, symbolsSeen: input.candidates.length, symbolsEvaluated: 0, candidatesProduced: 0, buyAllowed: false, reasonIfSkipped: settings.enabled && settings.mode !== 'off' ? 'evaluating' : 'unicorn_hunter_off' });
+    if (!settings.enabled || settings.mode === 'off') {
+      this.unicornRadar = [];
+      this.unicornWatchlistBySymbol.clear();
+      logger.info(`UNICORN_UNIVERSE_REFRESH_AUDIT enabled=false mode=${settings.mode} candidateCount=0 reason=unicorn_hunter_off`);
+      logger.throttled('INFO', `UNICORN_HUNTER_DISABLED_AUDIT scanId=${input.scanId} enabled=false reason=${!settings.enabled ? 'settings_enabled_false' : 'mode_off'} scannerRunning=${String(this.isScannerRuntimeRunning())} mode=${settings.mode} symbolsSeen=${input.candidates.length} symbolsEvaluated=0 sourceCandidateCount=${input.candidates.length} decisionCacheSize=${this.unicornWatchlistBySymbol.size} radarRows=${this.unicornRadar.length}`, 'unicorn_hunter_disabled_audit', 60000);
+      this.recordUnicornScanHistory({ scanId: input.scanId, ts: now, evaluatedCount: 0, unicornCandidates: 0, executableUnicornCandidates: 0, blockedUnicornCandidates: 0, topSymbols: [] });
+      this.recordUnicornAudit({ event: 'scan', scanId: input.scanId, decision: 'disabled', reason: 'unicorn_hunter_off' });
+      logger.info(`UNICORN_HUNTER_SCAN_AUDIT: scanId=${input.scanId} enabled=false totalEvaluated=0 unicornCandidates=0 executableUnicornCandidates=0 blockedUnicornCandidates=0 blockedReason=unicorn_hunter_off topSymbols=none`);
+      this.emitUnicornScanCycleAudit({ scanId: input.scanId, cycleStartedAt, evaluatedCount: 0, candidateCount: 0, symbolsSeen: input.candidates.length, buyAllowed: false, reasonIfSkipped: 'unicorn_hunter_off' });
+      this.emitUnicornMemoryAudit({ scanId: input.scanId, evaluatedCount: 0, retainedCandidateCount: 0, temporaryObjectsCleared: true });
+      return { executable: [], radar: [] };
+    }
+    const top = [...input.candidates]
+      .filter((c) => shouldTrackUnicornEarly({
+        candidate: c,
+        settings,
+        existing: this.unicornWatchlistBySymbol.get(c.symbol),
+      }))
+      .sort((a, b) => ((b.change24h ?? b.periodChangePct ?? 0) - (a.change24h ?? a.periodChangePct ?? 0)))
+      .slice(0, this.unicornCandidateBufferMax);
+    logger.info(`UNICORN_UNIVERSE_REFRESH_AUDIT enabled=true mode=${settings.mode} sourceCandidates=${input.candidates.length} candidateCount=${top.length} min24hChangePct=${settings.min24hChangePct} min5mChangePct=${settings.min5mChangePct}`);
+    logger.info(`UNICORN_RADAR_REFRESH_AUDIT scanId=${input.scanId} sourceCandidates=${input.candidates.length} trackedCandidates=${top.length} internalWatchlistBefore=${this.unicornWatchlistBySymbol.size} earlyThresholds=m5>=0.5|m15>=1|h1>=1.5|growthSinceFirstSeen>=1.5 displayProjectionOnly=true`);
+    const tickerRows = top.length > 0 ? await this.publicClient.get24hTickers(top.map(c => c.symbol)).catch(() => []) : [];
+    const tickerBySymbol = new Map<string, any>();
+    for (const t of tickerRows as any[]) tickerBySymbol.set(String(t.symbol), t);
+    const executable: ScannerCandidate[] = [];
+    const openSourceRows = this.executionOpenPositionSourcesFn?.() ?? [];
+    const isUnicornOwnedPosition = (p: { source?: string | null; ownerName?: string | null }) =>
+      String(p.source ?? '').toLowerCase() === 'unicorn_hunter'
+      || String(p.ownerName ?? '').toLowerCase() === 'unicorn hunter'
+      || String(p.ownerName ?? '').toUpperCase() === 'UNICORN_HUNTER';
+    const openUnicornPositions = openSourceRows.length > 0
+      ? openSourceRows.filter(isUnicornOwnedPosition).length
+      : input.openSymbols.filter((symbol) => input.candidates.some(c => c.symbol === symbol && (c as any).source === 'unicorn_hunter')).length;
+    const openAutoBotsPositions = openSourceRows.filter((p) => /autobots|auto bots/i.test(`${p.source ?? ''} ${p.ownerName ?? ''}`)).length;
+    const openMlPredictPositions = openSourceRows.filter((p) => /ml_predict|ml predict/i.test(`${p.source ?? ''} ${p.ownerName ?? ''}`)).length;
+    const openManualPositions = openSourceRows.filter((p) => /manual/i.test(`${p.source ?? ''} ${p.ownerName ?? ''}`)).length;
+    const globalOpenPositionsCount = input.openSymbols.length;
+    const globalMaxPositions = this.executionMaxPositions;
+    const globalMaxReached = globalOpenPositionsCount >= globalMaxPositions;
+    const capitalAvailable = Math.max(0, this.executionCapital - input.usedCapital);
+    const unicornCapital = Math.max(1, this.executionCapital * (settings.capitalPctPerTrade / 100));
+    const existingSymbols = new Set([...input.openSymbols, ...input.pendingSymbols]);
+    const seenSymbols = new Set<string>();
+    let totalEvaluated = 0;
+    let unicornCandidates = 0;
+    let strongUnicornCount = 0;
+    let executableUnicornCount = 0;
+    let blockedCount = 0;
+    let blockedDuplicateCount = 0;
+    let blockedScoreTooLowCount = 0;
+    let blockedAntiAthCount = 0;
+    let blockedUnicornMaxPositionsCount = 0;
+    let blockedDailyTradeLimitCount = 0;
+    let blockedEntryGateCount = 0;
+    let blockedGlobalRiskCount = 0;
+    let lastUnicornBlockReason = 'none';
+    const topSymbols: string[] = [];
+    const trackUnicornBlockReason = (reason: string) => {
+      const canonical = this.normalizeUnicornBlockedReason(reason);
+      lastUnicornBlockReason = canonical;
+      if (canonical === 'UNICORN_BLOCK_DUPLICATE_POSITION') blockedDuplicateCount += 1;
+      else if (canonical === 'UNICORN_BLOCK_WAITING_CONFIRMATION') blockedScoreTooLowCount += 1;
+      else if (canonical === 'UNICORN_BLOCK_OPEN_POSITION_LIMIT' || canonical === 'UNICORN_MAX_OPEN_POSITIONS_REACHED' || canonical === 'GLOBAL_MAX_OPEN_POSITIONS_REACHED') blockedUnicornMaxPositionsCount += 1;
+      else if (canonical === 'UNICORN_BLOCK_GROUP_LIMIT') blockedEntryGateCount += 1;
+      else if (canonical === 'UNICORN_BLOCK_MAX_NEW_BUYS_PER_CYCLE_REACHED' || canonical === 'UNICORN_MAX_BUYS_PER_CYCLE_REACHED') blockedEntryGateCount += 1;
+      else if (canonical === 'UNICORN_BLOCK_NO_EXECUTABLE_CANDIDATE') blockedEntryGateCount += 1;
+      else if (canonical === 'UNICORN_BLOCK_RISK') {
+        blockedAntiAthCount += 1;
+        blockedGlobalRiskCount += 1;
+      }
+      return canonical;
+    };
+    for (const [candidateIndex, c] of top.entries()) {
+      totalEvaluated += 1;
+      const existingWatch = this.unicornWatchlistBySymbol.get(c.symbol);
+      if (existingWatch?.cooldownUntil && existingWatch.cooldownUntil > now) {
+        const canonicalBlock = trackUnicornBlockReason('unicorn_watchlist_cooldown');
+        logger.info(`UNICORN_BUY_BLOCKED symbol=${c.symbol} reason=unicorn_watchlist_cooldown cooldownUntil=${new Date(existingWatch.cooldownUntil).toISOString()} action=WAIT_COOLDOWN`);
+        blockedCount += 1;
+        this.recordUnicornAudit({ event: 'candidate', scanId: input.scanId, symbol: c.symbol, decision: 'blocked', reason: canonicalBlock });
+        if (this.shouldEmitUnicornCandidateAudit(candidateIndex)) logger.info(`UNICORN_HUNTER_CANDIDATE_AUDIT: symbol=${c.symbol} unicornScore=0 pattern=cooldown volumeSpike=false breakoutPressure=0 liquidityOk=false priceFresh=${String((c.priceFresh ?? true) !== false)} bookFresh=${String(c.bookFresh !== false)} spreadOk=${String((c.spreadPct ?? 999) <= settings.maxSpreadPct)} duplicateOpenPosition=${String(existingSymbols.has(c.symbol))} finalUnicornDecision=blocked blockedReason=${canonicalBlock}`);
+        continue;
+      }
+      const ticker = tickerBySymbol.get(c.symbol);
+      const high24h = Number(ticker?.highPrice ?? 0);
+      const low24h = Number(ticker?.lowPrice ?? 0);
+      const last = Number(ticker?.lastPrice ?? c.price ?? 0);
+      const quoteVolume = Number(ticker?.quoteVolume ?? (c.volumeRel ?? 0) * settings.minQuoteVolume);
+      const change24hPct = Number(ticker?.priceChangePercent ?? c.change24h ?? c.periodChangePct ?? 0);
+      const pullbackPct = high24h > 0 && last > 0 ? ((high24h - last) / high24h) * 100 : Math.max(0, Math.abs(c.dipPercent ?? 0));
+      const reboundPct = low24h > 0 && last > low24h ? ((last - low24h) / low24h) * 100 : Math.max(0, c.reboundPercent ?? 0);
+      const distanceToHighPct = high24h > 0 && last > 0 ? ((high24h - last) / high24h) * 100 : 999;
+      const volumeExpansion = Math.max(1, c.volumeRel ?? 1);
+      const eligibility = isUnicornEligibleSymbol(c.symbol, {
+        status: c.isTradable === false ? 'BLOCKED' : 'TRADING',
+        baseAsset: undefined,
+        quoteAsset: c.symbol.endsWith('USDC') ? 'USDC' : c.symbol.endsWith('FDUSD') ? 'FDUSD' : 'USDT',
+        isSpotTradingAllowed: c.isTradable !== false,
+        quoteVolume,
+        spreadPct: c.spreadPct,
+        recentlyClosed: this.isRecentlyClosedSymbolInCooldown(c.symbol),
+        existingPosition: existingSymbols.has(c.symbol),
+        failedBreakoutCooldown: false,
+      }, settings);
+      const metrics = {
+        ...eligibility.metrics,
+        change24hPct,
+        change5mPct: c.m5Change,
+        change15mPct: c.m15Change,
+        change1hPct: c.h1Change ?? c.periodChangePct ?? 0,
+        quoteVolume,
+        spreadPct: c.spreadPct,
+        distanceToHighPct,
+        pullbackPct,
+        reboundPct,
+        volumeExpansion,
+        price: last,
+        high24h,
+      };
+      logger.info(`UNICORN_CANDIDATE_FILTER_AUDIT symbol=${c.symbol} eligible=${String(eligibility.eligible)} reason=${eligibility.reasonCode} change24hPct=${change24hPct.toFixed(2)} change5mPct=${(c.m5Change ?? 0).toFixed(2)} quoteVolume=${quoteVolume.toFixed(2)} spreadPct=${(c.spreadPct ?? 0).toFixed(3)} distanceToHighPct=${distanceToHighPct.toFixed(2)} pullbackPct=${pullbackPct.toFixed(2)} reboundPct=${reboundPct.toFixed(2)}`);
+      if (!eligibility.eligible) {
+        const canonicalBlock = trackUnicornBlockReason(eligibility.reasonCode);
+        blockedCount += 1;
+        this.recordUnicornAudit({ event: 'candidate', scanId: input.scanId, symbol: c.symbol, decision: 'blocked', reason: canonicalBlock });
+        if (this.shouldEmitUnicornCandidateAudit(candidateIndex)) logger.info(`UNICORN_HUNTER_CANDIDATE_AUDIT: symbol=${c.symbol} unicornScore=0 pattern=ineligible volumeSpike=${String(volumeExpansion >= 2)} breakoutPressure=${change24hPct.toFixed(2)} liquidityOk=${String(quoteVolume >= settings.minQuoteVolume)} priceFresh=${String((c.priceFresh ?? true) !== false)} bookFresh=${String(c.bookFresh !== false)} spreadOk=${String((c.spreadPct ?? 999) <= settings.maxSpreadPct)} duplicateOpenPosition=${String(existingSymbols.has(c.symbol))} finalUnicornDecision=blocked blockedReason=${canonicalBlock}`);
+        const previousWatch = this.unicornWatchlistBySymbol.get(c.symbol);
+        const blockedWatchState = createOrUpdateUnicornWatchState({
+          previous: previousWatch,
+          symbol: c.symbol,
+          now,
+          price: last,
+          metrics,
+          score: { symbol: c.symbol, score: 0, action: 'block', reasons: [eligibility.reasonCode], metrics },
+          reasonCode: eligibility.reasonCode,
+          settings,
+          finalGateReady: false,
+          dangerous: true,
+        });
+        this.setUnicornDecisionState(c.symbol, blockedWatchState);
+        if (blockedWatchState.stage !== previousWatch?.stage) {
+          logger.info(`UNICORN_CANDIDATE_LIFECYCLE_AUDIT symbol=${c.symbol} previousStage=${previousWatch?.stage ?? 'NEW'} nextStage=${blockedWatchState.stage} reason=${eligibility.reasonCode} firstSeenPrice=${blockedWatchState.firstSeenPrice} lastPrice=${blockedWatchState.lastPrice} growthSinceFirstSeenPct=${blockedWatchState.growthSinceFirstSeenPct.toFixed(2)} pullbackFromHighPct=${blockedWatchState.pullbackFromHighPct.toFixed(2)} reboundFromLocalLowPct=${blockedWatchState.reboundFromLocalLowPct.toFixed(2)} bestScoreSeen=${blockedWatchState.bestScoreSeen} currentScore=${blockedWatchState.currentScore}`);
+        }
+        continue;
+      }
+      const score = scoreUnicornCandidate({ symbol: c.symbol, settings, metrics });
+      unicornCandidates += 1;
+      if (score.score >= settings.minUnicornScore) strongUnicornCount += 1;
+      topSymbols.push(`${c.symbol}:${score.score}`);
+      logger.info(`UNICORN_SCORE_AUDIT symbol=${c.symbol} score=${score.score} action=${score.action} reasons=${score.reasons.join('|') || 'none'} change24hPct=${change24hPct.toFixed(2)} pullbackPct=${pullbackPct.toFixed(2)} reboundPct=${reboundPct.toFixed(2)} distanceToHighPct=${distanceToHighPct.toFixed(2)}`);
+      const gate = evaluateUnicornEntryGate({
+        settings,
+        score,
+        openUnicornPositions,
+        unicornTradesToday: this.unicornTradesToday,
+        duplicateSymbol: seenSymbols.has(c.symbol) || existingSymbols.has(c.symbol),
+        capitalOk: capitalAvailable >= unicornCapital,
+        autoBotsOn: this.paperAutoEnabled,
+      });
+      const dp = gate.dp ?? resolveUnicornDpConfirmation(settings, metrics);
+      const dpFields = `dipObserved=${String(dp.dipObserved)} dipPct=${dp.dipPct.toFixed(2)} requiredDipPct=${dp.requiredDipPct} reboundObserved=${String(dp.reboundObserved)} reboundPct=${dp.reboundPct.toFixed(2)} requiredReboundPct=${dp.requiredReboundPct} dpConfirmed=${String(dp.dpConfirmed)} dpReason=${dp.dpReason}`;
+      logger.info(`UNICORN_ENTRY_GATE_AUDIT symbol=${c.symbol} decision=${gate.decision} reason=${gate.reasonCode} score=${score.score} mode=${settings.mode} capitalOk=${String(capitalAvailable >= unicornCapital)} openUnicornPositions=${openUnicornPositions} unicornTradesToday=${this.unicornTradesToday}`);
+      logger.info(`UNICORN_DP_CONFIRMATION_AUDIT: symbol=${c.symbol} scanId=${input.scanId} source=unicorn_hunter blockerSource=UnicornRadar score=${score.score} scoreReady=${String(score.score >= settings.minUnicornScore)} dpRequired=${String(settings.requirePullbackRebound)} ${dpFields} canonicalNoBuyReason=${dp.dpConfirmed ? 'none' : 'UNICORN_BLOCK_WAITING_CONFIRMATION'} finalNoBuyReason=${dp.dpConfirmed ? 'none' : 'UNICORN_BLOCK_WAITING_CONFIRMATION'}`);
+      logger.info(`UNICORN_CANDIDATE_NORMALIZED_AUDIT: symbol=${c.symbol} scanId=${input.scanId} source=unicorn_hunter owner=UnicornHunter candidateSource=unicorn_hunter strategySource=unicorn_hunter executionSource=unicorn_hunter score=${score.score} scoreReady=${String(score.score >= settings.minUnicornScore)} rawAction=${score.action} entryGateDecision=${gate.decision} entryGateReason=${gate.reasonCode} normalizedNoBuyReason=${dp.dpConfirmed ? 'none' : 'UNICORN_BLOCK_WAITING_CONFIRMATION'} blockerSource=${dp.dpConfirmed ? 'UnicornRadar' : 'UnicornRadar'} ${dpFields}`);
+      logger.info(`UNICORN_SCORE_BREAKDOWN_AUDIT symbol=${c.symbol} score=${score.score} bestPreviousScore=${this.unicornWatchlistBySymbol.get(c.symbol)?.bestScoreSeen ?? 0} change24hPct=${change24hPct.toFixed(2)} change5mPct=${(c.m5Change ?? 0).toFixed(2)} change15mPct=${(c.m15Change ?? 0).toFixed(2)} change1hPct=${(c.h1Change ?? c.periodChangePct ?? 0).toFixed(2)} volumeExpansion=${volumeExpansion.toFixed(2)} quoteVolume=${quoteVolume.toFixed(2)} spreadPct=${(c.spreadPct ?? 0).toFixed(3)} pullbackPct=${pullbackPct.toFixed(2)} reboundPct=${reboundPct.toFixed(2)} distanceToHighPct=${distanceToHighPct.toFixed(2)} reasons=${score.reasons.join('|') || 'none'}`);
+      const dangerous = gate.reasonCode === 'unicorn_block_ath_risk'
+        || (c.blockReasons ?? []).some((reason) => /overextended|candle/i.test(String(reason)));
+      const previousWatch = this.unicornWatchlistBySymbol.get(c.symbol);
+      const entryGateDecision = c.entryGateDecision ?? null;
+      const entryGateAllowed = entryGateDecision?.decision === 'ALLOW';
+      const entryGateBlocker = entryGateDecision?.primaryReason
+        ?? entryGateDecision?.blockReasons?.[0]
+        ?? (entryGateDecision ? 'ENTRY_GATE_BLOCKED' : 'ENTRY_GATE_NOT_EVALUATED');
+      const priceAndBookFresh = (c.priceFresh ?? true) !== false && c.bookFresh !== false;
+      const overextensionBlocked = (c.blockReasons ?? []).some((reason) => /overextended|candle/i.test(String(reason)));
+      const unicornGateReady = gate.decision === 'ready' && score.score >= settings.minUnicornScore;
+      const scoreTooLow = score.score < settings.minUnicornScore;
+      const finalGateReady = unicornGateReady
+        && entryGateAllowed
+        && priceAndBookFresh
+        && !overextensionBlocked;
+      const executionBlocker = !entryGateAllowed
+        ? entryGateBlocker
+        : scoreTooLow
+          ? 'UNICORN_SCORE_TOO_LOW'
+        : !priceAndBookFresh
+          ? (c.bookFresh === false ? 'BLOCK_BOOK_STALE' : 'BLOCK_PRICE_STALE')
+          : overextensionBlocked
+            ? ((c.blockReasons ?? []).find((reason) => /overextended|candle/i.test(String(reason))) ?? 'BLOCK_OVEREXTENDED')
+            : gate.reasonCode;
+      const duplicateOpenPosition = seenSymbols.has(c.symbol) || existingSymbols.has(c.symbol);
+      const maxUnicornPositionsOk = openUnicornPositions < settings.maxOpenUnicornPositions;
+      const maxOpenPositionsOk = !globalMaxReached;
+      const capitalOk = capitalAvailable >= unicornCapital;
+      const spreadOk = (c.spreadPct ?? 999) <= settings.maxSpreadPct;
+      const tpRoomOk = c.tpRoomOk !== false;
+      const priceFresh = (c.priceFresh ?? true) !== false;
+      const blockerSource = finalGateReady
+        ? 'UnicornRadar'
+        : duplicateOpenPosition
+          ? 'PositionManager'
+          : !maxUnicornPositionsOk || !maxOpenPositionsOk || !capitalOk
+            ? 'RiskGuard'
+            : !entryGateAllowed || !spreadOk || !tpRoomOk || !priceFresh
+              ? 'EntryGate'
+              : !dp.dpConfirmed
+                ? 'UnicornRadar'
+                : 'UnicornRadar';
+      let watchState = createOrUpdateUnicornWatchState({
+        previous: previousWatch,
+        symbol: c.symbol,
+        now,
+        price: last,
+        metrics,
+        score,
+        reasonCode: finalGateReady ? gate.reasonCode : executionBlocker,
+        settings,
+        finalGateReady,
+        dangerous,
+      });
+      if (unicornGateReady && !finalGateReady && watchState.stage !== 'DANGEROUS') {
+        const blockerUpper = String(executionBlocker).toUpperCase();
+        const readyBlocked = blockerUpper.startsWith('BLOCK_') || blockerUpper.includes('DUPLICATE') || blockerUpper.includes('LIMIT');
+        const explicitStage = this.unicornStageForBlockReason(executionBlocker);
+        watchState = {
+          ...watchState,
+          stage: explicitStage === 'READY_BLOCKED' ? (readyBlocked ? 'READY_BLOCKED' : 'RADAR_READY') : explicitStage,
+          stageChangedAt: previousWatch?.stage === (explicitStage === 'READY_BLOCKED' ? (readyBlocked ? 'READY_BLOCKED' : 'RADAR_READY') : explicitStage) ? (previousWatch.stageChangedAt ?? now) : now,
+          lastReason: executionBlocker,
+          action: readyBlocked ? 'block' : 'watch',
+        };
+      }
+      if (watchState.stage === 'DANGEROUS' && !watchState.cooldownUntil) {
+        watchState = { ...watchState, cooldownUntil: now + 2 * 60 * 60 * 1000 };
+      }
+      this.setUnicornDecisionState(c.symbol, watchState);
+      const unicornReasonFields = `symbol=${c.symbol} blockerSource=${blockerSource} radarStatus=${finalGateReady ? 'ENTRY_READY' : watchState.stage} dpConfirmed=${String(dp.dpConfirmed)} dipPct=${dp.dipPct.toFixed(2)} requiredDipPct=${dp.requiredDipPct} reboundPct=${dp.reboundPct.toFixed(2)} requiredReboundPct=${dp.requiredReboundPct} duplicateOpenPosition=${String(duplicateOpenPosition)} maxUnicornPositionsOk=${String(maxUnicornPositionsOk)} maxOpenPositionsOk=${String(maxOpenPositionsOk)} capitalOk=${String(capitalOk)} spreadOk=${String(spreadOk)} tpRoomOk=${String(tpRoomOk)} priceFresh=${String(priceFresh)}`;
+      logger.info(`UNICORN_CANDIDATE_LIFECYCLE_AUDIT symbol=${c.symbol} previousStage=${previousWatch?.stage ?? 'none'} nextStage=${watchState.stage} reason=${gate.reasonCode} firstSeenAt=${new Date(watchState.firstSeenAt).toISOString()} firstSeenPrice=${watchState.firstSeenPrice} lastPrice=${watchState.lastPrice} minPriceSinceSeen=${watchState.minPriceSinceSeen} maxPriceSinceSeen=${watchState.maxPriceSinceSeen} growthSinceFirstSeenPct=${watchState.growthSinceFirstSeenPct.toFixed(2)} pullbackFromHighPct=${watchState.pullbackFromHighPct.toFixed(2)} reboundFromLocalLowPct=${watchState.reboundFromLocalLowPct.toFixed(2)} bestScoreSeen=${watchState.bestScoreSeen} currentScore=${watchState.currentScore}`);
+      logger.info(`UNICORN_ENTRY_DECISION_AUDIT symbol=${c.symbol} decision=${gate.decision} stage=${watchState.stage} reason=${watchState.lastReason} unicornGateReady=${String(unicornGateReady)} entryGateDecision=${entryGateDecision?.decision ?? 'none'} entryGateBlocker=${entryGateAllowed ? 'none' : entryGateBlocker} score=${score.score} minScore=${settings.minUnicornScore} pullbackValid=${String(watchState.pullbackFromHighPct >= settings.minPullbackPct && watchState.pullbackFromHighPct <= settings.maxPullbackPct)} reboundValid=${String(watchState.reboundFromLocalLowPct >= settings.minReboundPct)} spreadOk=${String(spreadOk)} volumeOk=${String(quoteVolume >= settings.minQuoteVolume)} priceFresh=${String(priceFresh)} bookFresh=${String(c.bookFresh !== false)} duplicate=${String(duplicateOpenPosition)} dangerous=${String(dangerous)} autoBotsOn=${String(this.paperAutoEnabled)} capitalOk=${String(capitalOk)} buyAllowed=${String(finalGateReady)} canonicalNoBuyReason=${finalGateReady ? 'none' : this.normalizeUnicornBlockedReason(executionBlocker)} finalNoBuyReason=${finalGateReady ? 'none' : this.normalizeUnicornBlockedReason(executionBlocker)} blockerSource=${blockerSource}`);
+      const canonicalExecutionBlocker = finalGateReady ? 'none' : trackUnicornBlockReason(executionBlocker);
+      logger.info(`UNICORN_BLOCK_REASON_AUDIT: scanId=${input.scanId} symbol=${c.symbol} stage=${finalGateReady ? 'ENTRY_READY' : watchState.stage} rawReason=${finalGateReady ? 'none' : executionBlocker} canonicalReason=${canonicalExecutionBlocker} confirmationReason=${dp.dpReason} blockerSource=${blockerSource} submitAttempted=false`);
+      this.recordUnicornAudit({ event: 'candidate', scanId: input.scanId, symbol: c.symbol, decision: finalGateReady ? 'ready_for_execution' : watchState.stage, reason: canonicalExecutionBlocker });
+      if (score.score >= settings.minUnicornScore) {
+        logger.info(`UNICORN_CANDIDATE_READY_AUDIT: ${unicornReasonFields} scanId=${input.scanId} scoreReady=true executionReady=${String(finalGateReady)} displayStage=${finalGateReady ? 'READY' : watchState.stage} canonicalNoBuyReason=${canonicalExecutionBlocker} finalNoBuyReason=${canonicalExecutionBlocker} ${dpFields}`);
+      }
+      if (this.shouldEmitUnicornCandidateAudit(candidateIndex)) logger.info(`UNICORN_HUNTER_CANDIDATE_AUDIT: symbol=${c.symbol} unicornScore=${score.score} pattern=${score.reasons.slice(0, 5).join('|') || 'none'} volumeSpike=${String(volumeExpansion >= 2)} breakoutPressure=${Math.max(change24hPct, c.m5Change ?? 0, c.m15Change ?? 0).toFixed(2)} liquidityOk=${String(quoteVolume >= settings.minQuoteVolume)} priceFresh=${String((c.priceFresh ?? true) !== false)} bookFresh=${String(c.bookFresh !== false)} spreadOk=${String((c.spreadPct ?? 999) <= settings.maxSpreadPct)} duplicateOpenPosition=${String(seenSymbols.has(c.symbol) || existingSymbols.has(c.symbol))} finalUnicornDecision=${finalGateReady ? 'ready_for_execution' : watchState.stage === 'READY_WAIT' ? 'ready_wait' : watchState.stage === 'READY_BLOCKED' ? 'ready_blocked' : gate.decision} blockedReason=${canonicalExecutionBlocker}`);
+      if (gate.reasonCode === 'unicorn_block_ath_risk') {
+        logger.info(`UNICORN_ATH_GUARD_AUDIT symbol=${c.symbol} reason=unicorn_block_ath_risk price=${last} distanceToHighPct=${distanceToHighPct.toFixed(2)} maxDistanceToHighPct=${settings.maxDistanceToHighPct} pullbackPct=${pullbackPct.toFixed(2)} requiredPullbackPct=${settings.minPullbackPct} reboundPct=${reboundPct.toFixed(2)} requiredReboundPct=${settings.minReboundPct} action=WAIT_PULLBACK`);
+      }
+      logger.info(`UNICORN_PULLBACK_REBOUND_AUDIT symbol=${c.symbol} pullbackPct=${pullbackPct.toFixed(2)} minPullbackPct=${settings.minPullbackPct} maxPullbackPct=${settings.maxPullbackPct} reboundPct=${reboundPct.toFixed(2)} minReboundPct=${settings.minReboundPct} passed=${String(gate.reasonCode === 'unicorn_ready')}`);
+      if (!finalGateReady) {
+        blockedCount += 1;
+        this.recordUnicornAudit({ event: 'handoff', scanId: input.scanId, symbol: c.symbol, decision: 'not_selected', reason: canonicalExecutionBlocker });
+        const unicornAuditCandidate = {
+          ...c,
+          source: 'unicorn_hunter',
+          candidateSource: 'unicorn_hunter',
+          executionSource: 'unicorn_hunter',
+          strategySource: 'unicorn_hunter' as any,
+          autoStrategyDecision: {
+            ...(c.autoStrategyDecision ?? {}),
+            symbol: c.symbol,
+            effectiveStrategy: c.effectiveStrategy ?? c.selectedStrategy ?? 'momentum',
+            strategySource: 'UnicornHunter' as any,
+            strategySourceDetail: 'unicorn_hunter_parallel_lane' as any,
+            strategyReason: 'unicorn_hunter_entry_gate_blocked',
+            reason: 'unicorn_hunter_entry_gate_blocked',
+            groupRecommendedStrategy: c.groupRecommendedStrategy ?? c.selectedStrategy ?? 'momentum',
+            groupTrend: c.groupTrend ?? 'n/a',
+            referencePeriod: this.scannerReferencePeriod,
+            confidenceTier: 'A_80_PLUS' as any,
+            confidenceAdjustment: 0,
+            blockedByGroupRegime: false,
+            blockedBySafety: false,
+            warnings: [],
+            fallbackUsed: false,
+            fallbackReason: null,
+          },
+        } as ScannerCandidate;
+        const unicornSetupAudit = buildStrategyAuditSnapshotFromCandidate(unicornAuditCandidate);
+        const metricValue = (key: string, field: 'actualValue' | 'requiredValue' = 'actualValue') => {
+          const metric = unicornSetupAudit.setupMetrics?.find((m: any) => m.key === key) as any;
+          const value = metric?.[field];
+          return typeof value === 'number' && Number.isFinite(value) ? Number(value).toFixed(2).replace(/\.00$/, '') : String(value ?? 'n/a');
+        };
+        logger.info(`UNICORN_HUNTER_EXECUTION_HANDOFF_AUDIT: ${unicornReasonFields} enabled=${String(settings.enabled)} mode=${settings.mode.toUpperCase()} unicornScore=${score.score} minScore=${settings.minUnicornScore} source=unicorn_hunter owner=UnicornHunter candidateSource=unicorn_hunter strategySource=unicorn_hunter executionSource=unicorn_hunter selectedForExecution=false globalOpenPositionsCount=${globalOpenPositionsCount} globalMaxPositions=${globalMaxPositions} globalMaxReached=${String(globalMaxReached)} unicornOpenPositionsCount=${openUnicornPositions} unicornMaxPositions=${settings.maxOpenUnicornPositions} unicornMaxReached=${String(openUnicornPositions >= settings.maxOpenUnicornPositions)} autobotsOpenPositionsCount=${openAutoBotsPositions} mlPredictOpenPositionsCount=${openMlPredictPositions} manualOpenPositionsCount=${openManualPositions} tradesToday=${this.unicornTradesToday} maxTradesPerDay=${settings.maxUnicornTradesPerDay} dailyTradeLimitReached=${String(this.unicornTradesToday >= settings.maxUnicornTradesPerDay)} antiAthBlocked=${String(gate.reasonCode === 'unicorn_block_ath_risk')} entryGatePassed=${String(entryGateAllowed)} finalExecutable=false submitAttempted=false canonicalNoBuyReason=${canonicalExecutionBlocker} blockedReason=${canonicalExecutionBlocker} ${dpFields} actualDipPct=${metricValue('actualDipPct')} requiredDipPct=${metricValue('requiredDipPct', 'requiredValue')} actualReboundPct=${metricValue('actualReboundPct')} requiredReboundPct=${metricValue('requiredReboundPct', 'requiredValue')}`);
+        logger.info(`UNICORN_BUY_BLOCKED symbol=${c.symbol} reason=${canonicalExecutionBlocker} unicornGateReady=${String(unicornGateReady)} entryGateDecision=${entryGateDecision?.decision ?? 'none'} price=${last} distanceToHighPct=${distanceToHighPct.toFixed(2)} pullbackPct=${pullbackPct.toFixed(2)} requiredPullbackPct=${settings.minPullbackPct} reboundPct=${reboundPct.toFixed(2)} requiredReboundPct=${settings.minReboundPct} ${dpFields} action=${watchState.stage}`);
+        logger.info(`UNICORN_BUY_BLOCKED_AUDIT: ${unicornReasonFields} scanId=${input.scanId} source=unicorn_hunter owner=UnicornHunter selectedForExecution=false finalExecutable=false buyAllowed=false canonicalNoBuyReason=${canonicalExecutionBlocker} blockedReason=${canonicalExecutionBlocker} finalNoBuyReasonCode=${canonicalExecutionBlocker} finalNoBuyReasonLabel=${canonicalExecutionBlocker} finalNoBuyReason=${canonicalExecutionBlocker} missingFields=none entryGateDecision=${entryGateDecision?.decision ?? 'none'} entryGateBlocker=${entryGateAllowed ? 'none' : entryGateBlocker} ${dpFields}`);
+        continue;
+      }
+      executableUnicornCount += 1;
+      seenSymbols.add(c.symbol);
+      const cloned: ScannerCandidate = {
+        ...c,
+        candidateId: `${c.candidateId}_unicorn`,
+        riskGroup: 'very_high_risk',
+        selectedStrategy: 'momentum',
+        effectiveStrategy: 'momentum',
+        finalExecutionStrategy: 'momentum',
+        strategyAtEntry: 'momentum',
+        strategySource: 'unicorn_hunter' as any,
+        strategySourceDetail: 'unicorn_hunter_parallel_lane' as any,
+        strategyReason: 'unicorn_hunter_ready',
+        autoStrategyDecision: {
+          symbol: c.symbol,
+          effectiveStrategy: 'momentum',
+          strategySource: 'UnicornHunter' as any,
+          strategySourceDetail: 'unicorn_hunter_parallel_lane' as any,
+          strategyReason: 'unicorn_hunter_ready',
+          reason: 'unicorn_hunter_ready',
+          groupRecommendedStrategy: 'momentum',
+          groupTrend: c.groupTrend ?? 'n/a',
+          referencePeriod: this.scannerReferencePeriod,
+          confidenceTier: 'A_80_PLUS' as any,
+          confidenceAdjustment: 0,
+          blockedByGroupRegime: false,
+          blockedBySafety: false,
+          warnings: [],
+          marketAnalyzerBestFit: 'momentum',
+          perCoinSelectedStrategy: null,
+          fallbackUsed: false,
+          fallbackReason: null,
+        },
+        confidence: Math.max(c.confidence, score.score / 100),
+        rawScore: Math.max(c.rawScore ?? 0, score.score),
+        candidateSource: 'unicorn_hunter',
+        executionSource: 'unicorn_hunter',
+        mainReason: 'UNICORN READY - execution intent',
+        requiredNextActions: [],
+        blockReasons: [],
+        reboundConfirmed: true,
+        momentumConfirmed: true,
+        status: 'BUY',
+        lifecycleStatus: 'BUY_READY',
+        finalExecutable: true,
+        buyAllowed: true,
+      };
+      (cloned as any).source = 'unicorn_hunter';
+      (cloned as any).ownerType = 'unicorn';
+      (cloned as any).ownerName = 'UNICORN_HUNTER';
+      (cloned as any).sourceOwner = 'UnicornHunter';
+      (cloned as any).sourceLabel = 'Unicorn Hunter';
+      (cloned as any).sourcePresentation = '🦄 Unicorn Hunter';
+      (cloned as any).executionOwner = 'UnicornHunter';
+      (cloned as any).positionOwner = 'UnicornHunter';
+      (cloned as any).unicornScore = score.score;
+      (cloned as any).unicornMetrics = metrics;
+      (cloned as any).unicornDp = dp;
+      (cloned as any).capitalAllocation = unicornCapital;
+      if (cloned.traderBrainDecision?.entryPlan) {
+        const unicornEntryPlan = cloned.traderBrainDecision.entryPlan;
+        cloned.traderBrainDecision = {
+          ...cloned.traderBrainDecision,
+          selectedStrategy: 'momentum',
+          confidence: Math.max(cloned.traderBrainDecision.confidence ?? 0, score.score / 100),
+          reasons: ['unicorn_ready', ...score.reasons],
+          blockReasons: [],
+        };
+        cloned.entryPlan = {
+          side: unicornEntryPlan.side,
+          price: unicornEntryPlan.price,
+          quantity: unicornEntryPlan.quantity,
+          reason: 'unicorn_hunter_ready',
+        };
+      }
+      if (!cloned.entryPlan) {
+        cloned.entryPlan = {
+          side: 'BUY',
+          price: last,
+          quantity: unicornCapital > 0 && last > 0 ? unicornCapital / last : 0,
+          reason: 'unicorn_hunter_ready',
+        };
+      }
+      (cloned as any).livePrice = last;
+      (cloned as any).refPrice = (c as any).refPrice ?? c.price ?? last;
+      (cloned as any).usedCapital = cloned.entryPlan.price * cloned.entryPlan.quantity;
+      (cloned as any).quantity = cloned.entryPlan.quantity;
+      cloned.priceFresh = cloned.priceFresh ?? true;
+      cloned.bookFresh = cloned.bookFresh ?? true;
+      cloned.tpRoomOk = cloned.tpRoomOk ?? true;
+      cloned.traderBrainDecision = {
+        ...(cloned.traderBrainDecision ?? {} as any),
+        symbol: c.symbol,
+        mode: 'AUTO',
+        selectedStrategy: 'momentum',
+        selectedPlaybook: 'unicorn_hunter_entry',
+        confidence: Math.max(cloned.confidence, score.score / 100),
+        status: 'BUY',
+        entryPlan: cloned.entryPlan,
+        reasons: ['unicorn_ready', ...score.reasons],
+        blockReasons: [],
+        warnings: [],
+        requiredNextActions: [],
+        ruleDecisionTrace: {
+          ...((cloned.traderBrainDecision as any)?.ruleDecisionTrace ?? {}),
+          unifiedSignal: { reasonCode: 'UNICORN_HUNTER_READY', definition: { buyRule: 'momentum' } },
+        },
+      } as any;
+      (cloned as any).source = 'unicorn_hunter';
+      (cloned as any).ownerType = 'unicorn';
+      (cloned as any).ownerName = 'UNICORN_HUNTER';
+      (cloned as any).sourceOwner = 'UnicornHunter';
+      (cloned as any).sourceLabel = 'Unicorn Hunter';
+      (cloned as any).sourcePresentation = '🦄 Unicorn Hunter';
+      (cloned as any).executionOwner = 'UnicornHunter';
+      (cloned as any).positionOwner = 'UnicornHunter';
+      (cloned as any).setupValidatorUsed = 'momentum';
+      (cloned as any).finalEntryRule = 'UNICORN_HUNTER_READY';
+      (cloned as any).entryRule = 'UNICORN_HUNTER_READY';
+      (cloned as any).strategyAtEntry = 'momentum';
+      cloned.finalExecutionStrategy = 'momentum';
+      cloned.selectedStrategy = 'momentum';
+      cloned.effectiveStrategy = 'momentum';
+      (cloned as any).refPeriod = this.scannerReferencePeriod;
+      cloned.referencePeriod = this.scannerReferencePeriod;
+      cloned.marketBestFit = 'momentum';
+      cloned.groupRecommendedStrategy = 'momentum';
+      cloned.perCoinSelectedStrategy = 'momentum';
+      cloned.overrideApplied = true;
+      cloned.overrideReason = 'unicorn_hunter_parallel_lane';
+      (cloned as any).mismatchAllowed = true;
+      (cloned as any).mismatchReason = 'unicorn_hunter_parallel_lane';
+      cloned.runtimeSnapshot = buildCandidateRuntimeSnapshot({
+        scanId: input.scanId,
+        runtimeState: this.getCanonicalAutoExecutionState('paper_simulated'),
+        candidate: cloned,
+        sourceOwner: 'UnicornHunter',
+      });
+      const unicornStrategyResolution = {
+        symbol: c.symbol,
+        riskGroup: 'very_high_risk',
+        groupTrend: c.groupTrend ?? 'bullish',
+        groupRecommendedStrategy: 'momentum',
+        groupConfidence: score.score / 100,
+        marketBestFit: 'momentum',
+        userSelectedRuntimeStrategy: 'momentum',
+        dynamicPerCoinStrategy: true,
+        perCoinSelectedStrategy: 'momentum',
+        finalExecutionStrategy: 'momentum',
+        strategySourceResolved: 'UNICORN_HUNTER',
+        fallbackApplied: false,
+        fallbackType: 'NONE',
+        fallbackReason: null,
+        overrideApplied: true,
+        overrideReason: 'unicorn_hunter_parallel_lane',
+        mismatchAllowed: true,
+        mismatchReason: 'unicorn_hunter_parallel_lane',
+        routerPath: 'unicorn_hunter_parallel_lane',
+        strategyDecisionTrace: ['source=unicorn_hunter', 'sharedPipeline=ExecutionPlanner', 'finalExecutionStrategy=momentum'],
+        evaluatedStrategies: [],
+        selectedStrategy: 'momentum',
+        selectionReason: 'unicorn_hunter_ready',
+        noValidStrategyReason: null,
+        noValidStrategyTrace: [],
+        fallbackCanSubmitBuy: true,
+        fallbackSubmitGuardReason: 'unicorn_hunter_ready',
+      } as any;
+      cloned.strategyDecision = buildCandidateStrategyDecisionSnapshot({
+        scanId: input.scanId,
+        candidate: cloned,
+        resolution: unicornStrategyResolution,
+      });
+      const unicornSetupAudit = buildStrategyAuditSnapshotFromCandidate(cloned);
+      (cloned as any).strategyAuditSnapshot = unicornSetupAudit;
+      cloned.finalExecutionStrategy = unicornSetupAudit.finalExecutionStrategy ?? 'momentum';
+      cloned.selectedStrategy = unicornSetupAudit.strategySelected ?? 'momentum';
+      cloned.effectiveStrategy = unicornSetupAudit.finalExecutionStrategy ?? unicornSetupAudit.strategySelected ?? 'momentum';
+      (cloned as any).setupValidatorUsed = unicornSetupAudit.strategySelected ?? 'momentum';
+      (cloned as any).setupResult = unicornSetupAudit.setupResult;
+      (cloned as any).finalEntryRule = unicornSetupAudit.finalEntryRule ?? 'UNICORN_HUNTER_READY';
+      (cloned as any).entryRule = unicornSetupAudit.finalEntryRule ?? 'UNICORN_HUNTER_READY';
+      cloned.executionPrecheckSnapshot = buildCandidateExecutionPrecheckSnapshot({
+        candidate: cloned,
+        priceFresh: (cloned.priceFresh ?? true) !== false,
+        bookFresh: cloned.bookFresh !== false,
+        spreadOk: (cloned.spreadPct ?? 999) <= settings.maxSpreadPct,
+        tpRoomOk: cloned.tpRoomOk !== false,
+        riskGroupResolved: Boolean(cloned.riskGroup),
+        professionalGateResolved: unicornSetupAudit.professionalGateMode != null,
+        entryContractResolved: unicornSetupAudit.strategyContractValid != null,
+        entryContractValid: unicornSetupAudit.strategyContractValid !== false && unicornSetupAudit.finalExecutable !== false,
+        capitalAvailable: capitalAvailable >= unicornCapital,
+        duplicateChecked: true,
+        pendingOrderChecked: true,
+      });
+      cloned.tradingTargetOwnership = resolveTradingTargetOwnership(cloned, {
+        strategySource: 'unicorn_hunter',
+        manualTp1Pct: 1.5,
+        manualTp2Pct: 0,
+        stopLossPct: 1.5,
+        dynamicTrailingEnabled: false,
+        trailPullbackPct: 0.25,
+        isScannerAutoTrade: true,
+      });
+      cloned.finalExecutable = unicornSetupAudit.finalExecutable && cloned.executionPrecheckSnapshot.invariantOk;
+      cloned.buyAllowed = unicornSetupAudit.buyAllowed && cloned.executionPrecheckSnapshot.invariantOk;
+      cloned.finalNoBuyReason = cloned.finalExecutable && cloned.buyAllowed
+        ? undefined
+        : (unicornSetupAudit.finalNoBuyReason ?? unicornSetupAudit.actionableNoBuyReason ?? unicornSetupAudit.finalBlocker ?? cloned.executionPrecheckSnapshot.failureReason ?? 'STRATEGY_HANDOFF_INTEGRITY_FAILED');
+      cloned.primaryBlocker = cloned.finalExecutable && cloned.buyAllowed
+        ? undefined
+        : (cloned.finalNoBuyReason ?? 'STRATEGY_HANDOFF_INTEGRITY_FAILED');
+      cloned.blockReasons = cloned.finalExecutable && cloned.buyAllowed ? [] : [cloned.primaryBlocker ?? 'STRATEGY_HANDOFF_INTEGRITY_FAILED'];
+      const requiredUnicornFields: Array<[string, unknown]> = [
+        ['symbol', cloned.symbol],
+        ['source', (cloned as any).source],
+        ['sourceOwner', (cloned as any).sourceOwner],
+        ['ownerType', (cloned as any).ownerType],
+        ['ownerName', (cloned as any).ownerName],
+        ['sourceLabel', (cloned as any).sourceLabel],
+        ['sourcePresentation', (cloned as any).sourcePresentation],
+        ['candidateSource', (cloned as any).candidateSource],
+        ['executionOwner', (cloned as any).executionOwner],
+        ['positionOwner', (cloned as any).positionOwner],
+        ['strategySource', cloned.strategySource],
+        ['executionSource', (cloned as any).executionSource],
+        ['selectedStrategy', cloned.selectedStrategy],
+        ['finalExecutionStrategy', cloned.finalExecutionStrategy],
+        ['strategyAtEntry', (cloned as any).strategyAtEntry],
+        ['setupValidatorUsed', (cloned as any).setupValidatorUsed],
+        ['entryRule', (cloned as any).entryRule],
+        ['score', (cloned as any).unicornScore],
+        ['confidence', cloned.confidence],
+        ['riskGroup', cloned.riskGroup],
+        ['price', cloned.price],
+        ['livePrice', (cloned as any).livePrice],
+        ['refPrice', (cloned as any).refPrice],
+        ['spreadPct', cloned.spreadPct],
+        ['tpRoomOk', cloned.tpRoomOk],
+        ['priceFresh', cloned.priceFresh],
+        ['bookFresh', cloned.bookFresh],
+        ['refPeriod', cloned.referencePeriod],
+        ['quantity', (cloned as any).quantity],
+        ['usedCapital', (cloned as any).usedCapital],
+        ['runtimeSnapshot', cloned.runtimeSnapshot],
+        ['runtimeSnapshot.sourceOwner', cloned.runtimeSnapshot?.sourceOwner],
+        ['strategyDecision', cloned.strategyDecision],
+        ['executionPrecheckSnapshot', cloned.executionPrecheckSnapshot],
+        ['entryPlan', cloned.entryPlan],
+      ];
+      const missingFields = requiredUnicornFields
+        .filter(([, value]) => value == null || value === '' || (typeof value === 'number' && !Number.isFinite(value)))
+        .map(([field]) => field);
+      const handoffInvariantOk = missingFields.length === 0 && cloned.finalExecutable === true && cloned.buyAllowed === true;
+      logger.info(`UNICORN_CANDIDATE_READY_AUDIT: symbol=${cloned.symbol} scanId=${input.scanId} blockerSource=UnicornRadar radarStatus=ENTRY_READY dpConfirmed=${String(dp.dpConfirmed)} dipPct=${dp.dipPct.toFixed(2)} requiredDipPct=${dp.requiredDipPct} reboundPct=${dp.reboundPct.toFixed(2)} requiredReboundPct=${dp.requiredReboundPct} duplicateOpenPosition=false maxUnicornPositionsOk=${String(openUnicornPositions < settings.maxOpenUnicornPositions)} maxOpenPositionsOk=${String(!globalMaxReached)} capitalOk=${String(capitalAvailable >= unicornCapital)} spreadOk=${String((cloned.spreadPct ?? 999) <= settings.maxSpreadPct)} tpRoomOk=${String(cloned.tpRoomOk !== false)} priceFresh=${String((cloned.priceFresh ?? true) !== false)} canonicalNoBuyReason=${cloned.finalNoBuyReason ?? 'none'} finalNoBuyReason=${cloned.finalNoBuyReason ?? 'none'} score=${score.score} confidence=${cloned.confidence} status=${cloned.status} lifecycleStatus=${cloned.lifecycleStatus ?? 'BUY_READY'} source=unicorn_hunter owner=UNICORN_HUNTER selectedStrategy=${cloned.selectedStrategy} finalExecutionStrategy=${cloned.finalExecutionStrategy} setupValidatorUsed=${(cloned as any).setupValidatorUsed} entryRule=${(cloned as any).entryRule} riskGroup=${cloned.riskGroup} refPeriod=${cloned.referencePeriod} buyAllowed=${String(cloned.buyAllowed)} finalExecutable=${String(cloned.finalExecutable)} noBuyReason=${cloned.finalNoBuyReason ?? 'none'} ${dpFields}`);
+      logger.info(`UNICORN_HANDOFF_REQUEST_AUDIT: symbol=${cloned.symbol} scanId=${input.scanId} source=unicorn_hunter owner=UnicornHunter candidateSource=unicorn_hunter strategySource=unicorn_hunter executionSource=unicorn_hunter sharedPipeline=ExecutionPlanner entryGateDecision=${cloned.entryGateDecision?.decision ?? 'none'} entryPlanPresent=${String(!!cloned.entryPlan)} score=${score.score} capital=${unicornCapital.toFixed(2)}`);
+      logger.info(`UNICORN_HANDOFF_INTEGRITY_AUDIT: symbol=${cloned.symbol} scanId=${input.scanId} source=${(cloned as any).source} owner=${(cloned as any).ownerName} candidateSource=${(cloned as any).candidateSource} strategySource=${String(cloned.strategySource)} executionSource=${(cloned as any).executionSource} selectedStrategy=${cloned.selectedStrategy} finalExecutionStrategy=${cloned.finalExecutionStrategy} setupValidatorUsed=${(cloned as any).setupValidatorUsed} entryRule=${(cloned as any).entryRule} score=${score.score} confidence=${cloned.confidence} riskGroup=${cloned.riskGroup} refPeriod=${cloned.referencePeriod} buyAllowed=${String(cloned.buyAllowed)} finalExecutable=${String(cloned.finalExecutable)} missingFields=${missingFields.join('|') || 'none'} invariantOk=${String(handoffInvariantOk)} failureReason=${handoffInvariantOk ? 'none' : cloned.finalNoBuyReason ?? 'STRATEGY_HANDOFF_INTEGRITY_FAILED'}`);
+      logger.info(`UNICORN_EXECUTABLE_DECISION_AUDIT: symbol=${cloned.symbol} scanId=${input.scanId} stage=${cloned.lifecycleStatus ?? cloned.status} score=${score.score} sourceOwner=${cloned.runtimeSnapshot?.sourceOwner ?? 'unknown'} ownerType=${(cloned as any).ownerType ?? 'unknown'} strategy=${cloned.selectedStrategy ?? 'missing'} finalExecutionStrategy=${cloned.finalExecutionStrategy ?? 'missing'} entryRule=${(cloned as any).entryRule ?? 'missing'} setupResult=${(cloned as any).setupResult ?? unicornSetupAudit.setupResult ?? 'missing'} buyAllowed=${String(cloned.buyAllowed)} finalExecutable=${String(cloned.finalExecutable)} submitAttempted=false blockedReason=${cloned.finalNoBuyReason ?? 'none'} slotOwner=none maxBuysPerCycle=1 autobotsSlotUsed=false unicornSlotUsed=false openUnicornPositions=${openUnicornPositions} unicornTradesToday=${this.unicornTradesToday} cooldownRemainingMs=0 invariantOk=${String(handoffInvariantOk)} failureReason=${handoffInvariantOk ? 'none' : cloned.finalNoBuyReason ?? 'STRATEGY_HANDOFF_INTEGRITY_FAILED'}`);
+      if (!handoffInvariantOk) {
+        blockedCount += 1;
+        const exactReason = missingFields.length > 0 ? 'STRATEGY_HANDOFF_INTEGRITY_FAILED' : (cloned.finalNoBuyReason ?? 'STRATEGY_HANDOFF_INTEGRITY_FAILED');
+        this.recordUnicornAudit({ event: 'handoff', scanId: input.scanId, symbol: cloned.symbol, decision: 'not_selected', reason: exactReason });
+        logger.info(`UNICORN_BUY_BLOCKED_AUDIT: symbol=${cloned.symbol} scanId=${input.scanId} source=unicorn_hunter owner=UnicornHunter selectedForExecution=false finalExecutable=${String(cloned.finalExecutable)} buyAllowed=${String(cloned.buyAllowed)} blockedReason=${exactReason} finalNoBuyReasonCode=${exactReason} finalNoBuyReasonLabel=${exactReason} missingFields=${missingFields.join('|') || 'none'} setupResult=${unicornSetupAudit.setupResult} strategyContractBlocker=${unicornSetupAudit.strategyContractBlocker} entryPrecheckFailure=${cloned.executionPrecheckSnapshot.failureReason}`);
+        continue;
+      }
+      logger.info(`UNICORN_BUY_QUEUED symbol=${c.symbol} score=${score.score} mode=${settings.mode} source=unicorn_hunter owner=UNICORN_HUNTER sharedPipeline=ExecutionPlanner capitalPct=${settings.capitalPctPerTrade} suggestedCapital=${unicornCapital.toFixed(2)}`);
+      logger.info(`UNICORN_BUY_HANDOFF_AUDIT symbol=${c.symbol} stage=${watchState.stage} score=${score.score} source=unicorn_hunter owner=UNICORN_HUNTER sharedPipeline=ExecutionPlanner capitalPct=${settings.capitalPctPerTrade} suggestedCapital=${unicornCapital.toFixed(2)} finalGateReady=true`);
+      logger.info(`UNICORN_PIPELINE_AUDIT: scanId=${input.scanId} lastUnicornCandidateSymbol=${c.symbol} lastUnicornStage=ENTRY_READY lastUnicornBlockReason=none lastUnicornConfirmationReason=${dp.dpReason} lastUnicornExecutionDecision=ENTRY_READY lastUnicornSubmitAttempted=false buyAllowed=true`);
+      this.recordUnicornAudit({ event: 'handoff', scanId: input.scanId, symbol: c.symbol, decision: 'ready_for_execution', reason: 'none' });
+      logger.info(`UNICORN_HUNTER_EXECUTION_HANDOFF_AUDIT: symbol=${c.symbol} enabled=${String(settings.enabled)} mode=${settings.mode.toUpperCase()} unicornScore=${score.score} minScore=${settings.minUnicornScore} source=unicorn_hunter owner=UnicornHunter candidateSource=unicorn_hunter strategySource=unicorn_hunter executionSource=unicorn_hunter selectedForExecution=false globalOpenPositionsCount=${globalOpenPositionsCount} globalMaxPositions=${globalMaxPositions} globalMaxReached=${String(globalMaxReached)} unicornOpenPositionsCount=${openUnicornPositions} unicornMaxPositions=${settings.maxOpenUnicornPositions} unicornMaxReached=${String(openUnicornPositions >= settings.maxOpenUnicornPositions)} autobotsOpenPositionsCount=${openAutoBotsPositions} mlPredictOpenPositionsCount=${openMlPredictPositions} manualOpenPositionsCount=${openManualPositions} tradesToday=${this.unicornTradesToday} maxTradesPerDay=${settings.maxUnicornTradesPerDay} dailyTradeLimitReached=${String(this.unicornTradesToday >= settings.maxUnicornTradesPerDay)} duplicateOpenPosition=false antiAthBlocked=false entryGatePassed=true finalExecutable=true submitAttempted=false blockedReason=none ${dpFields}`);
+      executable.push(cloned);
+    }
+    this.expireUnicornWatchlist(now);
+    this.pruneUnicornDecisionCache();
+    this.unicornRadar = this.projectUnicornRadarRows();
+    const summary = this.getUnicornWatchlistSummary();
+    const compactTopSymbols = topSymbols.slice(0, this.unicornCandidateBufferMax);
+    const readyRows = this.unicornRadar.filter((row) => row.action === 'ready' || row.stage === 'ENTRY_READY' || row.stage === 'EXECUTION_SELECTED' || row.stage === 'SUBMIT_ATTEMPTED' || row.stage === 'BUY_OPENED' || String(row.stage ?? '') === 'READY_CONFIRMED').length;
+    const scoreReadyBlockedCount = this.unicornRadar.filter((row) => row.stage === 'READY_BLOCKED' || row.stage === 'READY_WAIT' || row.stage === 'RADAR_READY' || String(row.stage ?? '').startsWith('BLOCKED_BY_')).length;
+    logger.info(`UNICORN_RADAR_STATUS_AUDIT: scanId=${input.scanId} enabled=true mode=${settings.mode.toUpperCase()} radarCount=${this.unicornRadar.length} watchCount=${summary.internalWatchlistCount} visibleCount=${this.unicornRadar.length} readyCount=${readyRows} scoreReadyBlockedCount=${scoreReadyBlockedCount} unicornOpenPositions=${openUnicornPositions} maxUnicornPositions=${settings.maxOpenUnicornPositions} radarRows=${this.unicornRadar.length} internalWatchlistCount=${summary.internalWatchlistCount} readyRows=${readyRows} blockedRows=${this.unicornRadar.filter((row) => row.action === 'block' || row.stage === 'READY_BLOCKED' || row.stage === 'DANGEROUS').length} executableUnicornCandidates=${executableUnicornCount} blockedUnicornCandidates=${blockedCount} topSymbols=${compactTopSymbols.slice(0, 10).join('|') || 'none'}`);
+    this.recordUnicornScanHistory({ scanId: input.scanId, ts: now, evaluatedCount: totalEvaluated, unicornCandidates, executableUnicornCandidates: executableUnicornCount, blockedUnicornCandidates: blockedCount, topSymbols: compactTopSymbols });
+    this.recordUnicornAudit({ event: 'scan', scanId: input.scanId, decision: 'complete', reason: blockedCount > 0 ? 'some_blocked' : 'none' });
+    const scanBlockedReason = unicornCandidates === 0 ? 'no_unicorn_pattern' : executableUnicornCount === 0 ? lastUnicornBlockReason || 'no_executable_unicorn_candidate' : 'none';
+    const runtimeReasonIfSkipped = executableUnicornCount > 0
+      ? 'none'
+      : unicornCandidates === 0
+        ? 'UNICORN_BLOCK_NO_EXECUTABLE_CANDIDATE'
+        : this.normalizeUnicornBlockedReason(lastUnicornBlockReason || scanBlockedReason);
+    logger.info(`UNICORN_HUNTER_SCAN_AUDIT: scanId=${input.scanId} enabled=true mode=${settings.mode.toUpperCase()} totalEvaluated=${totalEvaluated} unicornCandidates=${unicornCandidates} executableUnicornCandidates=${executableUnicornCount} blockedUnicornCandidates=${blockedCount} blockedDuplicateCount=${blockedDuplicateCount} blockedScoreTooLowCount=${blockedScoreTooLowCount} blockedAntiAthCount=${blockedAntiAthCount} blockedUnicornMaxPositionsCount=${blockedUnicornMaxPositionsCount} blockedDailyTradeLimitCount=${blockedDailyTradeLimitCount} blockedEntryGateCount=${blockedEntryGateCount} blockedGlobalRiskCount=${blockedGlobalRiskCount} finalNoBuyReason=${scanBlockedReason} blockedReason=${scanBlockedReason} globalOpenPositionsCount=${globalOpenPositionsCount} globalMaxPositions=${globalMaxPositions} unicornOpenPositionsCount=${openUnicornPositions} unicornMaxPositions=${settings.maxOpenUnicornPositions} autobotsOpenPositionsCount=${openAutoBotsPositions} mlPredictOpenPositionsCount=${openMlPredictPositions} manualOpenPositionsCount=${openManualPositions} topSymbols=${compactTopSymbols.slice(0, 10).join('|') || 'none'}`);
+    this.emitUnicornScanCycleAudit({ scanId: input.scanId, cycleStartedAt, evaluatedCount: totalEvaluated, candidateCount: unicornCandidates, symbolsSeen: input.candidates.length, buyAllowed: executableUnicornCount > 0, reasonIfSkipped: runtimeReasonIfSkipped });
+    this.emitUnicornRuntimeStateAudit({ scanId: input.scanId, stage: 'scan_builder', sourceCandidateCount: input.candidates.length, symbolsSeen: input.candidates.length, symbolsEvaluated: totalEvaluated, candidatesProduced: unicornCandidates, buyAllowed: executableUnicornCount > 0, reasonIfSkipped: runtimeReasonIfSkipped });
+    tickerBySymbol.clear();
+    top.length = 0;
+    this.emitUnicornMemoryAudit({ scanId: input.scanId, evaluatedCount: totalEvaluated, retainedCandidateCount: this.unicornRadar.length, temporaryObjectsCleared: tickerBySymbol.size === 0 && top.length === 0 });
+    logger.info(`UNICORN_WATCHLIST_STATE_AUDIT scanId=${input.scanId} internalWatchlistCount=${summary.internalWatchlistCount} radarRowsCount=${summary.radarRowsCount} visibleRowsCount=${summary.visibleRowsCount} stageCounts=${Object.entries(summary.stageCounts).map(([k, v]) => `${k}:${v}`).join('|')} lastFullScanAt=${summary.lastFullScanAt ?? 'none'} lastWatchlistRecheckAt=${summary.lastWatchlistRecheckAt ?? 'none'}`);
+    return { executable, radar: this.unicornRadar };
+  }
+
   getRuntimeMemoryStats(): {
     scannerSnapshotCount: number;
     scannerCandidateCount: number;
@@ -673,6 +1871,62 @@ export class MarketScanner {
       candidateStatusHistoryCount: this.lastCandidateStatusBySymbol.size,
       periodCacheCount: this.periodCache.size,
       revalidationLoopActive: this.revalidationTimerId !== null,
+    };
+  }
+
+  runMemoryCleanup(now = Date.now()): {
+    scannerSnapshotsBefore: number;
+    scannerSnapshotsAfter: number;
+    scannerSnapshotsTrimmed: number;
+    scannerEventsTrimmed: number;
+    staleRecentlyClosedSymbolsRemoved: number;
+    periodCacheBefore: number;
+    periodCacheAfter: number;
+    periodCacheTrimmed: number;
+  } {
+    const scannerSnapshotsBefore = this.snapshots.length;
+    const periodCacheBefore = this.periodCache.size;
+    const keepSnapshots = Math.min(this.maxSnapshots, 10);
+    let scannerSnapshotsTrimmed = 0;
+    if (this.snapshots.length > keepSnapshots) {
+      scannerSnapshotsTrimmed = this.snapshots.length - keepSnapshots;
+      this.snapshots = this.snapshots.slice(-keepSnapshots);
+    }
+
+    const keepSymbols = new Set(this.lastSnapshot?.candidates.map((candidate) => candidate.symbol) ?? []);
+    let scannerEventsTrimmed = 0;
+    if (this.lastCandidateStatusBySymbol.size > 250) {
+      for (const symbol of Array.from(this.lastCandidateStatusBySymbol.keys())) {
+        if (keepSymbols.has(symbol) || this.lastCandidateStatusBySymbol.size <= 250) continue;
+        this.lastCandidateStatusBySymbol.delete(symbol);
+        scannerEventsTrimmed++;
+      }
+    }
+
+    let staleRecentlyClosedSymbolsRemoved = 0;
+    for (const [symbol, cooldown] of Array.from(this.recentlyClosedSymbols.entries())) {
+      if (now < cooldown.cooldownUntil) continue;
+      this.recentlyClosedSymbols.delete(symbol);
+      staleRecentlyClosedSymbolsRemoved++;
+    }
+
+    let periodCacheTrimmed = 0;
+    const maxPeriodCacheAgeMs = 60 * 60 * 1000;
+    for (const [key, value] of Array.from(this.periodCache.entries())) {
+      if (now - value.cachedAt < maxPeriodCacheAgeMs && this.periodCache.size <= 300) continue;
+      this.periodCache.delete(key);
+      periodCacheTrimmed++;
+    }
+
+    return {
+      scannerSnapshotsBefore,
+      scannerSnapshotsAfter: this.snapshots.length,
+      scannerSnapshotsTrimmed,
+      scannerEventsTrimmed,
+      staleRecentlyClosedSymbolsRemoved,
+      periodCacheBefore,
+      periodCacheAfter: this.periodCache.size,
+      periodCacheTrimmed,
     };
   }
 
@@ -716,10 +1970,14 @@ export class MarketScanner {
   }
 
   private revalidateCandidatePool(reason: string): void {
-    if (!this.lastSnapshot || this.scanInFlight) return;
+    if (!this.lastSnapshot || this.scanInFlight) {
+      if (!this.scanInFlight) this.revalidateUnicornWatchlist(reason);
+      return;
+    }
     this.revalidationCycleId++;
     const cycleId = `rev_${this.revalidationCycleId}`;
     const startMs = Date.now();
+    this.revalidateUnicornWatchlist(reason);
 
     const candidates = this.lastSnapshot.candidates.map((c) => this.ensureCandidateRuntimeSnapshot(c, cycleId, 'scanner_revalidation_loop'));
     const waitCandidates = candidates.filter(c => c.status === 'WAIT' || c.status === 'BLOCK' || String(c.status).startsWith('WAIT_'));
@@ -1057,6 +2315,7 @@ export class MarketScanner {
     if (this.state === 'SCANNING') return;
     this.scannerStartedAt = Date.now();
     this.state = 'WARMING_UP';
+    this.updateUnicornRuntimeStatus({ status: this.getUnicornDisabledReason() === null ? 'ON' : 'OFF' });
     this.diag = this.emptyDiagnostics();
     this.scanStartTime = Date.now();
     this.firstCandidateTime = 0;
@@ -1070,6 +2329,7 @@ export class MarketScanner {
 
   async stop(): Promise<void> {
     this.state = 'OFF';
+    this.updateUnicornRuntimeStatus({ status: 'OFF', reasonIfSkipped: this.getUnicornDisabledReason() ?? 'scanner_stopped' });
     this.stopCandidateRevalidationLoop();
     this.lastCandidateStatusBySymbol = new Map();
     logger.info('SCANNER_STOP');
@@ -1077,6 +2337,8 @@ export class MarketScanner {
 
   async scan(universeMode?: UniverseMode): Promise<ScannerSnapshot> {
     const activeExecutionMode = this.liveBuyFn && !this.paperAutoEnabled ? 'binance_live' : 'paper_simulated';
+    const entryScanId = this.scanInFlight && this.currentScanId ? this.currentScanId : nextScanId();
+    this.emitUnicornRuntimeStateAudit({ scanId: entryScanId, stage: 'scan_entry', reason: 'scan_called' });
     this.emitActiveScannerInstanceAudit('scan', activeExecutionMode);
     // ── SCANNER_AUTO_EXECUTION_GATE_AUDIT: authoritative gate at scan entry ──
     {
@@ -1090,24 +2352,31 @@ export class MarketScanner {
     }
     if (!this.brainDecide) {
       logger.warn('SCANNER: brainDecide not set, skipping scan');
-      return this.buildEmptySnapshot();
+      this.emitUnicornRuntimeStateAudit({ scanId: entryScanId, stage: 'brain_missing', sourceCandidateCount: 0, reason: 'brain_decide_missing' });
+      this.emitUnicornSkippedScanAudit({ scanId: entryScanId, reason: 'brain_decide_missing', evaluatedCount: 0 });
+      return this.buildEmptySnapshot('BRAIN_DECIDE_MISSING', entryScanId);
     }
 
     if (this.scanInFlight) {
       this.skippedOverlapCount++;
       logger.throttled('INFO', 'SCANNER_SCAN_SKIPPED_ALREADY_RUNNING', 'scanner_overlap', 10000);
-      return this.currentScanPromise ?? this.buildEmptySnapshot();
+      this.emitUnicornRuntimeStateAudit({ scanId: entryScanId, stage: 'scan_overlap', sourceCandidateCount: 0, reason: 'scan_already_running' });
+      this.emitUnicornSkippedScanAudit({ scanId: entryScanId, reason: 'scan_already_running', evaluatedCount: 0 });
+      return this.currentScanPromise ?? this.buildEmptySnapshot('SCAN_ALREADY_RUNNING', entryScanId);
     }
 
     const mode = universeMode ?? this.universeMode;
     if (mode === 'WATCHLIST' && this.watchlist.length === 0) {
       this.state = 'IDLE';
       logger.throttled('INFO', `SCANNER_START_BLOCKED_EMPTY_UNIVERSE: reason=WATCHLIST_EMPTY mode=${mode} beforeFilterCount=0 afterFilterCount=0 enabledRiskGroups=${Object.entries(this.scannerRiskGroups).filter(([,v]) => v).map(([k]) => k).join(',')}`, 'scanner_empty_watchlist', 30000);
-      return this.buildEmptySnapshot('WATCHLIST_EMPTY');
+      this.emitUnicornRuntimeStateAudit({ scanId: entryScanId, stage: 'watchlist_empty', sourceCandidateCount: 0, reason: 'WATCHLIST_EMPTY' });
+      this.emitUnicornSkippedScanAudit({ scanId: entryScanId, reason: 'WATCHLIST_EMPTY', evaluatedCount: 0 });
+      return this.buildEmptySnapshot('WATCHLIST_EMPTY', entryScanId);
     }
 
     this.scanInFlight = true;
-    this.currentScanPromise = Promise.resolve(this.buildEmptySnapshot());
+    this.currentScanId = entryScanId;
+    this.currentScanPromise = Promise.resolve(this.buildEmptySnapshot('SCAN_STARTING', entryScanId));
     this.lastScanStartedAt = Date.now();
     this.state = 'SCANNING';
     try {
@@ -1115,7 +2384,6 @@ export class MarketScanner {
     this.scanStageTimings = this.emptyStageTimings();
     this.scanCacheMetrics = this.emptyCacheMetrics();
     this.scanSymbolTimings = [];
-    this.currentScanId = nextScanId();
     mlRuntimeEvents.beginActiveGuardScanCycle(this.currentScanId);
     const universeStartTime = Date.now();
     logger.info(`SCANNER_UNIVERSE_BUILD_START: mode=${mode}`);
@@ -1159,17 +2427,21 @@ export class MarketScanner {
     logger.info(`SCANNER_UNIVERSE_AUDIT: mode=${mode} totalEligibleUSDT=${universe.beforeFilterCount} totalScanned=${universe.afterFilterCount} enabledGroups=${Object.entries(this.scannerRiskGroups).filter(([,v]) => v).map(([k]) => k).join(',')} highRiskEnabled=${this.scannerRiskGroups.high_risk} veryHighRiskEnabled=${this.scannerRiskGroups.very_high_risk} banned=${universe.bannedCount} banReasons=${universe.topBanReasons.slice(0,3).map(r => `${r.reason}=${r.count}`).join('|')}`);
     logger.info(`SCANNER_RISK_GROUP_FILTER_SUMMARY: enabledGroups=${Object.entries(this.scannerRiskGroups).filter(([, v]) => v).map(([k]) => k).join(',')} beforeCount=${universe.beforeFilterCount} afterCount=${universe.afterFilterCount} excludedByGroupCount=${universe.excludedByGroupCount ?? 0} excludedByGroupBreakdown=${JSON.stringify(universe.excludedByGroupBreakdown ?? {})}`);
 
+    const scanId = this.currentScanId ?? nextScanId();
+    this.emitUnicornRuntimeStateAudit({ scanId, stage: 'scan_start', reason: 'scanner_cycle_started' });
+
     // Early return if universe is empty after filtering
     if (symbols.length === 0) {
       const emptyReason = this.resolveEmptyUniverseReason(mode, this.watchlist.length, this.scannerRiskGroups, universe.beforeFilterCount, universe.topBanReasons.map(r => r.reason));
       this.state = 'IDLE';
       logger.throttled('INFO', `SCANNER_START_BLOCKED_EMPTY_UNIVERSE: reason=${emptyReason} mode=${mode} beforeFilterCount=${universe.beforeFilterCount} afterFilterCount=${universe.afterFilterCount} enabledRiskGroups=${Object.entries(this.scannerRiskGroups).filter(([,v]) => v).map(([k]) => k).join(',')} topBanReasons=${universe.topBanReasons.map(r => `${r.reason}:${r.count}`).join(',')}`, 'scanner_empty_universe', 60000);
+      this.emitUnicornRuntimeStateAudit({ scanId, stage: 'empty_universe', sourceCandidateCount: 0, reason: emptyReason });
+      this.emitUnicornSkippedScanAudit({ scanId, reason: `empty_universe:${emptyReason}`, evaluatedCount: 0 });
       this.scanInFlight = false;
       this.currentScanPromise = null;
-      return this.buildEmptySnapshot(emptyReason);
+      return this.buildEmptySnapshot(emptyReason, scanId);
     }
 
-    const scanId = this.currentScanId ?? nextScanId();
     const startedAt = new Date().toISOString();
     const scanStartTime = Date.now();
     const tUniverse = scanStartTime - universeStartTime;
@@ -1249,21 +2521,54 @@ export class MarketScanner {
         sourcePath: 'scanner_ranked_candidates',
       });
     });
-    const summary = buildSummaryMessage(rankedCandidates);
+    const openSymbols = Array.from(new Set((this.executionOpenSymbolsFn?.() ?? [])
+      .map((symbol) => String(symbol ?? '').trim().toUpperCase())
+      .filter(Boolean)));
+    const openSymbolSet = new Set(openSymbols);
+    const pendingOrderSymbols = this.executionPendingSymbolsFn?.() ?? [];
+    const usedCapital = this.executionUsedCapitalFn?.() ?? 0;
+    const filteredAlreadyOpenCandidates = rankedCandidates
+      .filter((candidate) => openSymbolSet.has(String(candidate.symbol ?? '').trim().toUpperCase()))
+      .map((candidate) => ({
+        ...candidate,
+        status: 'FILTERED_ALREADY_OPEN_POSITION' as CandidateStatus,
+        lifecycleStatus: 'FILTERED_ALREADY_OPEN_POSITION',
+        primaryBlocker: 'FILTERED_ALREADY_OPEN_POSITION',
+        finalNoBuyReason: 'FILTERED_ALREADY_OPEN_POSITION',
+        actionableNoBuyReason: 'FILTERED_ALREADY_OPEN_POSITION',
+        mainReason: 'FILTERED_ALREADY_OPEN_POSITION',
+        blockReasons: Array.from(new Set([...(candidate.blockReasons ?? []), 'FILTERED_ALREADY_OPEN_POSITION'])),
+        finalExecutable: false,
+        buyAllowed: false,
+        filteredReason: 'FILTERED_ALREADY_OPEN_POSITION',
+        filteredBy: 'PositionManager',
+        removedFromTopCandidates: true,
+        removedFromExecutionPool: true,
+      } as ScannerCandidate));
+    for (const filtered of filteredAlreadyOpenCandidates) {
+      const openSymbolsAudit = openSymbols.join('|') || 'none';
+      logger.info(`TOP_CANDIDATE_OPEN_SYMBOL_FILTER_AUDIT: openSymbols=${openSymbolsAudit} candidateSymbol=${filtered.symbol} wasOpenPosition=true removedFromTopCandidates=true removedFromExecutionPool=true reason=FILTERED_ALREADY_OPEN_POSITION source=PositionManager`);
+      logger.info(`ENTRY_CANDIDATE_DUPLICATE_FILTER_AUDIT: openSymbols=${openSymbolsAudit} candidateSymbol=${filtered.symbol} wasOpenPosition=true removedFromTopCandidates=true removedFromExecutionPool=true reason=FILTERED_ALREADY_OPEN_POSITION source=PositionManager`);
+      logger.info(`EXECUTION_POOL_OPEN_SYMBOL_EXCLUSION_AUDIT: openSymbols=${openSymbolsAudit} candidateSymbol=${filtered.symbol} wasOpenPosition=true removedFromTopCandidates=true removedFromExecutionPool=true reason=FILTERED_ALREADY_OPEN_POSITION source=PositionManager`);
+    }
+    const rankedEntryCandidates = rankedCandidates.filter((candidate) => !openSymbolSet.has(String(candidate.symbol ?? '').trim().toUpperCase()));
+    logger.info(`BUY_READY_COUNT_AFTER_DUPLICATE_FILTER_AUDIT: openSymbols=${openSymbols.join('|') || 'none'} rawBuyReadyBeforeFilter=${rankedCandidates.filter((candidate) => candidate.status === 'BUY' && candidate.entryGateDecision?.decision === 'ALLOW').length} activeBuyReadyAfterFilter=${rankedEntryCandidates.filter((candidate) => candidate.status === 'BUY' && candidate.entryGateDecision?.decision === 'ALLOW').length} filteredAlreadyOpenCount=${filteredAlreadyOpenCandidates.length} filteredSymbols=${filteredAlreadyOpenCandidates.map((candidate) => candidate.symbol).join('|') || 'none'} reason=FILTERED_ALREADY_OPEN_POSITION source=PositionManager`);
+    const summary = buildSummaryMessage(rankedEntryCandidates);
 
     // Build executionPool / watchPool / nearMissPool using final gate eligibility
-    const executionPool = rankedCandidates.filter((c) => {
+    const executionPool = rankedEntryCandidates.filter((c) => {
       if (!(c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW')) return false;
       const setup = buildStrategyAuditSnapshotFromCandidate(c);
       if (!setup.finalExecutable) return false;
       const ownership = (c as any).tradingTargetOwnership;
-      const autoBotsOn = String((c.autoStrategyDecision as any)?.strategySource ?? c.strategySource ?? '').toLowerCase().includes('autobots');
+      const targetSource = String((c.autoStrategyDecision as any)?.strategySource ?? c.strategySource ?? (c as any).source ?? '').toLowerCase();
+      const autoBotsOn = targetSource.includes('autobots') || targetSource.includes('unicorn');
       const resolvedRisk = resolveEntryRiskParams({ autoBotsOn, ownership, userStopLossPct: 1.5, userTrailPullbackPct: 0.25 });
       if (autoBotsOn && !resolvedRisk.tp1Valid) return false;
       return true;
     });
     {
-      const allBuyReady = rankedCandidates.filter(c => c.status === 'BUY');
+      const allBuyReady = rankedEntryCandidates.filter(c => c.status === 'BUY');
       const invalidContractBuyReady = allBuyReady.filter(c => {
         const setup = buildStrategyAuditSnapshotFromCandidate(c);
         return setup.finalExecutable && c.status === 'BUY' && !/^(?:momentum|balanced|dip_and_rebound|conservative)$/i.test(setup.strategySelected);
@@ -1271,8 +2576,8 @@ export class MarketScanner {
       const invariantOk = invalidContractBuyReady.length === 0;
       logger.info(`BUY_READY_CONTRACT_INVARIANT_AUDIT: totalBuyReady=${allBuyReady.length} invalidContractBuyReadyCount=${invalidContractBuyReady.length} invalidSymbols=${invalidContractBuyReady.map(c => c.symbol).join('|') || 'none'} selectedStrategy=${invalidContractBuyReady.map(c => buildStrategyAuditSnapshotFromCandidate(c).strategySelected).join('|') || 'none'} invariantOk=${String(invariantOk)}`);
     }
-    const watchPool = rankedCandidates.filter((c: ScannerCandidate) => c.status === 'WAIT' || c.status === 'BLOCK' || (c.status === 'BUY' && !executionPool.some((e) => e.symbol === c.symbol)));
-    const nearMissPool = rankedCandidates.filter(c => c.status === 'BLOCK' && c.confidence < 0.5);
+    const watchPool = rankedEntryCandidates.filter((c: ScannerCandidate) => c.status === 'WAIT' || c.status === 'BLOCK' || (c.status === 'BUY' && !executionPool.some((e) => e.symbol === c.symbol)));
+    const nearMissPool = rankedEntryCandidates.filter(c => c.status === 'BLOCK' && c.confidence < 0.5);
     const executionPoolSize = executionPool.length;
     const watchPoolSize = watchPool.length;
     const nearMissPoolSize = nearMissPool.length;
@@ -1280,29 +2585,29 @@ export class MarketScanner {
     const topWatchCandidates = watchPool.slice(0, 10).map(c => c.symbol);
 
     const buyCount = executionPool.length;
-    const waitCount = rankedCandidates.filter(c => c.status === 'WAIT').length;
-    const blockCount = rankedCandidates.filter(c => c.status === 'BLOCK').length;
-    const avoidCount = rankedCandidates.filter(c => c.status === 'AVOID').length;
+    const waitCount = rankedEntryCandidates.filter(c => c.status === 'WAIT').length;
+    const blockCount = rankedEntryCandidates.filter(c => c.status === 'BLOCK').length;
+    const avoidCount = rankedEntryCandidates.filter(c => c.status === 'AVOID').length;
 
     // Build noBuySummary when there are no BUY candidates
     let noBuySummary: ScannerSnapshot['noBuySummary'] = executionPoolSize === 0 ? {
       executionPoolSize,
       watchPoolSize,
       nearMissPoolSize,
-      topReasons: normalizeTopReasons(rankedCandidates, 3),
+      topReasons: normalizeTopReasons(rankedEntryCandidates, 3),
       nearestCandidates: watchPool.slice(0, 5).map(c => c.symbol).concat(nearMissPool.slice(0, 3).map(c => c.symbol)).slice(0, 5),
-      requiredNextActions: extractNextActions(rankedCandidates),
+      requiredNextActions: extractNextActions(rankedEntryCandidates),
     } : undefined;
 
     // AutoStrategyRouter per-candidate
     const strategySelectionStart = Date.now();
-    const groupTrends = computeGroupTrendForCandidates(rankedCandidates);
-    const analyzerViews: TradeV4CandidateView[] = rankedCandidates.map(c => mapScannerCandidateToTradeV4View(c));
+    const groupTrends = computeGroupTrendForCandidates(rankedEntryCandidates);
+    const analyzerViews: TradeV4CandidateView[] = rankedEntryCandidates.map(c => mapScannerCandidateToTradeV4View(c));
     const analyzerContext = getDipperMarketAnalysisV3(analyzerViews, this.scannerReferencePeriod as '1h' | '4h' | '1d' | '1w');
     const analyzerGroupMap = new Map((analyzerContext?.groups ?? []).map(g => [g.group, g]));
     const strategyDecisions: AutoStrategyDecision[] = [];
     const strategyRuntimeState = scanRuntimeStateForStrategy;
-    let rankedCandidatesToAnnotate: ScannerCandidate[] = rankedCandidates.map(candidateBeforeStrategy => {
+    let rankedCandidatesToAnnotate: ScannerCandidate[] = rankedEntryCandidates.map(candidateBeforeStrategy => {
       const c = this.ensureCandidateRuntimeSnapshot(candidateBeforeStrategy, scanId, 'scanner_before_smart_router');
       const riskGroup = c.riskGroup ?? 'unknown';
       const gs = groupTrends.get(riskGroup) ?? { groupTrend: 'sideways' as GroupTrendSimple, recommendedStrategy: 'conservative' };
@@ -1784,7 +3089,7 @@ export class MarketScanner {
         for (const c of droppedCandidates.slice(0, 10)) {
           const setup = buildStrategyAuditSnapshotFromCandidate(c);
           const reason = !setup.finalExecutable ? (setup.dynamicSetupContext?.primaryBlocker ?? 'unknown_final_executable_bug') :
-            (() => { const ownership = (c as any).tradingTargetOwnership; const ab = String((c.autoStrategyDecision as any)?.strategySource ?? c.strategySource ?? '').toLowerCase().includes('autobots'); const r = resolveEntryRiskParams({ autoBotsOn: ab, ownership, userStopLossPct: 1.5, userTrailPullbackPct: 0.25 }); return ab && !r.tp1Valid ? 'tp1_invalid' : 'unknown_filter'; })();
+            (() => { const ownership = (c as any).tradingTargetOwnership; const source = String((c.autoStrategyDecision as any)?.strategySource ?? c.strategySource ?? (c as any).source ?? '').toLowerCase(); const ab = source.includes('autobots') || source.includes('unicorn'); const r = resolveEntryRiskParams({ autoBotsOn: ab, ownership, userStopLossPct: 1.5, userTrailPullbackPct: 0.25 }); return ab && !r.tp1Valid ? 'tp1_invalid' : 'unknown_filter'; })();
           dropReasons.push(`${c.symbol}:${reason}`);
         }
         logger.info(`ENTRYGATE_TO_EXECUTION_DROPPED_AUDIT: scanId=${scanId} droppedCount=${droppedCandidates.length} droppedSymbols=${droppedCandidates.slice(0,10).map(c => c.symbol).join('|')} dropReasons=${dropReasons.join('|')} hasEntryPlan=${droppedCandidates.filter(c => !!(c as any).entryPlan).length}/${droppedCandidates.length} finalExecutable=${droppedCandidates.filter(c => buildStrategyAuditSnapshotFromCandidate(c).finalExecutable).length}/${droppedCandidates.length} bookTickerFresh=${droppedCandidates.filter(c => (c as any).bookTicker != null).length}/${droppedCandidates.length} bookTickerAgeMs=n/a confirmationPassed=n/a spreadOk=n/a tpRoomOk=n/a`);
@@ -2224,10 +3529,7 @@ export class MarketScanner {
     const majorsDomination = allRanked.slice(0, 20).filter(c => majors.some(m => c.symbol.startsWith(m))).length;
     logger.info(`RANKING_DIVERSITY_AUDIT: refPeriod=${this.scannerReferencePeriod} top20RiskGroups=${top20RiskGroups} top20Symbols=${top20Symbols} highRiskInTop20Count=${highRiskInTop20} veryHighRiskInTop20Count=${veryHighRiskInTop20} majorsDominanceReason=majors_in_top20=${majorsDomination}/20 ranking_uses_entryGate(1000pts)+confidence(200pts)+spread(100pts)+volume+tpRoom+rebound+momentum — market cap not used directly; majors may still rank high due to better liquidity/spread/volume`);
 
-    // ExecutionPlanner: build execution plan from pools
-    const openSymbols = this.executionOpenSymbolsFn?.() ?? [];
-    const pendingOrderSymbols = this.executionPendingSymbolsFn?.() ?? [];
-    const usedCapital = this.executionUsedCapitalFn?.() ?? 0;
+    // ExecutionPlanner: build execution plan from active new-entry pools.
     for (const c of executionPool.slice(0, 10)) {
       const keysShort = Object.keys(c).slice(0, 12).join('|') || 'none';
       logger.info(`ENTRY_PLAN_OBJECT_TRACE: scanId=${scanId} symbol=${c.symbol} stage=beforeExecutionPlanner hasEntryPlan=${String(!!c.entryPlan)} hasExecutionPlan=${String(!!c.executionPlan)} hasTraderBrainDecision=${String(!!c.traderBrainDecision)} traderBrainDecisionHasEntryPlan=${String(!!c.traderBrainDecision?.entryPlan)} hasEntryDecisionSnapshot=${String(!!c.entryGateDecision?.snapshot)} entryStatus=${c.status} allowCandidate=${String(c.entryGateDecision?.decision === 'ALLOW')} price=${c.price} bookFresh=${String(c.bookFresh !== false)} snapshotDecision=${c.entryGateDecision?.snapshot?.decision ?? c.entryGateDecision?.decision ?? 'none'} sourceFunction=MarketScanner.scan objectKeysShort=${keysShort}`);
@@ -2256,8 +3558,116 @@ export class MarketScanner {
       for (const [sym, cd] of this.recentlyClosedSymbols) {
         if (now >= cd.cooldownUntil) this.recentlyClosedSymbols.delete(sym);
       }
+      this.mlPredictBuySubmittedAt = this.mlPredictBuySubmittedAt.filter((ts) => now - ts < 60 * 60 * 1000);
+    }
+    const mlPredictBuySettingsForExecution = loadMLPredictBuySettings();
+    const activeExecutionAdapter = this.liveBuyFn && !this.paperAutoEnabled ? 'binance_live' : 'paper_simulated';
+    let mlPredictBuyPromotedCount = 0;
+    for (const c of rankedCandidatesToAnnotate) {
+      const prediction = c.mlPredictBuyPrediction;
+      const priorDecision = c.mlPredictBuyDecision;
+      if (!prediction || !priorDecision) continue;
+      if (!mlPredictBuySettingsForExecution.mlPredictBuyEnabled || mlPredictBuySettingsForExecution.mlPredictBuyMode !== 'AUTO_BUY') continue;
+      if (prediction.predictedAction !== 'BUY') continue;
+
+      const setup = buildStrategyAuditSnapshotFromCandidate(c);
+      const capitalAvailableNow = Math.max(0, this.executionCapital - usedCapital);
+      const pendingDuplicate = pendingOrderSymbols.includes(c.symbol);
+      const openDuplicate = openSymbols.includes(c.symbol);
+      const cooldownActive = this.recentlyClosedSymbols.has(c.symbol);
+      const mlOpenCountProxy = openSymbols.filter((symbol) => symbol === c.symbol || rankedCandidatesToAnnotate.some((candidate) => candidate.symbol === symbol && candidate.executionSource === 'ML_PREDICT_BUY')).length;
+      const refreshedDecision = evaluateMLPredictBuy({
+        settings: mlPredictBuySettingsForExecution,
+        prediction,
+        context: {
+          symbol: c.symbol,
+          scanCycleId: c.candidateId ?? scanId,
+          executionAdapter: activeExecutionAdapter,
+          strategy: c.selectedStrategy,
+          riskGroup: c.riskGroup,
+          modelStatus: prediction.modelVersion && prediction.modelVersion !== 'untrained' && prediction.modelVersion !== 'off' ? 'TRAINED' : 'UNTRAINED',
+          brainLoaded: Boolean(prediction.modelVersion && prediction.modelVersion !== 'untrained' && prediction.modelVersion !== 'off'),
+          preMlGatePassed: Boolean(c.entryGateDecision),
+          mlGuardBlocked: priorDecision.mlGuardBlocked,
+          priceFreshOk: (c.priceAgeMs ?? 0) < this.maxPriceAgeMs,
+          bookFreshOk: c.bookFresh !== false,
+          spreadOk: (c.spreadPct ?? 0) <= this.maxSpreadPct,
+          tpRoomOk: c.tpRoomOk !== false,
+          notAlreadyOpen: !openDuplicate,
+          notDuplicatePosition: !openDuplicate && !pendingDuplicate,
+          notInCooldown: !cooldownActive,
+          maxPositionsOk: openSymbols.length < this.executionMaxPositions,
+          groupCapOk: this.scannerRiskGroups[c.riskGroup as keyof typeof this.scannerRiskGroups] ?? true,
+          mlMaxOpenPositionsOk: mlOpenCountProxy < mlPredictBuySettingsForExecution.maxMlOpenPositions,
+          mlMaxBuysPerHourOk: this.mlPredictBuySubmittedAt.length < mlPredictBuySettingsForExecution.maxMlBuysPerHour,
+          banlistOk: !(c as any).banned && !this.scannerBanlist.includes(c.symbol),
+          capitalOk: capitalAvailableNow >= this.executionCapitalPerTrade,
+          marketGuardOk: ![c.mainReason, ...(c.blockReasons ?? [])].some((r) => String(r ?? '').toLowerCase().includes('market')),
+          btcAnchorOk: ![c.mainReason, ...(c.blockReasons ?? [])].some((r) => String(r ?? '').toLowerCase().includes('btc')),
+          professionalGateOk: (setup as any).professionalGatePassed !== false,
+          strategyValidatorOk: setup.strategyContractValid !== false && setup.finalExecutable !== false && setup.buyAllowed !== false,
+          scannerAgreementOk: c.entryGateDecision?.decision === 'ALLOW',
+          emergencyStopOk: true,
+          executionAdapterHealthy: activeExecutionAdapter === 'paper_simulated' ? Boolean(this.paperAutoBuyFn) : Boolean(this.liveBuyFn),
+          dbOk: true,
+          persistenceOk: true,
+          entryGateDecision: c.entryGateDecision,
+        },
+      });
+      c.mlPredictBuyDecision = refreshedDecision;
+
+      if (refreshedDecision.finalDecision === 'BUY_READY' && c.entryPlan) {
+        c.status = 'BUY';
+        c.lifecycleStatus = 'BUY_READY';
+        c.mainReason = 'ML_PREDICT_BUY_READY';
+        c.blockReasons = [];
+        c.candidateSource = 'ML_PREDICT_BUY';
+        c.executionSource = 'ML_PREDICT_BUY';
+        (c as any).source = 'ML_PREDICT_BUY';
+        (c as any).ownerType = 'scanner';
+        (c as any).ownerName = 'ML Predict Buy';
+        c.finalExecutable = true;
+        c.buyAllowed = true;
+        mlPredictBuyPromotedCount += 1;
+        logger.info(`ML_PREDICT_BUY_PROMOTED_AUDIT: scanId=${scanId} symbol=${c.symbol} mode=${refreshedDecision.mode} source=ML_PREDICT_BUY executionAdapter=${refreshedDecision.executionAdapter} finalDecision=${refreshedDecision.finalDecision} rowsUsed=${refreshedDecision.rowsUsed} predictedWinProb=${refreshedDecision.predictedWinProb} expectedPnlPct=${refreshedDecision.expectedPnlPct} entryGateApproved=${String(refreshedDecision.entryGateApproved)} strategyValidatorOk=${String(setup.strategyContractValid !== false && setup.finalExecutable !== false)} capitalAvailable=${capitalAvailableNow.toFixed(2)} openPositions=${openSymbols.length} pendingDuplicate=${String(pendingDuplicate)}`);
+      } else if (refreshedDecision.finalDecision === 'BLOCKED') {
+        logger.info(`ML_AUTO_BUY_BLOCKED_AUDIT: scanId=${scanId} symbol=${c.symbol} mode=${refreshedDecision.mode} source=ML_PREDICT_BUY finalDecision=${refreshedDecision.finalDecision} blockedReason=${refreshedDecision.blockedReason ?? 'unknown'} failedGate=${refreshedDecision.failedGate ?? 'unknown'} entryPlanPresent=${String(!!c.entryPlan)}`);
+      }
     }
     let cooldownBlockedCount = 0;
+    let unicornRadarCount = 0;
+    let unicornExecutableQueuedCount = 0;
+    let unicornExecutableAddedCount = 0;
+    let unicornDuplicateBlockedCount = 0;
+    let unicornBuilderInvoked = false;
+    {
+      unicornBuilderInvoked = true;
+      const unicornResult = await this.buildUnicornCandidates({
+        scanId,
+        candidates: rankedCandidatesToAnnotate,
+        openSymbols,
+        pendingSymbols: pendingOrderSymbols,
+        usedCapital,
+      });
+      this.emitUnicornNotWiredAuditIfNeeded(scanId, rankedCandidatesToAnnotate.length, unicornBuilderInvoked);
+      const normalBuySymbols = new Set(rankedCandidatesToAnnotate.filter(c => c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW').map(c => c.symbol));
+      const nonDuplicateUnicorns = unicornResult.executable.filter(c => !normalBuySymbols.has(c.symbol));
+      const duplicateUnicorns = unicornResult.executable.filter(c => normalBuySymbols.has(c.symbol));
+      unicornRadarCount = unicornResult.radar.length;
+      unicornExecutableQueuedCount = unicornResult.executable.length;
+      unicornExecutableAddedCount = nonDuplicateUnicorns.length;
+      unicornDuplicateBlockedCount = duplicateUnicorns.length;
+      for (const dup of duplicateUnicorns) {
+        logger.info(`UNICORN_BUY_BLOCKED symbol=${dup.symbol} reason=unicorn_block_duplicate_symbol price=${dup.price} action=USE_EXISTING_AUTOBOTS_CANDIDATE sharedPipeline=ExecutionPlanner`);
+        logger.info(`UNICORN_HUNTER_EXECUTION_HANDOFF_AUDIT: symbol=${dup.symbol} source=unicorn_hunter owner=UnicornHunter candidateSource=unicorn_hunter strategySource=unicorn_hunter executionSource=unicorn_hunter selectedForExecution=false finalExecutable=false entryGateApproved=${String(dup.entryGateDecision?.decision === 'ALLOW')} submitAttempted=false blockedReason=UNICORN_BLOCK_DUPLICATE_POSITION finalNoBuyReasonCode=UNICORN_BLOCK_DUPLICATE_POSITION`);
+        logger.info(`UNICORN_BUY_BLOCKED_AUDIT: symbol=${dup.symbol} scanId=${scanId} source=unicorn_hunter owner=UnicornHunter selectedForExecution=false finalExecutable=false buyAllowed=false blockedReason=UNICORN_BLOCK_DUPLICATE_POSITION finalNoBuyReasonCode=UNICORN_BLOCK_DUPLICATE_POSITION finalNoBuyReasonLabel=UNICORN_BLOCK_DUPLICATE_POSITION missingFields=none`);
+      }
+      if (nonDuplicateUnicorns.length > 0) {
+        rankedCandidatesToAnnotate = [...rankedCandidatesToAnnotate, ...nonDuplicateUnicorns.map(c => this.ensureCandidateRuntimeSnapshot(c, scanId, 'unicorn_hunter_parallel_lane'))];
+      }
+      logger.info(`UNICORN_UNIVERSE_REFRESH_AUDIT scanId=${scanId} radarCount=${unicornResult.radar.length} executableAdded=${nonDuplicateUnicorns.length} duplicateBlocked=${duplicateUnicorns.length} sharedPipeline=ExecutionPlanner`);
+      logger.info(`UNICORN_EXECUTION_PENDING_AUDIT scanId=${scanId} radarCount=${unicornRadarCount} readyQueuedCount=${unicornExecutableQueuedCount} executableAdded=${unicornExecutableAddedCount} duplicateBlocked=${unicornDuplicateBlockedCount} sharedPipeline=ExecutionPlanner mode=${this.unicornHunterSettings.mode} autoExecutionEnabled=${String(this.paperAutoEnabled)} proofStage=pre_execution_planner`);
+    }
     const finalExecutionPool = rankedCandidatesToAnnotate.filter((c) => {
       if (!(c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW')) return false;
       const setup = buildStrategyAuditSnapshotFromCandidate(c);
@@ -2270,7 +3680,8 @@ export class MarketScanner {
         return false;
       }
       const ownership = (c as any).tradingTargetOwnership;
-      const autoBotsOn = String((c.autoStrategyDecision as any)?.strategySource ?? c.strategySource ?? '').toLowerCase().includes('autobots');
+      const targetSource = String((c.autoStrategyDecision as any)?.strategySource ?? c.strategySource ?? (c as any).source ?? '').toLowerCase();
+      const autoBotsOn = targetSource.includes('autobots') || targetSource.includes('unicorn');
       const resolvedRisk = resolveEntryRiskParams({ autoBotsOn, ownership, userStopLossPct: 1.5, userTrailPullbackPct: 0.25 });
       if (autoBotsOn && !resolvedRisk.tp1Valid) return false;
       return true;
@@ -2292,7 +3703,7 @@ export class MarketScanner {
       status: 'SCANNING',
       universeMode: mode,
       universeSize: universe.beforeFilterCount ?? symbols.length,
-      scannedCount: rankedCandidatesToAnnotate.length,
+      scannedCount: rankedCandidates.length,
       candidateCount: rankedCandidatesToAnnotate.length,
       buyCount: rankedCandidatesToAnnotate.filter((c) => c.status === 'BUY').length,
       waitCount: rankedCandidatesToAnnotate.filter((c) => c.status === 'WAIT').length,
@@ -2302,6 +3713,7 @@ export class MarketScanner {
       summary: 'execution_planner_snapshot',
       diagnostics: this.diag,
     } as ScannerSnapshot;
+    const mlAutoBuyHandoffEnabled = mlPredictBuyPromotedCount > 0;
     const canonicalStateForPlanner = this.getCanonicalAutoExecutionState();
     const executionPlan = buildExecutionPlan({
       scannerSnapshot: executionPlannerSnapshot,
@@ -2309,11 +3721,13 @@ export class MarketScanner {
       watchPool: finalWatchPool,
       nearMissPool,
       openSymbols,
+      openPositionDetails: this.executionOpenPositionSourcesFn?.() ?? openSymbols.map((symbol) => ({ symbol })),
       pendingOrderSymbols,
       capital: this.executionCapital,
       usedCapital,
       maxPositions: this.executionMaxPositions,
       maxSelectedPerScan: this.executionMaxSelectedPerScan,
+      maxUnicornSelectedPerScan: this.unicornHunterSettings.maxUnicornBuysPerCycle,
       maxEntriesPerCycle: this.executionMaxSelectedPerScan,
       maxSelectedPerScanSource: this.executionMaxSelectedPerScanSource,
       maxSelectedPerScanMigrationApplied: this.executionMaxSelectedPerScanMigrationApplied,
@@ -2325,7 +3739,7 @@ export class MarketScanner {
       decisionMode: 'unified',
       executionAdapter: 'paper_simulated',
       enabledRiskGroups: this.scannerRiskGroups,
-      runtimeCanAttemptAutoExecution: canonicalStateForPlanner.canAttemptScannerAutoExecution,
+      runtimeCanAttemptAutoExecution: canonicalStateForPlanner.canAttemptScannerAutoExecution || mlAutoBuyHandoffEnabled,
     });
     this.scanStageTimings.executionPlanningMs += Date.now() - executionPlanningStart;
 
@@ -2363,10 +3777,10 @@ export class MarketScanner {
         executionPlan.selectedCandidates.length === 0 ? 'selectedCount_zero' :
         remainingSlots <= 0 ? `no_open_slots_maxPositions=${this.executionMaxPositions}` :
         capitalAvailableNow <= 0 ? 'capital_exhausted' :
-        !this.paperAutoEnabled ? 'paperAuto_disabled' :
+        !this.paperAutoEnabled && !mlAutoBuyHandoffEnabled ? 'paperAuto_disabled' :
         !this.paperAutoBuyFn ? 'paperAutoBuyFn_missing' :
         'none';
-      logger.info(`BUY_EXECUTION_HANDOFF_PRECHECK_AUDIT: scannerCandidatesCount=${rankedCandidatesToAnnotate.length} buyReadyCount=${buyCount} nonDuplicateBuyReadyCount=${nonDupCount} openPositionsCount=${openSymbols.length} maxOpenPositionsFromSettings=${this.executionMaxPositions} maxOpenPositionsResolved=${this.executionMaxPositions} remainingSlots=${remainingSlots} selectedCount=${executionPlan.selectedCandidates.length} executionEnabled=${String(this.paperAutoEnabled)} autoBotsEnabled=${String(this.paperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} canAttemptScannerAutoExecution=${String(executionPlan.canExecute && remainingSlots > 0 && this.paperAutoEnabled && !!this.paperAutoBuyFn)} capitalPerTrade=${this.executionCapitalPerTrade} tradingCapital=${this.executionCapital} usedCapital=${usedCapital} availableCapital=${capitalAvailableNow} blockReason=${blockReason} sourceFile=MarketScanner.ts sourceFunction=executionScan`);
+      logger.info(`BUY_EXECUTION_HANDOFF_PRECHECK_AUDIT: scannerCandidatesCount=${rankedCandidatesToAnnotate.length} buyReadyCount=${buyCount} nonDuplicateBuyReadyCount=${nonDupCount} openPositionsCount=${openSymbols.length} maxOpenPositionsFromSettings=${this.executionMaxPositions} maxOpenPositionsResolved=${this.executionMaxPositions} remainingSlots=${remainingSlots} selectedCount=${executionPlan.selectedCandidates.length} executionEnabled=${String(this.paperAutoEnabled || mlAutoBuyHandoffEnabled)} autoBotsEnabled=${String(this.paperAutoEnabled)} mlAutoBuyHandoffEnabled=${String(mlAutoBuyHandoffEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} canAttemptScannerAutoExecution=${String(executionPlan.canExecute && remainingSlots > 0 && (this.paperAutoEnabled || mlAutoBuyHandoffEnabled) && !!this.paperAutoBuyFn)} capitalPerTrade=${this.executionCapitalPerTrade} tradingCapital=${this.executionCapital} usedCapital=${usedCapital} availableCapital=${capitalAvailableNow} blockReason=${blockReason} sourceFile=MarketScanner.ts sourceFunction=executionScan`);
       logger.info(`MAX_POSITIONS_RESOLUTION_AUDIT: uiMaxOpenPositions=n/a storeMaxOpenPositions=n/a tradeParamsMaxOpenPositions=n/a scannerExecutionMaxPositions=${this.executionMaxPositions} plannerMaxOpenPositions=${executionPlan.availableSlots != null ? (executionPlan.availableSlots + openSymbols.length) : 'n/a'} adapterMaxOpenPositions=n/a positionManagerOpenCount=${openSymbols.length} storeOpenCount=n/a headerDisplayedOpenCount=${openSymbols.length} headerDisplayedMaxCount=${this.executionMaxPositions} remainingSlotsByScanner=${remainingSlots} remainingSlotsByPlanner=${executionPlan.availableSlots} blockReason=${blockReason} mismatchDetected=${String(this.executionMaxPositions < 50)} sourceOfMaxUsedForBlock=scanner.executionMaxPositions`);
       if (openSymbols.length >= this.executionMaxPositions && this.executionMaxPositions < 20) {
         logger.error(`FALSE_MAX_POSITIONS_REACHED_BLOCK: openPositionsCount=${openSymbols.length} maxOpenPositionsResolved=${this.executionMaxPositions} remainingSlots=${remainingSlots} blockReason=MAX_POSITIONS_REACHED action=possible_config_mismatch_check_settings_maxPositions`);
@@ -2400,6 +3814,32 @@ export class MarketScanner {
     let paperAutoResult: PaperAutoExecutionResult | undefined;
     let liveExecutionResult: PaperAutoExecutionResult | undefined;
     const selectedBuyCandidates = executionPlan.selectedCandidates.filter(sc => sc.plannedAction === 'BUY');
+    const globalMarketAction = String(noBuySummary?.marketAction ?? 'unknown').toLowerCase().replace(/-/g, '_');
+    const riskOffNoEntries = globalMarketAction === 'risk_off';
+    const finalGlobalSubmitBlockedReason = riskOffNoEntries ? 'GLOBAL_RISK_OFF' : 'none';
+    const finalActionableSelectedBuyCandidates = riskOffNoEntries ? [] : selectedBuyCandidates;
+    const finalActionableBuyCount = finalActionableSelectedBuyCandidates.length;
+    const selectedButSubmitBlockedCount = riskOffNoEntries ? selectedBuyCandidates.length : 0;
+    const isUnicornPlannedCandidate = (candidate: PlannedCandidate): boolean => (
+      String(candidate.scannerAutoEntryConfigSnapshot?.ownerName ?? '').toUpperCase() === 'UNICORN_HUNTER'
+      || String(candidate.scannerAutoEntryConfigSnapshot?.candidateSource ?? '').toLowerCase().includes('unicorn')
+      || String(candidate.scannerAutoEntryConfigSnapshot?.source ?? '').toLowerCase().includes('unicorn')
+      || String(candidate.strategySource ?? '').toLowerCase().includes('unicorn')
+    );
+    const executionModuleForCandidate = (candidate: PlannedCandidate, sourceCandidate?: ScannerCandidate): AutoBuyExecutionModule => {
+      const source = String(sourceCandidate?.executionSource ?? sourceCandidate?.candidateSource ?? (sourceCandidate as any)?.source ?? '').toLowerCase();
+      if (isUnicornPlannedCandidate(candidate) || source.includes('unicorn')) return 'unicorn_hunter';
+      if (source.includes('ml_predict_buy') || candidate.scannerAutoEntryConfigSnapshot?.source === 'ML_PREDICT_BUY' || candidate.mlPredictBuyDecision?.finalDecision === 'BUY_READY') return 'ml_predict_buy';
+      return 'autobots';
+    };
+    const maxAutobotsSubmitsPerCycle = 1;
+    const maxUnicornSubmitsPerCycle = this.unicornHunterSettings.maxUnicornBuysPerCycle;
+    let autobotsSubmitAttemptedThisCycle = 0;
+    let unicornSubmitAttemptedThisCycle = 0;
+    let globalSubmitAttemptedThisCycle = 0;
+    let unicornSelectedButNotSubmittedReason = 'none';
+    let autobotsConsumedGlobalSlot = false;
+    const unicornSelectedExecutableCount = selectedBuyCandidates.filter((candidate) => isUnicornPlannedCandidate(candidate)).length;
     const selectedSymbolsForAudit = selectedBuyCandidates.map((c) => c.symbol);
     const attemptedSymbols: string[] = [];
     const submitAttemptedSymbols: string[] = [];
@@ -2407,6 +3847,9 @@ export class MarketScanner {
     const skippedSymbols: string[] = [];
     const skippedBeforeHandoffSymbols: string[] = [];
     const skippedBeforeHandoffReasons: Record<string, string> = {};
+    const skippedBeforeSubmitSymbols: string[] = [];
+    const skippedBeforeSubmitReasons: Record<string, string> = {};
+    const submitEligibleSymbols: string[] = [];
     const skipReasonsBySymbol: Record<string, string> = {};
     let executionSelectedCount = 0;
     let submitAttemptedCount = 0;
@@ -2434,20 +3877,35 @@ export class MarketScanner {
           ? 'binance_live'
           : 'unknown_adapter'
       : 'no_executable_candidates';
+    logger.info(`EXECUTION_BUDGET_ALLOCATION_AUDIT: scanId=${scanId} option=per_module globalSafetyApplies=true autobotsMaxSubmitsPerCycle=${maxAutobotsSubmitsPerCycle} unicornMaxSubmitsPerCycle=${maxUnicornSubmitsPerCycle} selectedCount=${selectedBuyCandidates.length} unicornSelectedExecutableCount=${unicornSelectedExecutableCount} capitalAvailable=${executionPlan.capitalAvailable} availableSlots=${executionPlan.availableSlots} maxOpenPositions=${this.executionMaxPositions}`);
     const emitSelectedToExecutionHandoffAudit = (phase: 'post_planner_pre_routing' | 'post_routing_final') => {
       selectedToExecutionHandoffAuditEmitted = true;
-      const controllerReceivedSet = new Set(attemptedSymbols);
-      const skippedBeforeHandoffSet = new Set(skippedBeforeHandoffSymbols);
-      const missingAuditSymbols = selectedSymbolsForAudit.filter((symbol) => !controllerReceivedSet.has(symbol) && !skippedBeforeHandoffSet.has(symbol));
-      const invariantOk = selectedSymbolsForAudit.length === attemptedSymbols.length + skippedBeforeHandoffSymbols.length + missingAuditSymbols.length;
+      const selectedSetForHandoffAudit = new Set(selectedSymbolsForAudit);
+      const controllerReceivedSymbolsForAudit = attemptedSymbols.filter((symbol) => selectedSetForHandoffAudit.has(symbol));
+      const submitEligibleSymbolsForAudit = submitEligibleSymbols.filter((symbol) => selectedSetForHandoffAudit.has(symbol));
+      const skippedBeforeSubmitSymbolsForAudit = skippedBeforeSubmitSymbols.filter((symbol) => selectedSetForHandoffAudit.has(symbol));
+      const accounting = buildSelectedToExecutionHandoffAccounting({
+        rawSelectedSymbols: selectedSymbolsForAudit,
+        skippedBeforeControllerSymbols: skippedBeforeHandoffSymbols,
+        controllerReceivedSymbols: controllerReceivedSymbolsForAudit,
+        submitEligibleSymbols: submitEligibleSymbolsForAudit,
+        skippedBeforeSubmitSymbols: skippedBeforeSubmitSymbolsForAudit,
+      });
+      const missingAuditSymbols = accounting.mismatchSymbols;
       const buyReadySymbolsForAudit = finalExecutionPool.map((c) => c.symbol);
       const finalExecutableSymbolsForAudit = finalExecutionPool.filter((c) => buildStrategyAuditSnapshotFromCandidate(c).finalExecutable).map((c) => c.symbol);
       const waitingForConfirmationSymbols = Object.entries(skippedBeforeHandoffReasons).filter(([, reason]) => reason === 'waiting_for_confirmation').map(([symbol]) => symbol);
       const spreadBlockedSymbols = Object.entries(skippedBeforeHandoffReasons).filter(([, reason]) => reason === 'spread_too_high').map(([symbol]) => symbol);
-      const auditLine = `SELECTED_TO_EXECUTION_HANDOFF_AUDIT: scanId=${scanId} phase=${phase} selectedCount=${selectedSymbolsForAudit.length} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} selectedSymbols=${selectedSymbolsForAudit.join('|') || 'none'} paperAutoExecutionEnabled=${String(this.paperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} executionMode=${executionPlan.executionAdapter} executionAdapter=${getExecutionAdapterDisplay(executionPlan.executionAdapter)} routeBranch=${routeBranch} controllerReceivedSymbols=${attemptedSymbols.join('|') || 'none'} skippedBeforeHandoffSymbols=${skippedBeforeHandoffSymbols.join('|') || 'none'} skippedBeforeHandoffReasons=${Object.entries(skippedBeforeHandoffReasons).map(([symbol, reason]) => `${symbol}:${reason}`).join('|') || 'none'} transactionAuditSymbols=${transactionAuditSymbols.join('|') || 'none'} missingAuditSymbols=${missingAuditSymbols.join('|') || 'none'} invariantOk=${String(invariantOk)} buyReadySymbols=${buyReadySymbolsForAudit.join('|') || 'none'} finalExecutableSymbols=${finalExecutableSymbolsForAudit.join('|') || 'none'} handoffAttemptedSymbols=${selectedSymbolsForAudit.join('|') || 'none'} waitingForConfirmationSymbols=${waitingForConfirmationSymbols.join('|') || 'none'} spreadBlockedSymbols=${spreadBlockedSymbols.join('|') || 'none'} controllerReceivedCount=${attemptedSymbols.length} transactionAuditCount=${transactionAuditSymbols.length}`;
+      const skippedBeforeSubmitReasonText = Object.entries(skippedBeforeSubmitReasons).map(([symbol, reason]) => `${symbol}:${reason}`).join('|') || 'none';
+      const auditLine = `SELECTED_TO_EXECUTION_HANDOFF_AUDIT: scanId=${scanId} phase=${phase} rawSelectedCount=${accounting.rawSelectedSymbols.length} selectedCount=${selectedSymbolsForAudit.length} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} rawSelectedSymbols=${accounting.rawSelectedSymbols.join('|') || 'none'} selectedSymbols=${selectedSymbolsForAudit.join('|') || 'none'} paperAutoExecutionEnabled=${String(this.paperAutoEnabled)} paperAutoBuyFnPresent=${String(!!this.paperAutoBuyFn)} executionMode=${executionPlan.executionAdapter} executionAdapter=${getExecutionAdapterDisplay(executionPlan.executionAdapter)} routeBranch=${routeBranch} eligibleForControllerCount=${accounting.eligibleForControllerSymbols.length} eligibleForControllerSymbols=${accounting.eligibleForControllerSymbols.join('|') || 'none'} controllerAuditReceivedCount=${accounting.actualControllerReceivedCount} controllerReceivedSymbols=${accounting.controllerReceivedSymbols.join('|') || 'none'} submitEligibleCount=${accounting.submitEligibleSymbols.length} submitEligibleSymbols=${accounting.submitEligibleSymbols.join('|') || 'none'} skippedBeforeControllerSymbols=${accounting.skippedBeforeControllerSymbols.join('|') || 'none'} skippedBeforeHandoffSymbols=${accounting.skippedBeforeControllerSymbols.join('|') || 'none'} skippedBeforeHandoffReasons=${Object.entries(skippedBeforeHandoffReasons).map(([symbol, reason]) => `${symbol}:${reason}`).join('|') || 'none'} skippedBeforeSubmitCount=${accounting.skippedBeforeSubmitSymbols.length} skippedBeforeSubmitSymbols=${accounting.skippedBeforeSubmitSymbols.join('|') || 'none'} skippedBeforeSubmitReasons=${skippedBeforeSubmitReasonText} skippedSymbols=${[...new Set([...accounting.skippedBeforeControllerSymbols, ...accounting.skippedBeforeSubmitSymbols])].join('|') || 'none'} skippedReasons=${[...Object.entries(skippedBeforeHandoffReasons), ...Object.entries(skippedBeforeSubmitReasons)].map(([symbol, reason]) => `${symbol}:${reason}`).join('|') || 'none'} transactionAuditSymbols=${transactionAuditSymbols.join('|') || 'none'} missingAuditSymbols=${missingAuditSymbols.join('|') || 'none'} expectedControllerReceivedCount=${accounting.expectedControllerReceivedCount} actualControllerReceivedCount=${accounting.actualControllerReceivedCount} countDelta=${accounting.countDelta} invariantFormulaUsed="${accounting.invariantFormulaUsed}" invariantOk=${String(accounting.invariantOk)} buyReadySymbols=${buyReadySymbolsForAudit.join('|') || 'none'} finalExecutableSymbols=${finalExecutableSymbolsForAudit.join('|') || 'none'} handoffAttemptedSymbols=${selectedSymbolsForAudit.join('|') || 'none'} waitingForConfirmationSymbols=${waitingForConfirmationSymbols.join('|') || 'none'} spreadBlockedSymbols=${spreadBlockedSymbols.join('|') || 'none'} controllerReceivedCount=${accounting.actualControllerReceivedCount} transactionAuditCount=${transactionAuditSymbols.length}`;
       logger.info(auditLine);
-      if (phase === 'post_routing_final' && selectedSymbolsForAudit.length > 0 && (!invariantOk || missingAuditSymbols.length > 0)) {
-        logger.error(`SELECTED_TO_EXECUTION_HANDOFF_ERROR: scanId=${scanId} selectedCount=${selectedSymbolsForAudit.length} controllerReceivedCount=${attemptedSymbols.length} skippedBeforeHandoffCount=${skippedBeforeHandoffSymbols.length} missingAuditSymbols=${missingAuditSymbols.join('|') || 'none'} invariantOk=${String(invariantOk)} routeBranch=${routeBranch}`);
+      logger.info(`EXECUTION_HANDOFF_COUNT_INVARIANT_AUDIT: scanId=${scanId} routeBranch=${routeBranch} rawSelectedSymbols=${accounting.rawSelectedSymbols.join('|') || 'none'} skippedSymbols=${[...new Set([...skippedBeforeHandoffSymbols, ...skippedBeforeSubmitSymbols])].join('|') || 'none'} skippedReasons=${[...Object.entries(skippedBeforeHandoffReasons), ...Object.entries(skippedBeforeSubmitReasons)].map(([symbol, reason]) => `${symbol}:${reason}`).join('|') || 'none'} eligibleForControllerSymbols=${accounting.eligibleForControllerSymbols.join('|') || 'none'} controllerReceivedSymbols=${accounting.controllerReceivedSymbols.join('|') || 'none'} submitEligibleSymbols=${accounting.submitEligibleSymbols.join('|') || 'none'} expectedControllerReceivedCount=${accounting.expectedControllerReceivedCount} actualControllerReceivedCount=${accounting.actualControllerReceivedCount} countDelta=${accounting.countDelta} invariantFormulaUsed="${accounting.invariantFormulaUsed}" invariantOk=${String(accounting.invariantOk)}`);
+      logger.info(`EXECUTION_HANDOFF_SKIPPED_CANDIDATES_AUDIT: scanId=${scanId} routeBranch=${routeBranch} skippedBeforeControllerSymbols=${accounting.skippedBeforeControllerSymbols.join('|') || 'none'} skippedBeforeControllerReasons=${Object.entries(skippedBeforeHandoffReasons).map(([symbol, reason]) => `${symbol}:${reason}`).join('|') || 'none'} skippedBeforeSubmitSymbols=${accounting.skippedBeforeSubmitSymbols.join('|') || 'none'} skippedBeforeSubmitReasons=${skippedBeforeSubmitReasonText} source=MarketScanner`);
+      if (routeBranch === 'paper_simulated') {
+        logger.info(`PAPER_SIMULATED_HANDOFF_ROUTE_AUDIT: scanId=${scanId} rawSelectedSymbols=${accounting.rawSelectedSymbols.join('|') || 'none'} controllerAuditReceivedSymbols=${accounting.controllerReceivedSymbols.join('|') || 'none'} submitEligibleSymbols=${accounting.submitEligibleSymbols.join('|') || 'none'} skippedBeforeSubmitSymbols=${accounting.skippedBeforeSubmitSymbols.join('|') || 'none'} routeBehavior=controller_receives_for_audit_then_submit_gate_applies invariantFormulaUsed="${accounting.invariantFormulaUsed}" invariantOk=${String(accounting.invariantOk)}`);
+      }
+      if (phase === 'post_routing_final' && selectedSymbolsForAudit.length > 0 && (!accounting.invariantOk || missingAuditSymbols.length > 0)) {
+        logger.error(`SELECTED_TO_EXECUTION_HANDOFF_ERROR: scanId=${scanId} selectedCount=${selectedSymbolsForAudit.length} rawSelectedCount=${accounting.rawSelectedSymbols.length} expectedControllerReceivedCount=${accounting.expectedControllerReceivedCount} actualControllerReceivedCount=${accounting.actualControllerReceivedCount} controllerReceivedCount=${accounting.actualControllerReceivedCount} skippedBeforeHandoffCount=${accounting.skippedBeforeControllerSymbols.length} skippedBeforeSubmitCount=${accounting.skippedBeforeSubmitSymbols.length} missingAuditSymbols=${missingAuditSymbols.join('|') || 'none'} countDelta=${accounting.countDelta} symbolsCausingMismatch=${accounting.mismatchSymbols.join('|') || 'none'} invariantFormulaUsed="${accounting.invariantFormulaUsed}" invariantOk=${String(accounting.invariantOk)} routeBranch=${routeBranch}`);
       }
     };
     if (selectedSymbolsForAudit.length > 0) {
@@ -2476,19 +3934,71 @@ export class MarketScanner {
     const recordPreAdapterBlocker = (symbol: string, reason: string) => {
       const normalized = normalizeExecutionBlocker(reason);
       if (!skippedSymbols.includes(symbol)) skippedSymbols.push(symbol);
-      if (!skippedBeforeHandoffSymbols.includes(symbol)) skippedBeforeHandoffSymbols.push(symbol);
-      skippedBeforeHandoffReasons[symbol] = normalized;
+      if (attemptedSymbols.includes(symbol)) {
+        if (!skippedBeforeSubmitSymbols.includes(symbol)) skippedBeforeSubmitSymbols.push(symbol);
+        skippedBeforeSubmitReasons[symbol] = normalized;
+      } else {
+        if (!skippedBeforeHandoffSymbols.includes(symbol)) skippedBeforeHandoffSymbols.push(symbol);
+        skippedBeforeHandoffReasons[symbol] = normalized;
+      }
       skipReasonsBySymbol[symbol] = normalized;
       logger.info(`SELECTED_CANDIDATE_PRE_ADAPTER_BLOCKED: scanId=${scanId} symbol=${symbol} adapterCalled=false explicitBlocker=${normalized} rawReason=${String(reason).replace(/\s+/g, '_')}`);
     };
     const recordControllerBlocker = (symbol: string, reason: string) => {
       const normalized = normalizeExecutionBlocker(reason);
       if (!skippedSymbols.includes(symbol)) skippedSymbols.push(symbol);
+      if (!skippedBeforeSubmitSymbols.includes(symbol)) skippedBeforeSubmitSymbols.push(symbol);
+      skippedBeforeSubmitReasons[symbol] = normalized;
       skipReasonsBySymbol[symbol] = normalized;
       logger.info(`SELECTED_CANDIDATE_CONTROLLER_BLOCKED: scanId=${scanId} symbol=${symbol} controllerReceived=true adapterCalled=false explicitBlocker=${normalized} rawReason=${String(reason).replace(/\s+/g, '_')}`);
     };
-    if (executionPlan.canExecute) {
-      const buyableCandidates = selectedBuyCandidates;
+    if (riskOffNoEntries) {
+      for (const candidate of selectedBuyCandidates) {
+        const sourceCandidate = rankedCandidatesToAnnotate.find(c => c.symbol === candidate.symbol);
+        const isUnicornSource = sourceCandidate?.candidateSource === 'unicorn_hunter'
+          || (sourceCandidate as any)?.source === 'unicorn_hunter'
+          || candidate.scannerAutoEntryConfigSnapshot?.ownerName === 'UNICORN_HUNTER';
+        logger.info(
+          `FINAL_EXECUTION_GLOBAL_GUARD_AUDIT: ` +
+          `scanId=${scanId} ` +
+          `globalMarketAction=${globalMarketAction} ` +
+          `riskOffNoEntries=${String(riskOffNoEntries)} ` +
+          `candidateSymbol=${candidate.symbol} ` +
+          `uiStatusBefore=${sourceCandidate?.status ?? candidate.status ?? 'unknown'} ` +
+          `finalExecutableBeforeGlobalGuard=${String(sourceCandidate?.finalExecutable ?? true)} ` +
+          `finalExecutableAfterGlobalGuard=false ` +
+          `submitAllowed=false ` +
+          `submitBlockedReason=GLOBAL_RISK_OFF`
+        );
+        skippedSymbols.push(candidate.symbol);
+        skippedBeforeHandoffSymbols.push(candidate.symbol);
+        const sourceSpecificRiskOffReason = isUnicornSource ? 'UNICORN_BLOCK_RISK' : 'GLOBAL_RISK_OFF';
+        skippedBeforeHandoffReasons[candidate.symbol] = sourceSpecificRiskOffReason;
+        skipReasonsBySymbol[candidate.symbol] = sourceSpecificRiskOffReason;
+        if (isUnicornSource) {
+          logger.info(`UNICORN_HUNTER_EXECUTION_HANDOFF_AUDIT: symbol=${candidate.symbol} source=unicorn_hunter owner=UnicornHunter candidateSource=unicorn_hunter strategySource=unicorn_hunter executionSource=unicorn_hunter selectedForExecution=true finalExecutable=false entryGateApproved=true submitAttempted=false blockedReason=UNICORN_BLOCK_RISK`);
+        }
+      }
+      if (!executionPlan.noBuyReasons.includes('GLOBAL_RISK_OFF')) executionPlan.noBuyReasons.unshift('GLOBAL_RISK_OFF');
+    } else {
+      for (const candidate of selectedBuyCandidates) {
+        const sourceCandidate = rankedCandidatesToAnnotate.find(c => c.symbol === candidate.symbol);
+        logger.info(
+          `FINAL_EXECUTION_GLOBAL_GUARD_AUDIT: ` +
+          `scanId=${scanId} ` +
+          `globalMarketAction=${globalMarketAction} ` +
+          `riskOffNoEntries=${String(riskOffNoEntries)} ` +
+          `candidateSymbol=${candidate.symbol} ` +
+          `uiStatusBefore=${sourceCandidate?.status ?? candidate.status ?? 'unknown'} ` +
+          `finalExecutableBeforeGlobalGuard=${String(sourceCandidate?.finalExecutable ?? true)} ` +
+          `finalExecutableAfterGlobalGuard=${String(sourceCandidate?.finalExecutable ?? true)} ` +
+          `submitAllowed=true ` +
+          `submitBlockedReason=none`
+        );
+      }
+    }
+    if (executionPlan.canExecute && !riskOffNoEntries) {
+      const buyableCandidates = finalActionableSelectedBuyCandidates;
       if (buyableCandidates.length > 0) {
         for (const firstCandidate of buyableCandidates) {
         const sc = rankedCandidatesToAnnotate.find(c => c.symbol === firstCandidate.symbol);
@@ -2500,9 +4010,51 @@ export class MarketScanner {
           const currentOpenSymbols = this.executionOpenSymbolsFn?.() ?? openSymbols;
           const currentPendingSymbols = this.executionPendingSymbolsFn?.() ?? pendingOrderSymbols;
           const currentUsedCapital = this.executionUsedCapitalFn?.() ?? usedCapital;
+          const isMlPredictBuyCandidate = sc.executionSource === 'ML_PREDICT_BUY' || firstCandidate.scannerAutoEntryConfigSnapshot?.source === 'ML_PREDICT_BUY' || firstCandidate.mlPredictBuyDecision?.finalDecision === 'BUY_READY';
+          const isUnicornCandidate = sc.candidateSource === 'unicorn_hunter' || (sc as any).source === 'unicorn_hunter' || firstCandidate.scannerAutoEntryConfigSnapshot?.ownerName === 'UNICORN_HUNTER';
+          const executionModule = executionModuleForCandidate(firstCandidate, sc);
+          const paperExecutionAllowed = this.paperAutoEnabled || isMlPredictBuyCandidate || isUnicornCandidate;
           openPositionsAfterHandoff = currentOpenSymbols.length;
-          logger.info(`EXECUTION_ROUTING_AUDIT: symbol=${firstCandidate.symbol} decisionMode=${executionPlan.decisionMode} executionAdapter=${displayAdapter} plannedAction=${firstCandidate.plannedAction} routedController=${displayController} executionAllowed=${String(this.paperAutoEnabled && (adapter === 'paper_simulated' ? !!this.paperAutoBuyFn : !!this.liveBuyFn))} executionBlockReason=none`);
-          if (adapter === 'paper_simulated' && this.paperAutoEnabled && this.paperAutoBuyFn) {
+          const currentCapitalAvailable = Math.max(0, this.executionCapital - currentUsedCapital);
+          const moduleSubmitCount = executionModule === 'unicorn_hunter' ? unicornSubmitAttemptedThisCycle : autobotsSubmitAttemptedThisCycle;
+          const moduleSubmitLimit = executionModule === 'unicorn_hunter' ? maxUnicornSubmitsPerCycle : maxAutobotsSubmitsPerCycle;
+          if (isUnicornCandidate) {
+            const slotOwner = unicornSubmitAttemptedThisCycle > 0 ? 'UnicornHunter' : 'none';
+            const cooldownRemainingMs = autoBuyQueue.cooldownRemainingMs(executionModule);
+            const openUnicornPositionsNow = (this.executionOpenPositionSourcesFn?.() ?? []).filter((position) => `${position.source ?? ''} ${position.ownerName ?? ''}`.toLowerCase().includes('unicorn')).length;
+            const unicornMaxOpenReached = openUnicornPositionsNow >= this.unicornHunterSettings.maxOpenUnicornPositions;
+            const unicornDailyLimitReached = this.unicornTradesToday >= this.unicornHunterSettings.maxUnicornTradesPerDay;
+            const budgetBlockedReason = moduleSubmitCount >= moduleSubmitLimit
+                ? 'UNICORN_MAX_BUYS_PER_CYCLE_REACHED'
+                : unicornMaxOpenReached
+                  ? 'UNICORN_MAX_OPEN_POSITIONS_REACHED'
+                  : unicornDailyLimitReached
+                    ? 'UNICORN_MAX_TRADES_PER_DAY_REACHED'
+                : cooldownRemainingMs > 0
+                  ? 'UNICORN_COOLDOWN_ACTIVE'
+                  : 'none';
+            const nextUnicornBuyAllowedAt = cooldownRemainingMs > 0 ? new Date(Date.now() + cooldownRemainingMs).toISOString() : 'now';
+            logger.info(`UNICORN_BUDGET_STATE_AUDIT: symbol=${sc.symbol} scanId=${scanId} stage=${sc.lifecycleStatus ?? sc.status} score=${(sc as any).unicornScore ?? sc.rawScore ?? 'n/a'} sourceOwner=${sc.runtimeSnapshot?.sourceOwner ?? 'unknown'} ownerType=${(sc as any).ownerType ?? 'unknown'} strategy=${sc.selectedStrategy ?? 'missing'} finalExecutionStrategy=${(sc as any).finalExecutionStrategy ?? 'missing'} entryRule=${(sc as any).finalEntryRule ?? (sc as any).entryRule ?? sc.mainReason ?? 'missing'} setupResult=${(sc as any).setupResult ?? firstCandidate.scannerAutoEntryConfigSnapshot?.setupResult ?? 'missing'} buyAllowed=${String(budgetBlockedReason === 'none')} finalExecutable=${String((sc as any).finalExecutable === true)} submitAttempted=false blockedReason=${budgetBlockedReason} unicornSelectedThisCycle=${executionPlan.unicornSelectedThisCycle ?? unicornSelectedExecutableCount} unicornSubmittedThisCycle=${unicornSubmitAttemptedThisCycle} maxUnicornBuysPerCycle=${moduleSubmitLimit} autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} maxAutoBotsBuysPerCycle=${maxAutobotsSubmitsPerCycle} slotOwner=${slotOwner} unicornSlotUsed=${String(unicornSubmitAttemptedThisCycle > 0)} autoBotsSlotUsed=false openUnicornPositions=${openUnicornPositionsNow} maxUnicornOpenPositions=${this.unicornHunterSettings.maxOpenUnicornPositions} unicornTradesToday=${this.unicornTradesToday} maxUnicornTradesPerDay=${this.unicornHunterSettings.maxUnicornTradesPerDay} cooldownRemainingMs=${cooldownRemainingMs} nextUnicornBuyAllowedAt=${nextUnicornBuyAllowedAt} invariantOk=true failureReason=${budgetBlockedReason}`);
+            logger.info(`UNICORN_SLOT_OWNERSHIP_AUDIT: symbol=${sc.symbol} scanId=${scanId} stage=${sc.lifecycleStatus ?? sc.status} score=${(sc as any).unicornScore ?? sc.rawScore ?? 'n/a'} sourceOwner=${sc.runtimeSnapshot?.sourceOwner ?? 'unknown'} ownerType=${(sc as any).ownerType ?? 'unknown'} strategy=${sc.selectedStrategy ?? 'missing'} finalExecutionStrategy=${(sc as any).finalExecutionStrategy ?? 'missing'} entryRule=${(sc as any).finalEntryRule ?? (sc as any).entryRule ?? sc.mainReason ?? 'missing'} setupResult=${(sc as any).setupResult ?? firstCandidate.scannerAutoEntryConfigSnapshot?.setupResult ?? 'missing'} buyAllowed=${String((sc as any).buyAllowed === true)} finalExecutable=${String((sc as any).finalExecutable === true)} submitAttempted=false blockedReason=${budgetBlockedReason} unicornSelectedThisCycle=${executionPlan.unicornSelectedThisCycle ?? unicornSelectedExecutableCount} unicornSubmittedThisCycle=${unicornSubmitAttemptedThisCycle} maxUnicornBuysPerCycle=${moduleSubmitLimit} autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} maxAutoBotsBuysPerCycle=${maxAutobotsSubmitsPerCycle} slotOwner=${slotOwner} autobotsSlotUsed=false unicornSlotUsed=${String(unicornSubmitAttemptedThisCycle > 0)} openUnicornPositions=${openUnicornPositionsNow} maxUnicornOpenPositions=${this.unicornHunterSettings.maxOpenUnicornPositions} unicornTradesToday=${this.unicornTradesToday} maxUnicornTradesPerDay=${this.unicornHunterSettings.maxUnicornTradesPerDay} cooldownRemainingMs=${cooldownRemainingMs} nextUnicornBuyAllowedAt=${nextUnicornBuyAllowedAt} invariantOk=true failureReason=${budgetBlockedReason}`);
+            logger.info(`UNICORN_SUBMIT_ELIGIBILITY_AUDIT: symbol=${sc.symbol} scanId=${scanId} stage=${sc.lifecycleStatus ?? sc.status} score=${(sc as any).unicornScore ?? sc.rawScore ?? 'n/a'} sourceOwner=${sc.runtimeSnapshot?.sourceOwner ?? 'unknown'} ownerType=${(sc as any).ownerType ?? 'unknown'} strategy=${sc.selectedStrategy ?? 'missing'} finalExecutionStrategy=${(sc as any).finalExecutionStrategy ?? 'missing'} entryRule=${(sc as any).finalEntryRule ?? (sc as any).entryRule ?? sc.mainReason ?? 'missing'} setupResult=${(sc as any).setupResult ?? firstCandidate.scannerAutoEntryConfigSnapshot?.setupResult ?? 'missing'} buyAllowed=${String(budgetBlockedReason === 'none')} finalExecutable=${String((sc as any).finalExecutable === true)} submitAttempted=false blockedReason=${budgetBlockedReason} unicornSelectedThisCycle=${executionPlan.unicornSelectedThisCycle ?? unicornSelectedExecutableCount} unicornSubmittedThisCycle=${unicornSubmitAttemptedThisCycle} maxUnicornBuysPerCycle=${moduleSubmitLimit} autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} maxAutoBotsBuysPerCycle=${maxAutobotsSubmitsPerCycle} slotOwner=${slotOwner} autobotsSlotUsed=false unicornSlotUsed=${String(unicornSubmitAttemptedThisCycle > 0)} openUnicornPositions=${openUnicornPositionsNow} maxUnicornOpenPositions=${this.unicornHunterSettings.maxOpenUnicornPositions} unicornTradesToday=${this.unicornTradesToday} maxUnicornTradesPerDay=${this.unicornHunterSettings.maxUnicornTradesPerDay} cooldownRemainingMs=${cooldownRemainingMs} nextUnicornBuyAllowedAt=${nextUnicornBuyAllowedAt} invariantOk=true failureReason=${budgetBlockedReason}`);
+            if (budgetBlockedReason !== 'none') {
+              perSymbolDecisions.push({ symbol: sc.symbol, reason: budgetBlockedReason, passed: false });
+              recordPreAdapterBlocker(sc.symbol, budgetBlockedReason);
+              unicornSelectedButNotSubmittedReason = budgetBlockedReason;
+              logger.info(`UNICORN_BUY_BLOCKED_AUDIT: symbol=${sc.symbol} scanId=${scanId} source=unicorn_hunter owner=UnicornHunter selectedForExecution=true finalExecutable=${String((sc as any).finalExecutable === true)} buyAllowed=false blockedReason=${budgetBlockedReason} finalNoBuyReasonCode=${budgetBlockedReason} finalNoBuyReasonLabel=${budgetBlockedReason} missingFields=none slotOwner=${slotOwner} unicornSelectedThisCycle=${executionPlan.unicornSelectedThisCycle ?? unicornSelectedExecutableCount} unicornSubmittedThisCycle=${unicornSubmitAttemptedThisCycle} maxUnicornBuysPerCycle=${moduleSubmitLimit} autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} maxAutoBotsBuysPerCycle=${maxAutobotsSubmitsPerCycle} autoBotsSlotUsed=false unicornSlotUsed=${String(unicornSubmitAttemptedThisCycle > 0)} openUnicornPositions=${openUnicornPositionsNow} maxUnicornOpenPositions=${this.unicornHunterSettings.maxOpenUnicornPositions} unicornTradesToday=${this.unicornTradesToday} maxUnicornTradesPerDay=${this.unicornHunterSettings.maxUnicornTradesPerDay} cooldownRemainingMs=${cooldownRemainingMs} nextUnicornBuyAllowedAt=${nextUnicornBuyAllowedAt} invariantOk=true failureReason=${budgetBlockedReason}`);
+              continue;
+            }
+          }
+          if (moduleSubmitCount >= moduleSubmitLimit) {
+            const budgetReason = isUnicornCandidate ? 'UNICORN_MAX_BUYS_PER_CYCLE_REACHED' : 'MAX_NEW_BUYS_PER_CYCLE_REACHED';
+            perSymbolDecisions.push({ symbol: sc.symbol, reason: budgetReason, passed: false });
+            recordPreAdapterBlocker(sc.symbol, budgetReason);
+            if (isUnicornCandidate) unicornSelectedButNotSubmittedReason = budgetReason;
+            logger.info(`${isUnicornCandidate ? 'UNICORN' : 'AUTOBOTS'}_EXECUTION_BUDGET_AUDIT: scanId=${scanId} symbol=${sc.symbol} module=${executionModule} selectedExecutable=true moduleSubmitAttemptedThisCycle=${moduleSubmitCount} moduleSubmitLimit=${moduleSubmitLimit} globalSubmitAttemptedThisCycle=${globalSubmitAttemptedThisCycle} submitAllowed=false finalNoBuyReason=${budgetReason}`);
+            continue;
+          }
+          logger.info(`EXECUTION_ROUTING_AUDIT: symbol=${firstCandidate.symbol} decisionMode=${executionPlan.decisionMode} executionAdapter=${displayAdapter} plannedAction=${firstCandidate.plannedAction} routedController=${displayController} source=${isUnicornCandidate ? 'UNICORN_HUNTER' : isMlPredictBuyCandidate ? 'ML_PREDICT_BUY' : 'AutoBots'} executionAllowed=${String(adapter === 'paper_simulated' ? paperExecutionAllowed && !!this.paperAutoBuyFn : !!this.liveBuyFn)} executionBlockReason=none`);
+          if (adapter === 'paper_simulated' && paperExecutionAllowed && this.paperAutoBuyFn) {
             const revalResult = revalidateCandidate({
               candidate: sc, planEntry: firstCandidate,
               openSymbols: currentOpenSymbols, pendingLockSymbols: currentPendingSymbols,
@@ -2525,10 +4077,15 @@ export class MarketScanner {
             logger.info(`DEMO_EXECUTION_CONTROLLER_RECEIVED: symbol=${sc.symbol} scanId=${scanId} selectedCount=${buyableCandidates.length} openPositionsBefore=${currentOpenSymbols.length}`);
             if (!revalResult.blocked && revalResult.attempted) {
               // Inter-buy cooldown via execution queue
-              const cooldownCheck = autoBuyQueue.blockIfCooldownActive(sc.symbol);
+              const cooldownCheck = autoBuyQueue.blockIfCooldownActive(sc.symbol, executionModule);
               if (cooldownCheck.blocked) {
-                perSymbolDecisions.push({ symbol: sc.symbol, reason: 'cooldown_active', passed: false });
-                logger.info(`AUTO_BUY_RATE_LIMIT_ENFORCEMENT_AUDIT now=${Date.now()} symbol=${sc.symbol} lastAutoBuyAt=${autoBuyQueue.getState().lastBuyAt} elapsedMs=${Date.now() - autoBuyQueue.getState().lastBuyAt} requiredCooldownMs=${autoBuyQueue.getState().cooldownMs} buyAllowedByCooldown=false blockedSymbols=${sc.symbol} violation=false`);
+                const cooldownReason = isUnicornCandidate ? 'UNICORN_BLOCK_COOLDOWN_ACTIVE' : 'cooldown_active';
+                perSymbolDecisions.push({ symbol: sc.symbol, reason: cooldownReason, passed: false });
+                recordPreAdapterBlocker(sc.symbol, cooldownReason);
+                if (isUnicornCandidate) unicornSelectedButNotSubmittedReason = cooldownReason;
+                const queueState = autoBuyQueue.getState();
+                const moduleLastBuyAt = queueState.lastBuyAtByModule[executionModule] ?? 0;
+                logger.info(`AUTO_BUY_RATE_LIMIT_ENFORCEMENT_AUDIT now=${Date.now()} symbol=${sc.symbol} module=${executionModule} lastAutoBuyAt=${moduleLastBuyAt} elapsedMs=${Date.now() - moduleLastBuyAt} requiredCooldownMs=${queueState.cooldownMs} buyAllowedByCooldown=false blockedSymbols=${sc.symbol} violation=false finalNoBuyReason=${cooldownReason}`);
                 continue;
               }
 
@@ -2573,6 +4130,7 @@ export class MarketScanner {
 
               if (!freshTpRoomOk) {
                 perSymbolDecisions.push({ symbol: sc.symbol, reason: 'tp_room_revalidation_failed', passed: false });
+                recordPreAdapterBlocker(sc.symbol, 'tp_room_revalidation_failed');
                 continue;
               }
 
@@ -2592,6 +4150,7 @@ export class MarketScanner {
 
               if (!cacheFresh) {
                 perSymbolDecisions.push({ symbol: sc.symbol, reason: 'reference_data_stale_before_buy', passed: false });
+                recordPreAdapterBlocker(sc.symbol, 'reference_data_stale_before_buy');
                 continue;
               }
 
@@ -2639,6 +4198,7 @@ export class MarketScanner {
 
               if (!allCriticalFieldsFresh) {
                 perSymbolDecisions.push({ symbol: sc.symbol, reason: 'pre_buy_revalidation_incomplete', passed: false });
+                recordPreAdapterBlocker(sc.symbol, 'pre_buy_revalidation_incomplete');
                 logger.info(`PRE_BUY_REVALIDATION_INCOMPLETE_AUDIT symbol=${sc.symbol} missingFreshFields=${missingFreshFields.join('|')} adapterCallAllowed=false blockReason=critical_fields_stale`);
                 continue;
               }
@@ -2691,12 +4251,14 @@ export class MarketScanner {
 
               if (!freshFinalExecutable || !freshBuyAllowed) {
                 perSymbolDecisions.push({ symbol: sc.symbol, reason: 'fresh_strategy_not_executable', passed: false });
+                recordPreAdapterBlocker(sc.symbol, 'fresh_strategy_not_executable');
                 logger.info(`PRE_ADAPTER_REVALIDATION_GATE_AUDIT symbol=${sc.symbol} revalidationPassed=false freshStrategy=${freshStrategyAudit.strategySelected} freshEntryRule=${freshEntryRule} freshFinalExecutable=${freshFinalExecutable} freshBuyAllowed=${freshBuyAllowed} duplicateOpenPosition=${currentOpenSymbols.includes(sc.symbol)} pendingOrder=${currentPendingSymbols.includes(sc.symbol)} adapterCallAllowed=false blockReasons=${freshStrategyAudit.blockReasons?.join('|') || 'strategy_not_executable'}`);
                 continue;
               }
 
               if (freshStrategyAudit.strategySelected.toLowerCase() === 'wait') {
                 perSymbolDecisions.push({ symbol: sc.symbol, reason: 'fresh_strategy_is_wait', passed: false });
+                recordPreAdapterBlocker(sc.symbol, 'fresh_strategy_is_wait');
                 continue;
               }
 
@@ -2714,6 +4276,7 @@ export class MarketScanner {
                   logger.info(`PROFESSIONAL_GATE_AUDIT: symbol=${sc.symbol} entryConfirmationMode=${this.entryConfirmationMode} professionalGateMode=${professionalGate.mode} score=${professionalGate.score} verdict=${professionalGate.verdict} requiredVerdict=STRONG_BUY requiredMinScore=${professionalGate.threshold} blockers=${proAnalysis.professionalBlockers.join('|') || 'none'} isHardGate=${String(professionalGate.mode === 'hard_gate')} gatePassed=${String(professionalGate.allowed)} finalBuyBlockedReasonContribution=${professionalGate.blocker} reasonTrace=${professionalGate.reasonTrace.join('>')}`);
                   if (!professionalGate.allowed) {
                     perSymbolDecisions.push({ symbol: sc.symbol, reason: professionalGate.blocker, passed: false });
+                    recordPreAdapterBlocker(sc.symbol, professionalGate.blocker);
                     logger.info(`SMART_BUY_BLOCKED_AUDIT symbol=${sc.symbol} professionalGateMode=${professionalGate.mode} professionalScore=${proAnalysis.professionalScore} requiredMinScore=${this.smartProfessionalMinScore} professionalVerdict=${proAnalysis.professionalVerdict} riskLabel=${proAnalysis.riskLabel} reasons=${proAnalysis.professionalReasons.join('|')} blockers=${proAnalysis.professionalBlockers.join('|')} anchorSettingEnabled=${proAnalysis.anchorSettingEnabled} anchorDecision=${proAnalysis.anchorDecision} anchorBlockApplied=${proAnalysis.anchorBlockApplied}`);
                     continue;
                   }
@@ -2743,6 +4306,7 @@ export class MarketScanner {
 
               if (!smartGuardResult.allowed) {
                 perSymbolDecisions.push({ symbol: sc.symbol, reason: smartGuardResult.blockReason ?? 'smart_guard_blocked', passed: false });
+                recordPreAdapterBlocker(sc.symbol, smartGuardResult.blockReason ?? 'smart_guard_blocked');
                 logger.info(`SMART_MOMENTUM_ENTRY_AUDIT symbol=${sc.symbol} entryMode=${this.entryConfirmationMode} strategySource=${sc.strategySource ?? 'n/a'} marketBestFit=n/a candidateSelectedStrategy=${sc.selectedStrategy ?? 'n/a'} finalExecutionStrategy=${sc.selectedStrategy ?? 'n/a'} momentumConfirmed=${sc.momentumConfirmed ?? false} dipPct=${sc.dipPercent ?? 0} reboundPct=${sc.reboundPercent ?? 0} overextended=${smartGuardResult.warnings.join('|')} candleExhaustion=${sc.blockReasons?.some(r => String(r).toLowerCase().includes('candle')) ?? false} priceFresh=${(sc.priceAgeMs ?? 0) < this.maxPriceAgeMs} finalExecutable=${String((sc as any).finalExecutable ?? 'n/a')} buyAllowed=${String((sc as any).buyAllowed ?? 'n/a')} whyMomentumAllowed=false whySmartAllowedThis=false blockReason=${smartGuardResult.blockReason} sourceFunction=MarketScanner.successPath`);
 
                 // Log the entry mode behavior
@@ -2751,21 +4315,38 @@ export class MarketScanner {
               }
 
               preAdapterAllowedCount++;
+              if (!submitEligibleSymbols.includes(sc.symbol)) submitEligibleSymbols.push(sc.symbol);
               perSymbolDecisions.push({ symbol: sc.symbol, reason: 'pre_adapter_allowed', passed: true });
               try {
                 transactionAuditSymbols.push(sc.symbol);
                 logger.info(`DEMO_EXECUTION_CONTROLLER_HANDOFF: symbol=${sc.symbol} scanId=${scanId} adapterCalled=pending transactionAuditExpected=true`);
+                if (isUnicornCandidate) {
+                  logger.info(`UNICORN_BUY_SUBMIT_AUDIT: symbol=${sc.symbol} scanId=${scanId} stage=${sc.lifecycleStatus ?? sc.status} score=${(sc as any).unicornScore ?? sc.rawScore ?? 'n/a'} sourceOwner=${sc.runtimeSnapshot?.sourceOwner ?? 'unknown'} ownerType=${(sc as any).ownerType ?? 'unknown'} strategy=${sc.selectedStrategy ?? 'missing'} finalExecutionStrategy=${(sc as any).finalExecutionStrategy ?? 'missing'} entryRule=${(sc as any).finalEntryRule ?? (sc as any).entryRule ?? sc.mainReason ?? 'missing'} setupResult=${(sc as any).setupResult ?? firstCandidate.scannerAutoEntryConfigSnapshot?.setupResult ?? 'missing'} buyAllowed=true finalExecutable=true submitAttempted=true blockedReason=none unicornSelectedThisCycle=${executionPlan.unicornSelectedThisCycle ?? unicornSelectedExecutableCount} unicornSubmittedThisCycle=${unicornSubmitAttemptedThisCycle} maxUnicornBuysPerCycle=${moduleSubmitLimit} autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} maxAutoBotsBuysPerCycle=${maxAutobotsSubmitsPerCycle} slotOwner=UnicornHunter autobotsSlotUsed=false unicornSlotUsed=${String(unicornSubmitAttemptedThisCycle > 0)} openUnicornPositions=${(this.executionOpenPositionSourcesFn?.() ?? []).filter((position) => `${position.source ?? ''} ${position.ownerName ?? ''}`.toLowerCase().includes('unicorn')).length} maxUnicornOpenPositions=${this.unicornHunterSettings.maxOpenUnicornPositions} unicornTradesToday=${this.unicornTradesToday} maxUnicornTradesPerDay=${this.unicornHunterSettings.maxUnicornTradesPerDay} cooldownRemainingMs=0 nextUnicornBuyAllowedAt=now invariantOk=true failureReason=none`);
+                }
                 const runResult = await this.paperAutoBuyFn(firstCandidate, sc);
-                autoBuyQueue.recordBuySubmitted(sc.symbol);
+                autoBuyQueue.recordBuySubmitted(sc.symbol, executionModule);
                 paperAutoResult = { ...revalResult, ...runResult };
                 if (paperAutoResult.adapterCalled) {
                   adapterCalledCount++;
                   submitAttemptedSymbols.push(sc.symbol);
+                  globalSubmitAttemptedThisCycle++;
+                  if (executionModule === 'unicorn_hunter') unicornSubmitAttemptedThisCycle++;
+                  else autobotsSubmitAttemptedThisCycle++;
+                  if (executionModule === 'autobots' || executionModule === 'ml_predict_buy') autobotsConsumedGlobalSlot = true;
                 }
                 if (paperAutoResult.adapterCalled && !paperAutoResult.blocked) adapterAcceptedCount++;
                 if (paperAutoResult.executed) orderFilledCount++;
-                if (paperAutoResult.positionCreated) positionCreatedCount++;
-                if (paperAutoResult.positionCreated) journalPersistedCount++;
+            if (paperAutoResult.positionCreated) positionCreatedCount++;
+            if (paperAutoResult.positionCreated) journalPersistedCount++;
+            if (paperAutoResult.positionCreated && ((sc as any).source === 'unicorn_hunter' || sc.candidateSource === 'unicorn_hunter')) {
+              this.resetUnicornDailyCounterIfNeeded();
+              this.unicornTradesToday += 1;
+              logger.info(`UNICORN_DAILY_LIMIT_AUDIT scanId=${scanId} symbol=${sc.symbol} unicornTradesToday=${this.unicornTradesToday} maxUnicornTradesPerDay=${this.unicornHunterSettings.maxUnicornTradesPerDay} positionCreated=true source=unicorn_hunter`);
+            }
+            if (isMlPredictBuyCandidate && paperAutoResult.positionCreated) {
+              this.mlPredictBuySubmittedAt.push(Date.now());
+              logger.info(`ML_AUTO_BUY_SUBMITTED_AUDIT: scanId=${scanId} symbol=${sc.symbol} source=ML_PREDICT_BUY executionAdapter=paper_simulated adapterCalled=${String(!!paperAutoResult.adapterCalled)} positionCreated=${String(!!paperAutoResult.positionCreated)} orderId=${paperAutoResult.orderId ?? 'none'} positionId=${paperAutoResult.positionId ?? 'none'} recentMlBuysPerHour=${this.mlPredictBuySubmittedAt.length}`);
+            }
                 perSymbolLifecycle.set(sc.symbol, {
                   adapterCalled: !!paperAutoResult.adapterCalled,
                   adapterAccepted: !!paperAutoResult.adapterCalled && !paperAutoResult.blocked,
@@ -2787,6 +4368,10 @@ export class MarketScanner {
                 paperAutoResult = { ...revalResult, executed: false, blocked: true, reason: `Buy execution failed: ${buyError instanceof Error ? buyError.message : String(buyError)}`, stage: 'ExecutionFailed', adapterCalled: true, adapterResult: 'CALL_FAILED', positionCreateAttempted: false, positionCreated: false };
                 adapterCalledCount++;
                 submitAttemptedSymbols.push(sc.symbol);
+                globalSubmitAttemptedThisCycle++;
+                if (executionModule === 'unicorn_hunter') unicornSubmitAttemptedThisCycle++;
+                else autobotsSubmitAttemptedThisCycle++;
+                if (executionModule === 'autobots' || executionModule === 'ml_predict_buy') autobotsConsumedGlobalSlot = true;
                 skippedSymbols.push(sc.symbol);
                 skipReasonsBySymbol[sc.symbol] = paperAutoResult.reason;
                 logger.warn(`DEMO_AUTO_BUY_FAILED: symbol=${firstCandidate.symbol} error=${buyError instanceof Error ? buyError.message : String(buyError)}`);
@@ -2845,12 +4430,17 @@ export class MarketScanner {
               logger.info(`LIVE_BUY_BLOCKED: symbol=${firstCandidate.symbol} reason=${liveExecutionResult.reason}`);
             } else if (!liveRevalResult.blocked && liveRevalResult.attempted) {
               attemptedSymbols.push(sc.symbol);
+              if (!submitEligibleSymbols.includes(sc.symbol)) submitEligibleSymbols.push(sc.symbol);
               try {
                 transactionAuditSymbols.push(sc.symbol);
                 await this.liveBuyFn(sc.symbol, sc);
                 liveExecutionResult = { ...liveRevalResult, executed: true, adapterCalled: true, adapterResult: 'SUBMITTED' };
                 adapterCalledCount++;
                 submitAttemptedSymbols.push(sc.symbol);
+                globalSubmitAttemptedThisCycle++;
+                if (executionModule === 'unicorn_hunter') unicornSubmitAttemptedThisCycle++;
+                else autobotsSubmitAttemptedThisCycle++;
+                if (executionModule === 'autobots' || executionModule === 'ml_predict_buy') autobotsConsumedGlobalSlot = true;
                 adapterAcceptedCount++;
                 orderFilledCount++;
                 logger.info(`LIVE_BUY_EXECUTED: symbol=${firstCandidate.symbol} rank=${firstCandidate.rank} routedController=BinanceLiveExecutionController`);
@@ -2858,6 +4448,10 @@ export class MarketScanner {
                 liveExecutionResult = { ...liveRevalResult, executed: false, blocked: true, reason: `Live buy failed: ${buyError instanceof Error ? buyError.message : String(buyError)}`, adapterCalled: true, adapterResult: 'CALL_FAILED' };
                 adapterCalledCount++;
                 submitAttemptedSymbols.push(sc.symbol);
+                globalSubmitAttemptedThisCycle++;
+                if (executionModule === 'unicorn_hunter') unicornSubmitAttemptedThisCycle++;
+                else autobotsSubmitAttemptedThisCycle++;
+                if (executionModule === 'autobots' || executionModule === 'ml_predict_buy') autobotsConsumedGlobalSlot = true;
                 skippedSymbols.push(sc.symbol);
                 skipReasonsBySymbol[sc.symbol] = liveExecutionResult.reason;
                 logger.warn(`LIVE_BUY_FAILED: symbol=${firstCandidate.symbol} error=${buyError instanceof Error ? buyError.message : String(buyError)}`);
@@ -2947,11 +4541,25 @@ export class MarketScanner {
           groupEnabled: this.scannerRiskGroups[bc.riskGroup as keyof typeof this.scannerRiskGroups] ?? true,
         });
         if (!reval.blocked && reval.attempted) {
-          // Queue-based cooldown for backfill
-          const cb = autoBuyQueue.blockIfCooldownActive(bc.symbol);
-          if (cb.blocked) {
+          const bfModule = executionModuleForCandidate(bfEntryPlan, bc);
+          const bfIsUnicorn = bfModule === 'unicorn_hunter';
+          const bfModuleSubmitCount = bfIsUnicorn ? unicornSubmitAttemptedThisCycle : autobotsSubmitAttemptedThisCycle;
+          const bfModuleSubmitLimit = bfIsUnicorn ? maxUnicornSubmitsPerCycle : maxAutobotsSubmitsPerCycle;
+          if (bfModuleSubmitCount >= bfModuleSubmitLimit) {
+            const budgetReason = bfIsUnicorn ? 'UNICORN_MAX_BUYS_PER_CYCLE_REACHED' : 'MAX_NEW_BUYS_PER_CYCLE_REACHED';
             skippedSymbols.push(bc.symbol);
-            skipReasonsBySymbol[bc.symbol] = 'cooldown_active';
+            skipReasonsBySymbol[bc.symbol] = budgetReason;
+            if (bfIsUnicorn) unicornSelectedButNotSubmittedReason = budgetReason;
+            logger.info(`${bfIsUnicorn ? 'UNICORN' : 'AUTOBOTS'}_EXECUTION_BUDGET_AUDIT: scanId=${scanId} symbol=${bc.symbol} module=${bfModule} selectedExecutable=true backfill=true moduleSubmitAttemptedThisCycle=${bfModuleSubmitCount} moduleSubmitLimit=${bfModuleSubmitLimit} globalSubmitAttemptedThisCycle=${globalSubmitAttemptedThisCycle} submitAllowed=false finalNoBuyReason=${budgetReason}`);
+            continue;
+          }
+          // Queue-based cooldown for backfill
+          const cb = autoBuyQueue.blockIfCooldownActive(bc.symbol, bfModule);
+          if (cb.blocked) {
+            const cooldownReason = bfIsUnicorn ? 'UNICORN_COOLDOWN_ACTIVE' : 'cooldown_active';
+            skippedSymbols.push(bc.symbol);
+            skipReasonsBySymbol[bc.symbol] = cooldownReason;
+            if (bfIsUnicorn) unicornSelectedButNotSubmittedReason = cooldownReason;
             continue;
           }
           autoBuyQueue.startRevalidation(bc.symbol);
@@ -2973,15 +4581,24 @@ export class MarketScanner {
             transactionAuditSymbols.push(bc.symbol);
             backfillCandidateSymbols.push(bc.symbol);
             const bfResult = await this.paperAutoBuyFn(bfEntryPlan, bc);
-            autoBuyQueue.recordBuySubmitted(bc.symbol);
+            autoBuyQueue.recordBuySubmitted(bc.symbol, bfModule);
             if (bfResult.adapterCalled) {
               adapterCalledCount++;
               submitAttemptedSymbols.push(bc.symbol);
+              globalSubmitAttemptedThisCycle++;
+              if (bfIsUnicorn) unicornSubmitAttemptedThisCycle++;
+              else autobotsSubmitAttemptedThisCycle++;
+              if (!bfIsUnicorn) autobotsConsumedGlobalSlot = true;
             }
             if (bfResult.adapterCalled && !bfResult.blocked) adapterAcceptedCount++;
             if (bfResult.executed) orderFilledCount++;
             if (bfResult.positionCreated) positionCreatedCount++;
             if (bfResult.positionCreated) journalPersistedCount++;
+            if (bfResult.positionCreated && ((bc as any).source === 'unicorn_hunter' || bc.candidateSource === 'unicorn_hunter')) {
+              this.resetUnicornDailyCounterIfNeeded();
+              this.unicornTradesToday += 1;
+              logger.info(`UNICORN_DAILY_LIMIT_AUDIT scanId=${scanId} symbol=${bc.symbol} unicornTradesToday=${this.unicornTradesToday} maxUnicornTradesPerDay=${this.unicornHunterSettings.maxUnicornTradesPerDay} positionCreated=true source=unicorn_hunter backfill=true`);
+            }
             perSymbolLifecycle.set(bc.symbol, {
               adapterCalled: !!bfResult.adapterCalled,
               adapterAccepted: !!bfResult.adapterCalled && !bfResult.blocked,
@@ -3038,7 +4655,63 @@ export class MarketScanner {
       logger.warn(`EXECUTION_BACKFILL_AFTER_RISK_BLOCK_AUDIT: scanId=${scanId} maxSelectedPerScan=${executionPlan.maxSelectedPerScan} initialSelectedSymbols=${initialSelectedSymbols.join('|') || 'none'} failedBeforeAdapterSymbols=${attemptedSymbols.join('|') || 'none'} riskBlockedSymbols=${riskBlockedSymbols.join('|') || 'none'} riskBlockedGroups=${riskBlockedGroups.join('|') || 'none'} riskBlockedReasonsBySymbol=${Object.entries(skipReasonsBySymbol).filter(([,r]) => String(r).includes('risk_blocked') || String(r).includes('pre_adapter_block')).map(([s,r]) => `${s}:${r}`).join('|') || 'none'} createdPositionSymbols=none positionCreatedCount=${positionCreatedCount} availableSlotsBefore=${executionPlan.availableSlots} availableSlotsAfter=${Math.max(0, this.executionMaxPositions - posManagerAfter)} nextBackfillSymbolsTried=${backfillCandidateSymbols.join('|') || 'none'} nextBackfillSymbolsCreated=none backfillSkippedBecauseGlobalRiskLimit=${String(riskBlockedGroups.length > 0)} finalCreatedCount=${positionCreatedCount}`);
     }
     submitAttemptedCount = submitAttemptedSymbols.length;
+    if (riskOffNoEntries && executionPlan.decisions) {
+      const selectedSet = new Set(selectedBuyCandidates.map(c => c.symbol));
+      const riskOffMessage = `No BUY — ${selectedBuyCandidates.length} candidates had local BUY signals, but global market is RISK-OFF, entries disabled.`;
+      executionPlan.decisions = executionPlan.decisions.map((decision) => {
+        if (!selectedSet.has(decision.symbol)) return decision;
+        return {
+          ...decision,
+          finalExecutable: false,
+          buyAllowed: false,
+          selectedForExecution: true,
+          submitAttempted: false,
+          adapterCalled: false,
+          adapterAccepted: false,
+          adapterResult: 'not_attempted',
+          orderFilled: false,
+          positionCreated: false,
+          journalPersisted: false,
+          telegramSent: false,
+          finalDecision: 'SKIP',
+          finalNoBuyReason: 'GLOBAL_RISK_OFF',
+          actionableNoBuyReason: 'GLOBAL_RISK_OFF',
+          technicalNoBuyReason: decision.finalNoBuyReason === 'none' ? 'none' : decision.finalNoBuyReason,
+          secondaryDiagnosticReasons: [...new Set([...(decision.secondaryDiagnosticReasons ?? []), decision.finalNoBuyReason].filter(reason => reason && reason !== 'none'))],
+          renderedUserMessage: riskOffMessage,
+          finalNoBuyReasonSource: 'final_execution_global_guard',
+          reasonPriorityTrace: [...(decision.reasonPriorityTrace ?? []), { reason: 'GLOBAL_RISK_OFF', passed: false, detail: 'Global market risk-off disables entries after local candidate selection' }],
+          invariantOk: true,
+        };
+      });
+      executionPlan.skippedCandidates = [
+        ...executionPlan.skippedCandidates.filter(s => !selectedSet.has(s.symbol)),
+        ...selectedBuyCandidates.map(candidate => ({
+          symbol: candidate.symbol,
+          status: candidate.status,
+          reason: 'GLOBAL_RISK_OFF',
+          gate: 'final_execution_global_guard',
+          isRetryable: true,
+          finalNoBuyReason: 'GLOBAL_RISK_OFF',
+        })),
+      ];
+    }
     if (executionPlan.decisions) {
+      const selectedNoSubmitReasonForDecision = (decision: ExecutionDecision): string => {
+        const rawReason = skipReasonsBySymbol[decision.symbol] ?? skippedBeforeHandoffReasons[decision.symbol] ?? perSymbolDecisions.find((d) => d.symbol === decision.symbol && !d.passed)?.reason ?? 'none';
+        const selectedPlan = selectedBuyCandidates.find((candidate) => candidate.symbol === decision.symbol);
+        const sourceCandidate = rankedCandidatesToAnnotate.find((candidate) => candidate.symbol === decision.symbol);
+        const isUnicornDecision = selectedPlan ? isUnicornPlannedCandidate(selectedPlan) : String(sourceCandidate?.candidateSource ?? (sourceCandidate as any)?.source ?? '').toLowerCase().includes('unicorn');
+        if (!rawReason || rawReason === 'none') return 'none';
+        if (isUnicornDecision) return normalizeUnicornFinalBlockReason(rawReason);
+        const compact = String(rawReason).toUpperCase();
+        if (compact.includes('MAX_NEW_BUYS_PER_CYCLE')) return 'MAX_NEW_BUYS_PER_CYCLE_REACHED';
+        if (compact.includes('COOLDOWN') || compact.includes('PACING')) return 'BUY_PACING_OR_COOLDOWN_ACTIVE';
+        if (compact.includes('DUPLICATE')) return 'DUPLICATE_OPEN_POSITION';
+        if (compact.includes('PENDING')) return 'PENDING_ORDER';
+        if (compact.includes('CAPITAL')) return 'CAPITAL_BLOCKED';
+        return compact.replace(/[^A-Z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'SELECTED_BUY_NOT_SUBMITTED';
+      };
       for (const decision of executionPlan.decisions) {
         if (selectedBuyCandidates.some(c => c.symbol === decision.symbol)) decision.selectedForExecution = true;
         if (submitAttemptedSymbols.includes(decision.symbol)) decision.submitAttempted = true;
@@ -3050,9 +4723,60 @@ export class MarketScanner {
           decision.positionCreated = ls.positionCreated;
           decision.journalPersisted = ls.journalPersisted;
         }
+        if (decision.selectedForExecution && decision.submitAttempted !== true) {
+          const noSubmitReason = selectedNoSubmitReasonForDecision(decision);
+          if (noSubmitReason !== 'none') {
+            decision.finalDecision = 'SKIP';
+            decision.finalNoBuyReason = noSubmitReason as any;
+            decision.finalNoBuyReasonCode = noSubmitReason;
+            decision.finalNoBuyReasonLabel = noSubmitReason;
+            decision.actionableNoBuyReason = noSubmitReason;
+            decision.renderedUserMessage = noSubmitReason;
+            decision.finalNoBuyReasonSource = 'final_execution_budget_guard';
+            decision.reasonPriorityTrace = [...(decision.reasonPriorityTrace ?? []), { reason: noSubmitReason, passed: false, detail: 'Selected candidate did not reach adapter submit' }];
+            if (String(noSubmitReason).startsWith('UNICORN_') || String(noSubmitReason).startsWith('GLOBAL_') || String(noSubmitReason) === 'MAX_EXECUTION_QUEUE_REACHED') unicornSelectedButNotSubmittedReason = noSubmitReason;
+          }
+        }
         emitExecutionPipelineStageAudit(decision);
       }
     }
+    executionPlan.autobotsSubmitAttemptedThisCycle = autobotsSubmitAttemptedThisCycle;
+    executionPlan.unicornSubmitAttemptedThisCycle = unicornSubmitAttemptedThisCycle;
+    executionPlan.globalSubmitAttemptedThisCycle = globalSubmitAttemptedThisCycle;
+    executionPlan.unicornSelectedExecutableCount = unicornSelectedExecutableCount;
+    executionPlan.unicornSelectedButNotSubmittedReason = unicornSelectedButNotSubmittedReason;
+    executionPlan.unicornAdapterCalledThisCycle = submitAttemptedSymbols.some((symbol) => {
+      const candidate = selectedBuyCandidates.find((row) => row.symbol === symbol);
+      return candidate ? isUnicornPlannedCandidate(candidate) : false;
+    });
+    executionPlan.autobotsConsumedGlobalSlot = autobotsConsumedGlobalSlot;
+    executionPlan.maxUnicornBuysPerCycle = maxUnicornSubmitsPerCycle;
+    executionPlan.maxAutoBotsBuysPerCycle = maxAutobotsSubmitsPerCycle;
+    const openUnicornPositionsForAudit = (this.executionOpenPositionSourcesFn?.() ?? []).filter((position) => `${position.source ?? ''} ${position.ownerName ?? ''}`.toLowerCase().includes('unicorn')).length;
+    const autoBotsCooldownRemainingMs = autoBuyQueue.cooldownRemainingMs('autobots');
+    const unicornCooldownRemainingMs = autoBuyQueue.cooldownRemainingMs('unicorn_hunter');
+    const nextAutoBotsBuyAllowedAt = autoBotsCooldownRemainingMs > 0 ? new Date(Date.now() + autoBotsCooldownRemainingMs).toISOString() : 'now';
+    const nextUnicornBuyAllowedAt = unicornCooldownRemainingMs > 0 ? new Date(Date.now() + unicornCooldownRemainingMs).toISOString() : 'now';
+    const autoBotsSelectedThisCycle = executionPlan.selectedCandidates.filter((candidate) => !isUnicornPlannedCandidate(candidate)).length;
+    const unicornSelectedThisCycle = executionPlan.selectedCandidates.filter((candidate) => isUnicornPlannedCandidate(candidate)).length;
+    const autoBotsBlockedReason = autobotsSubmitAttemptedThisCycle >= maxAutobotsSubmitsPerCycle ? 'MAX_NEW_BUYS_PER_CYCLE_REACHED' : autoBotsCooldownRemainingMs > 0 ? 'BUY_PACING_OR_COOLDOWN_ACTIVE' : 'none';
+    const unicornBlockedReason = unicornSelectedButNotSubmittedReason !== 'none'
+      ? normalizeUnicornFinalBlockReason(unicornSelectedButNotSubmittedReason)
+      : unicornSubmitAttemptedThisCycle >= maxUnicornSubmitsPerCycle
+        ? 'UNICORN_MAX_BUYS_PER_CYCLE_REACHED'
+        : openUnicornPositionsForAudit >= this.unicornHunterSettings.maxOpenUnicornPositions
+          ? 'UNICORN_MAX_OPEN_POSITIONS_REACHED'
+          : this.unicornTradesToday >= this.unicornHunterSettings.maxUnicornTradesPerDay
+            ? 'UNICORN_MAX_TRADES_PER_DAY_REACHED'
+            : unicornCooldownRemainingMs > 0
+              ? 'UNICORN_COOLDOWN_ACTIVE'
+              : 'none';
+    logger.info(`AUTOBOTS_EXECUTION_BUDGET_AUDIT: scanId=${scanId} autobotsSubmitAttemptedThisCycle=${autobotsSubmitAttemptedThisCycle} autobotsSubmitLimitPerCycle=${maxAutobotsSubmitsPerCycle} autobotsConsumedGlobalSlot=${String(autobotsConsumedGlobalSlot)} globalSubmitAttemptedThisCycle=${globalSubmitAttemptedThisCycle}`);
+    logger.info(`UNICORN_EXECUTION_BUDGET_AUDIT: scanId=${scanId} unicornSelectedExecutableCount=${unicornSelectedExecutableCount} unicornSubmitAttemptedThisCycle=${unicornSubmitAttemptedThisCycle} unicornSubmitLimitPerCycle=${maxUnicornSubmitsPerCycle} unicornAdapterCalled=${String(executionPlan.unicornAdapterCalledThisCycle)} unicornSelectedButNotSubmittedReason=${unicornSelectedButNotSubmittedReason} autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} sharedBudget=false`);
+    logger.info(`EXECUTION_BUDGET_PARITY_AUDIT: scanId=${scanId} sharedBudget=false autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} maxAutoBotsBuysPerCycle=${maxAutobotsSubmitsPerCycle} unicornSubmittedThisCycle=${unicornSubmitAttemptedThisCycle} maxUnicornBuysPerCycle=${maxUnicornSubmitsPerCycle} globalSubmitAttemptedThisCycle=${globalSubmitAttemptedThisCycle} invariantOk=${String(autobotsSubmitAttemptedThisCycle <= maxAutobotsSubmitsPerCycle && unicornSubmitAttemptedThisCycle <= maxUnicornSubmitsPerCycle)} failureReason=none`);
+    logger.info(`AUTOBOTS_BUDGET_STATE_AUDIT: scanId=${scanId} maxAutoBotsBuysPerCycle=${maxAutobotsSubmitsPerCycle} autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} autoBotsSelectedThisCycle=${autoBotsSelectedThisCycle} autoBotsCooldownMs=${autoBotsCooldownRemainingMs} nextAutoBotsBuyAllowedAt=${nextAutoBotsBuyAllowedAt} unicornSubmittedThisCycle=${unicornSubmitAttemptedThisCycle} sharedBudget=false submitAllowed=${String(autoBotsBlockedReason === 'none')} blockedReason=${autoBotsBlockedReason} invariantOk=${String(autobotsSubmitAttemptedThisCycle <= maxAutobotsSubmitsPerCycle)} failureReason=${autobotsSubmitAttemptedThisCycle <= maxAutobotsSubmitsPerCycle ? 'none' : 'AUTOBOTS_BUDGET_OVERFLOW'}`);
+    logger.info(`UNICORN_BUDGET_STATE_AUDIT: scanId=${scanId} unicornEnabled=${String(this.unicornHunterSettings.enabled)} maxUnicornBuysPerCycle=${maxUnicornSubmitsPerCycle} unicornSubmittedThisCycle=${unicornSubmitAttemptedThisCycle} unicornSelectedThisCycle=${unicornSelectedThisCycle} unicornCooldownMs=${unicornCooldownRemainingMs} unicornLossCooldownMs=${this.lossCooldownMs} nextUnicornBuyAllowedAt=${nextUnicornBuyAllowedAt} maxUnicornOpenPositions=${this.unicornHunterSettings.maxOpenUnicornPositions} openUnicornPositions=${openUnicornPositionsForAudit} maxUnicornTradesPerDay=${this.unicornHunterSettings.maxUnicornTradesPerDay} unicornTradesToday=${this.unicornTradesToday} finalNoUnicornBuyReason=${unicornBlockedReason} autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} sharedBudget=false submitAllowed=${String(unicornBlockedReason === 'none')} invariantOk=${String(unicornSubmitAttemptedThisCycle <= maxUnicornSubmitsPerCycle && openUnicornPositionsForAudit <= this.unicornHunterSettings.maxOpenUnicornPositions)} failureReason=${unicornSubmitAttemptedThisCycle <= maxUnicornSubmitsPerCycle ? 'none' : 'UNICORN_BUDGET_OVERFLOW'}`);
+    logger.info(`EXECUTION_SLOT_OWNERSHIP_AUDIT: scanId=${scanId} sharedBudget=false autoBotsSelectedThisCycle=${autoBotsSelectedThisCycle} autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} maxAutoBotsBuysPerCycle=${maxAutobotsSubmitsPerCycle} unicornSelectedThisCycle=${unicornSelectedThisCycle} unicornSubmittedThisCycle=${unicornSubmitAttemptedThisCycle} maxUnicornBuysPerCycle=${maxUnicornSubmitsPerCycle} globalSubmitAttemptedThisCycle=${globalSubmitAttemptedThisCycle} globalOpenPositions=${openPositionsBeforeHandoff} globalMaxOpenPositions=${this.executionMaxPositions} autoBotsCanSubmit=${String(autoBotsBlockedReason === 'none')} unicornCanSubmit=${String(unicornBlockedReason === 'none')} autoBotsBlockedReason=${autoBotsBlockedReason} unicornBlockedReason=${unicornBlockedReason} invariantOk=${String(autobotsSubmitAttemptedThisCycle <= maxAutobotsSubmitsPerCycle && unicornSubmitAttemptedThisCycle <= maxUnicornSubmitsPerCycle)} failureReason=none`);
     const selectedDecisionReason = (symbol: string): string => {
       const lifecycle = perSymbolLifecycle.get(symbol);
       if (lifecycle?.reason) return lifecycle.reason;
@@ -3069,7 +4793,9 @@ export class MarketScanner {
       const capitalBlocked = capitalSkippedCount > 0 || reasonText.includes('capital') || executionPlan.capitalAvailable < this.executionCapitalPerTrade;
       const duplicateBlocked = duplicateSkippedCount > 0 || reasonText.includes('duplicate');
       const maxPositionsBlocked = openPositionsBeforeHandoff >= this.executionMaxPositions || reasonText.includes('max_open') || reasonText.includes('max_positions');
-      const finalNoSubmitReason = !this.paperAutoEnabled && !(this as any).liveAutoEnabled
+      const finalNoSubmitReason = riskOffNoEntries
+        ? 'GLOBAL_RISK_OFF'
+        : !this.paperAutoEnabled && !(this as any).liveAutoEnabled
         ? 'AUTO_EXECUTION_DISABLED'
         : !this.paperAutoBuyFn && executionPlan.executionAdapter === 'paper_simulated'
           ? 'PAPER_AUTO_BUY_FN_MISSING'
@@ -3095,6 +4821,8 @@ export class MarketScanner {
         `scanId=${scanId} ` +
         `buyReadySymbols=${finalExecutionPool.map((candidate) => candidate.symbol).join('|') || 'none'} ` +
         `executionSelectedCount=${selectedBuyCandidates.length} ` +
+        `finalActionableBuyCount=${finalActionableBuyCount} ` +
+        `selectedButSubmitBlockedCount=${selectedButSubmitBlockedCount} ` +
         `submitAttemptedCount=${submitAttemptedCount} ` +
         `openPositionsCount=${openPositionsBeforeHandoff} ` +
         `maxPositions=${this.executionMaxPositions} ` +
@@ -3103,8 +4831,28 @@ export class MarketScanner {
         `groupCapBlocked=${String(groupCapBlocked)} ` +
         `capitalBlocked=${String(capitalBlocked)} ` +
         `duplicateBlocked=${String(duplicateBlocked)} ` +
-        `finalNoSubmitReason=${finalNoSubmitReason}`
+        `finalNoSubmitReason=${finalNoSubmitReason} ` +
+        `submitBlockedReason=${finalNoSubmitReason}`
       );
+      const unicornSelectedWithoutSubmit = selectedBuyCandidates.filter((candidate) => {
+        const sourceCandidate = rankedCandidatesToAnnotate.find((row) => row.symbol === candidate.symbol);
+        return sourceCandidate?.candidateSource === 'unicorn_hunter'
+          || (sourceCandidate as any)?.source === 'unicorn_hunter'
+          || candidate.scannerAutoEntryConfigSnapshot?.ownerName === 'UNICORN_HUNTER';
+      });
+      if (unicornSelectedWithoutSubmit.length > 0) {
+        const unicornNoSubmitReason = normalizeUnicornFinalBlockReason(selectedDecisionReason(unicornSelectedWithoutSubmit[0].symbol) || finalNoSubmitReason);
+        logger.info(
+          `UNICORN_NO_SUBMIT_REASON_AUDIT: ` +
+          `scanId=${scanId} ` +
+          `symbols=${unicornSelectedWithoutSubmit.map((candidate) => candidate.symbol).join('|')} ` +
+          `executionSelectedCount=${unicornSelectedWithoutSubmit.length} ` +
+          `submitAttempted=false ` +
+          `adapterCalled=false ` +
+          `rawReason=${String(selectedDecisionReason(unicornSelectedWithoutSubmit[0].symbol) || finalNoSubmitReason).replace(/\s+/g, '_')} ` +
+          `finalNoBuyReason=${unicornNoSubmitReason}`
+        );
+      }
     }
     const executionAttemptOutcomes = selectedBuyCandidates.map((candidate, index) => {
       const symbol = candidate.symbol;
@@ -3165,6 +4913,7 @@ export class MarketScanner {
       `skippedFreshnessRevalidationCount=${outcomeCount('SKIPPED_PRICE_STALE_REVALIDATION') + outcomeCount('SKIPPED_BOOK_STALE_REVALIDATION')} ` +
       `skippedSpreadCount=${outcomeCount('SKIPPED_SPREAD_REVALIDATION')} ` +
       `skippedTpRoomCount=${outcomeCount('SKIPPED_TP_ROOM_REVALIDATION')} ` +
+      `skippedGlobalRiskOffCount=${outcomeCount('SKIPPED_GLOBAL_RISK_OFF')} ` +
       `adapterRejectedCount=${outcomeCount('ADAPTER_REJECTED')} ` +
       `unknownOutcomeCount=${summaryUnknownOutcomeCount} ` +
       `invariantOk=${String(summaryInvariantOk)} ` +
@@ -3195,7 +4944,9 @@ export class MarketScanner {
       const groupCaps = selectedBuyCandidates
         .map((candidate) => `${candidate.symbol}:${(candidate as any).riskGroup ?? 'unknown'}:${executionPlan.availableSlots}/${this.executionMaxPositions}`)
         .join('|') || 'none';
-      const failureReason = executionResult === 'POSITION_CREATED'
+      const failureReason = riskOffNoEntries
+        ? 'GLOBAL_RISK_OFF'
+        : executionResult === 'POSITION_CREATED'
         ? 'none'
         : (notSubmittedReasons[0] ?? paperAutoResult?.reason ?? liveExecutionResult?.reason ?? executionPlan.noBuyReasons[0] ?? 'unknown');
       logger.info(
@@ -3211,6 +4962,9 @@ export class MarketScanner {
         `openPositionsCount=${openPositionsBeforeHandoff} ` +
         `groupCaps=${groupCaps} ` +
         `executionResult=${executionResult} ` +
+        `finalActionableBuyCount=${finalActionableBuyCount} ` +
+        `selectedButSubmitBlockedCount=${selectedButSubmitBlockedCount} ` +
+        `submitBlockedReason=${submitAttemptedCount === 0 ? String(failureReason).replace(/\s+/g, '_') : 'none'} ` +
         `orderId=${submittedLifecycle?.orderId ?? 'none'} ` +
         `demoTradeId=${submittedLifecycle?.positionId ?? 'none'} ` +
         `failureReason=${String(failureReason).replace(/\s+/g, '_')}`
@@ -3251,6 +5005,7 @@ export class MarketScanner {
     const firstSkipReason = executionPlan.skippedCandidates.find((s) => s.reason && s.reason !== 'none')?.reason ?? null;
     const finalNoBuyReason = (() => {
       if (positionCreated) return 'none';
+      if (riskOffNoEntries) return 'GLOBAL_RISK_OFF';
       if (!executionPlan.canExecute) {
         const top = executionPlan.noBuyReasons[0] ?? '';
         if (!this.paperAutoEnabled && !(this as any).liveAutoEnabled) return 'GLOBAL_AUTO_EXECUTION_DISABLED';
@@ -3274,9 +5029,310 @@ export class MarketScanner {
     const blockedByTp1Invalid = rankedCandidatesToAnnotate.filter((c) => (c.mainReason ?? '').toLowerCase().includes('tp1_missing_or_zero') || (c.blockReasons ?? []).some((r) => String(r).toLowerCase().includes('tp1_missing_or_zero'))).length;
     const blockedByFinalExecutableFalse = rankedCandidatesToAnnotate.filter((c) => c.gateAudit?.finalExecutable === false).length;
     const blockedCount = rankedCandidatesToAnnotate.filter((c) => c.status !== 'BUY').length;
+    const selectedButNotSubmittedSymbolsForPool = selectedBuyCandidates
+      .map((candidate) => candidate.symbol)
+      .filter((symbol) => !submitAttemptedSymbols.includes(symbol));
+    const selectedButNotSubmittedReasonsForPool = selectedButNotSubmittedSymbolsForPool
+      .map((symbol) => selectedDecisionReason(symbol))
+      .filter((reason) => reason && reason !== 'none');
+    const queueStateForPool = autoBuyQueue.getState();
+    const selectedModulesForPool = Array.from(new Set(selectedBuyCandidates.map((candidate) => executionModuleForCandidate(candidate, rankedCandidatesToAnnotate.find((row) => row.symbol === candidate.symbol)))));
+    const modulesForPoolTiming = selectedModulesForPool.length > 0 ? selectedModulesForPool : ['global' as AutoBuyExecutionModule];
+    const moduleCooldownsForPool = modulesForPoolTiming.map((module) => {
+      const remainingMs = autoBuyQueue.cooldownRemainingMs(module);
+      const lastBuyAt = module === 'global' ? queueStateForPool.lastBuyAt : queueStateForPool.lastBuyAtByModule[module] ?? 0;
+      return { module, remainingMs, lastBuyAt };
+    });
+    const activeModuleCooldownsForPool = moduleCooldownsForPool.filter((row) => row.remainingMs > 0);
+    const nextCooldownForPool = activeModuleCooldownsForPool.sort((a, b) => a.remainingMs - b.remainingMs)[0] ?? null;
+    const reasonTextForPool = [
+      ...selectedButNotSubmittedReasonsForPool,
+      ...Object.values(skipReasonsBySymbol),
+      finalNoBuyReason,
+    ].join('|').toLowerCase();
+    const plannerSkippedReasonsBySymbol = Object.fromEntries(
+      (executionPlan.skippedCandidates ?? []).map((candidate) => [
+        candidate.symbol,
+        candidate.finalNoBuyReason ?? candidate.reason,
+      ]),
+    );
+    const buyPacingActiveForPool = activeModuleCooldownsForPool.length > 0
+      || reasonTextForPool.includes('pacing')
+      || reasonTextForPool.includes('spacing')
+      || reasonTextForPool.includes('rate_limit')
+      || reasonTextForPool.includes('max_new_buys_per_cycle');
+    const buyCooldownActiveForPool = activeModuleCooldownsForPool.length > 0
+      || reasonTextForPool.includes('cooldown')
+      || reasonTextForPool.includes('buy_pacing_or_cooldown_active');
+    const nextBuyAllowedAtForPool = nextCooldownForPool
+      ? Date.now() + nextCooldownForPool.remainingMs
+      : null;
+    const candidatePoolActionability = buildCandidatePoolActionabilityCounts({
+      buyCandidateSymbols: finalExecutionPool.map((candidate) => candidate.symbol),
+      submitEligibleSymbols,
+      submitAttemptedSymbols,
+      selectedButNotSubmittedSymbols: selectedButNotSubmittedSymbolsForPool,
+      skippedReasonsBySymbol: { ...plannerSkippedReasonsBySymbol, ...skipReasonsBySymbol },
+      selectedButNotSubmittedReasons: selectedButNotSubmittedReasonsForPool.length > 0
+        ? selectedButNotSubmittedReasonsForPool
+        : finalNoBuyReason !== 'none'
+          ? [finalNoBuyReason]
+          : [],
+      blockedByBudgetCount: Math.max(
+        executionPlan.deferredByQueueLimitCount ?? 0,
+        Object.values({ ...plannerSkippedReasonsBySymbol, ...skipReasonsBySymbol }).filter((reason) => /budget|max_new_buys|max_new|global_buy_budget|MAX_EXECUTION_QUEUE_REACHED/i.test(String(reason))).length,
+      ),
+      blockedByDuplicateCount: duplicateSkippedCount,
+      blockedByRiskCount: Object.values(skipReasonsBySymbol).filter((reason) => /risk/i.test(String(reason))).length,
+      blockedByOpenPositionLimitCount: openPositionsBeforeHandoff >= this.executionMaxPositions || /max_open|max_positions/i.test(reasonTextForPool) ? finalExecutionPool.length : 0,
+      pacingState: {
+        lastBuyAt: nextCooldownForPool?.lastBuyAt ?? queueStateForPool.lastBuyAt,
+        minBuyIntervalMs: queueStateForPool.cooldownMs,
+        cooldownUntil: nextBuyAllowedAtForPool,
+        nextBuyAllowedAt: nextBuyAllowedAtForPool,
+        msUntilNextBuyAllowed: nextCooldownForPool?.remainingMs ?? null,
+        buyPacingActive: buyPacingActiveForPool,
+        buyCooldownActive: buyCooldownActiveForPool,
+        buyPacingReason: buyPacingActiveForPool || buyCooldownActiveForPool ? 'BUY_PACING_OR_COOLDOWN_ACTIVE' : 'none',
+      },
+    });
+    logger.info(
+      `CANDIDATE_POOL_COUNT_BREAKDOWN_AUDIT: ` +
+      `scanId=${scanId} ` +
+      `rawBuyCandidateCount=${candidatePoolActionability.buyCandidateCount} ` +
+      `uiBuyReadyCount=${candidatePoolActionability.actionableBuyCountNow} ` +
+      `finalActionableBuyCount=${candidatePoolActionability.actionableBuyCountNow} ` +
+      `blockedByPacingCount=${candidatePoolActionability.blockedByPacingCount} ` +
+      `blockedByCooldownCount=${candidatePoolActionability.blockedByCooldownCount} ` +
+      `blockedByBudgetCount=${candidatePoolActionability.blockedByBudgetCount} ` +
+      `blockedByDuplicateCount=${candidatePoolActionability.blockedByDuplicateCount} ` +
+      `blockedByRiskCount=${candidatePoolActionability.blockedByRiskCount} ` +
+      `blockedByOpenPositionLimitCount=${candidatePoolActionability.blockedByOpenPositionLimitCount} ` +
+      `executionQueueAccepted=${executionPlan.queueAcceptedCount ?? executionPlan.selectedCandidates.length} ` +
+      `maxExecutionQueuePerScan=${executionPlan.maxExecutionQueuePerScan ?? 10} ` +
+      `deferredByQueueLimit=${executionPlan.deferredByQueueLimitCount ?? 0} ` +
+      `selectedButNotSubmittedCount=${candidatePoolActionability.selectedButNotSubmittedCount} ` +
+      `submitAttemptedCount=${candidatePoolActionability.submitAttemptedCount} ` +
+      `selectedButNotSubmittedReasons=${candidatePoolActionability.selectedButNotSubmittedReasons.join('|') || 'none'} ` +
+      `nextBuyAllowedAt=${candidatePoolActionability.nextBuyAllowedAt ? new Date(candidatePoolActionability.nextBuyAllowedAt).toISOString() : 'none'} ` +
+      `msUntilNextBuyAllowed=${candidatePoolActionability.msUntilNextBuyAllowed ?? 'n/a'} ` +
+      `sourceUsed=${candidatePoolActionability.sourceUsed} ` +
+      `invariantOk=${String(candidatePoolActionability.invariantOk)}`
+    );
+    logger.info(
+      `BUY_ACTIONABILITY_COUNT_AUDIT: ` +
+      `scanId=${scanId} ` +
+      `rawBuyCandidateCount=${candidatePoolActionability.buyCandidateCount} ` +
+      `uiBuyReadyCount=${candidatePoolActionability.actionableBuyCountNow} ` +
+      `finalActionableBuyCount=${candidatePoolActionability.actionableBuyCountNow} ` +
+      `blockedByPacingCount=${candidatePoolActionability.blockedByPacingCount} ` +
+      `blockedByCooldownCount=${candidatePoolActionability.blockedByCooldownCount} ` +
+      `executionQueueAccepted=${executionPlan.queueAcceptedCount ?? executionPlan.selectedCandidates.length} ` +
+      `maxExecutionQueuePerScan=${executionPlan.maxExecutionQueuePerScan ?? 10} ` +
+      `deferredByQueueLimit=${executionPlan.deferredByQueueLimitCount ?? 0} ` +
+      `selectedButNotSubmittedReasons=${candidatePoolActionability.selectedButNotSubmittedReasons.join('|') || 'none'} ` +
+      `submitAttemptedCount=${candidatePoolActionability.submitAttemptedCount} ` +
+      `sourceUsed=${candidatePoolActionability.sourceUsed} ` +
+      `invariantOk=${String(candidatePoolActionability.invariantOk)}`
+    );
+    logger.info(
+      `BUY_PACING_COUNTDOWN_AUDIT: ` +
+      `scanId=${scanId} ` +
+      `lastBuyAt=${candidatePoolActionability.lastBuyAt ?? 'none'} ` +
+      `minBuyIntervalMs=${candidatePoolActionability.minBuyIntervalMs ?? 'n/a'} ` +
+      `cooldownUntil=${candidatePoolActionability.cooldownUntil ? new Date(candidatePoolActionability.cooldownUntil).toISOString() : 'none'} ` +
+      `nextBuyAllowedAt=${candidatePoolActionability.nextBuyAllowedAt ? new Date(candidatePoolActionability.nextBuyAllowedAt).toISOString() : 'none'} ` +
+      `msUntilNextBuyAllowed=${candidatePoolActionability.msUntilNextBuyAllowed ?? 'n/a'} ` +
+      `buyPacingActive=${String(candidatePoolActionability.buyPacingActive)} ` +
+      `buyCooldownActive=${String(candidatePoolActionability.buyCooldownActive)} ` +
+      `buyPacingReason=${candidatePoolActionability.buyPacingReason} ` +
+      `sourceUsed=AutoBuyExecutionQueue ` +
+      `invariantOk=${String(candidatePoolActionability.invariantOk)}`
+    );
+    const isUnicornCandidateForAudit = (c: { symbol?: string; source?: unknown; candidateSource?: unknown; ownerName?: unknown }) => String((c as any).source ?? c.candidateSource ?? '').toLowerCase() === 'unicorn_hunter'
+      || String((c as any).ownerName ?? '').toLowerCase() === 'unicorn hunter'
+      || String((c as any).scannerAutoEntryConfigSnapshot?.ownerName ?? '').toLowerCase().includes('unicorn')
+      || String((c as any).scannerAutoEntryConfigSnapshot?.source ?? '').toLowerCase().includes('unicorn')
+      || String((c as any).scannerAutoEntryConfigSnapshot?.strategySource ?? '').toLowerCase().includes('unicorn');
+    const unicornExecutionPool = finalExecutionPool.filter(isUnicornCandidateForAudit);
+    const unicornSelected = executionPlan.selectedCandidates.filter(isUnicornCandidateForAudit);
+    const unicornSelectedSymbols = new Set(unicornSelected.map((c) => c.symbol));
+    const unicornPoolSymbols = new Set(unicornExecutionPool.map((c) => c.symbol));
+    const unicornRadarSymbols = new Set(this.unicornRadar.map((row) => row.symbol));
+    const filteredUnicornOpenSymbols = filteredAlreadyOpenCandidates
+      .filter((candidate) => unicornRadarSymbols.has(candidate.symbol) || this.unicornWatchlistBySymbol.has(candidate.symbol) || isUnicornCandidateForAudit(candidate))
+      .map((candidate) => candidate.symbol);
+    for (const symbol of filteredUnicornOpenSymbols) {
+      logger.info(`UNICORN_HUNTER_EXECUTION_HANDOFF_AUDIT: symbol=${symbol} source=unicorn_hunter owner=UnicornHunter candidateSource=unicorn_hunter strategySource=unicorn_hunter executionSource=unicorn_hunter selectedForExecution=false finalExecutable=false entryGateApproved=false submitAttempted=false blockedReason=UNICORN_BLOCK_DUPLICATE_POSITION finalNoBuyReasonCode=UNICORN_BLOCK_DUPLICATE_POSITION filterReason=FILTERED_ALREADY_OPEN_POSITION sourceOfDuplicate=PositionManager`);
+      logger.info(`UNICORN_BUY_BLOCKED_AUDIT: symbol=${symbol} scanId=${scanId} source=unicorn_hunter owner=UnicornHunter selectedForExecution=false finalExecutable=false buyAllowed=false blockedReason=UNICORN_BLOCK_DUPLICATE_POSITION finalNoBuyReasonCode=UNICORN_BLOCK_DUPLICATE_POSITION finalNoBuyReasonLabel=UNICORN_BLOCK_DUPLICATE_POSITION missingFields=none filterReason=FILTERED_ALREADY_OPEN_POSITION`);
+    }
+    const autobotsSelectedUnicornWatched = executionPlan.selectedCandidates
+      .filter((candidate) => !isUnicornCandidateForAudit(candidate) && unicornRadarSymbols.has(candidate.symbol));
+    const autobotsTookUnicornWatched = autobotsSelectedUnicornWatched
+      .filter((candidate) => submitAttemptedSymbols.includes(candidate.symbol) && (positionCreatedCount > 0 || perSymbolLifecycle.get(candidate.symbol)?.adapterCalled === true));
+    for (const taken of autobotsTookUnicornWatched) {
+      const watch = this.unicornWatchlistBySymbol.get(taken.symbol);
+      logger.info(
+        `UNICORN_SYMBOL_TAKEN_BY_AUTOBOTS_AUDIT: ` +
+        `scanId=${scanId} ` +
+        `symbol=${taken.symbol} ` +
+        `unicornStage=${watch?.stage ?? 'RADAR'} ` +
+        `autobotsEntryRule=${taken.scannerAutoEntryConfigSnapshot?.finalEntryRule ?? (taken as any).entryRule ?? 'unknown'} ` +
+        `autobotsStrategy=${taken.scannerAutoEntryConfigSnapshot?.selectedStrategy ?? taken.strategy ?? taken.effectiveStrategy ?? 'unknown'} ` +
+        `reason=AUTOBOTS_EXECUTED_FIRST`
+      );
+      if (watch) {
+        this.setUnicornDecisionState(taken.symbol, {
+          ...watch,
+          stage: 'BLOCKED_BY_OPEN_POSITION_LIMIT',
+          lastReason: 'UNICORN_BLOCK_DUPLICATE_POSITION',
+          stageChangedAt: Date.now(),
+        });
+      }
+    }
+    const unicornPlannerSkipped = executionPlan.skippedCandidates.find((s) => unicornPoolSymbols.has(s.symbol) || unicornRadarSymbols.has(s.symbol));
+    const unicornSubmittedSymbols = submitAttemptedSymbols.filter((symbol) => unicornSelectedSymbols.has(symbol));
+    const unicornAdapterCalled = unicornSelected.some((candidate) => perSymbolLifecycle.get(candidate.symbol)?.adapterCalled === true);
+    const unicornSelectedWithoutSubmit = unicornSelected.find((candidate) => !unicornSubmittedSymbols.includes(candidate.symbol));
+    const unicornPositionCreatedCount = positionCreatedCount > 0 && unicornSubmittedSymbols.length > 0 ? 1 : 0;
+    const rawUnicornFinalNoBuyReason = unicornPositionCreatedCount > 0
+      ? 'none'
+      : autobotsTookUnicornWatched.length > 0
+        ? 'UNICORN_BLOCK_DUPLICATE_POSITION'
+      : filteredUnicornOpenSymbols.length > 0
+        ? 'UNICORN_BLOCK_DUPLICATE_POSITION'
+      : unicornSelected.length === 0
+        ? (unicornPlannerSkipped?.finalNoBuyReason ?? unicornPlannerSkipped?.reason ?? (unicornExecutableAddedCount > 0 ? 'UNICORN_READY_NOT_SELECTED_BY_PLANNER' : (unicornExecutableQueuedCount > 0 ? 'UNICORN_DUPLICATE_OR_FILTERED_BEFORE_PLANNER' : 'NO_UNICORN_READY_CANDIDATE')))
+        : unicornSubmittedSymbols.length === 0
+          ? (unicornSelectedWithoutSubmit ? selectedDecisionReason(unicornSelectedWithoutSubmit.symbol) : 'UNICORN_SELECTED_NO_SUBMIT')
+          : positionCreatedCount === 0
+            ? 'UNICORN_SUBMITTED_NO_POSITION_CREATED'
+            : 'UNKNOWN_UNICORN_EXECUTION_STATE';
+    const unicornFinalNoBuyReason = rawUnicornFinalNoBuyReason === 'none' ? 'none' : this.normalizeUnicornBlockedReason(rawUnicornFinalNoBuyReason);
+    if (unicornSelectedWithoutSubmit) {
+      logger.info(
+        `UNICORN_NO_SUBMIT_REASON_AUDIT: ` +
+        `scanId=${scanId} ` +
+        `symbols=${unicornSelectedWithoutSubmit.symbol} ` +
+        `executionSelectedCount=${unicornSelected.length} ` +
+        `unicornSelectedExecutableCount=${unicornSelectedExecutableCount} ` +
+        `submitAttempted=false ` +
+        `adapterCalled=false ` +
+        `autobotsSubmitAttemptedThisCycle=${autobotsSubmitAttemptedThisCycle} ` +
+        `unicornSubmitAttemptedThisCycle=${unicornSubmitAttemptedThisCycle} ` +
+        `globalSubmitAttemptedThisCycle=${globalSubmitAttemptedThisCycle} ` +
+        `autobotsConsumedGlobalSlot=${String(autobotsConsumedGlobalSlot)} ` +
+        `rawReason=${String(selectedDecisionReason(unicornSelectedWithoutSubmit.symbol) || rawUnicornFinalNoBuyReason).replace(/\s+/g, '_')} ` +
+        `finalNoBuyReason=${unicornFinalNoBuyReason}`
+      );
+    }
+    const lastUnicornCandidateSymbol = unicornSubmittedSymbols[0]
+      ?? unicornSelected[0]?.symbol
+      ?? autobotsTookUnicornWatched[0]?.symbol
+      ?? filteredUnicornOpenSymbols[0]
+      ?? unicornExecutionPool[0]?.symbol
+      ?? this.unicornRadar[0]?.symbol
+      ?? null;
+    const lastUnicornConfirmationReason = lastUnicornCandidateSymbol
+      ? (this.unicornWatchlistBySymbol.get(lastUnicornCandidateSymbol)?.dp?.dpReason ?? 'none')
+      : 'none';
+    const lastUnicornStage = unicornPositionCreatedCount > 0
+      ? 'BUY_OPENED'
+      : unicornSubmittedSymbols.length > 0
+        ? 'SUBMIT_ATTEMPTED'
+        : unicornSelected.length > 0
+          ? 'EXECUTION_SELECTED'
+          : autobotsTookUnicornWatched.length > 0 || filteredUnicornOpenSymbols.length > 0
+            ? 'BLOCKED_BY_OPEN_POSITION_LIMIT'
+          : unicornExecutionPool.length > 0
+            ? (unicornFinalNoBuyReason === 'none' ? 'ENTRY_READY' : this.unicornStageForBlockReason(unicornFinalNoBuyReason))
+            : lastUnicornCandidateSymbol
+              ? (this.unicornWatchlistBySymbol.get(lastUnicornCandidateSymbol)?.stage ?? this.unicornStageForBlockReason(unicornFinalNoBuyReason))
+              : 'NO_UNICORN_READY_CANDIDATE';
+    if (lastUnicornCandidateSymbol) {
+      const previous = this.unicornWatchlistBySymbol.get(lastUnicornCandidateSymbol);
+      if (previous && ['EXECUTION_SELECTED', 'SUBMIT_ATTEMPTED', 'BUY_OPENED', 'BLOCKED_BY_BUY_BUDGET', 'BLOCKED_BY_RISK', 'BLOCKED_BY_OPEN_POSITION_LIMIT'].includes(lastUnicornStage)) {
+        this.setUnicornDecisionState(lastUnicornCandidateSymbol, {
+          ...previous,
+          stage: lastUnicornStage as UnicornLifecycleStage,
+          stageChangedAt: Date.now(),
+          lastReason: unicornFinalNoBuyReason,
+        });
+      }
+    }
+    this.updateUnicornExecutionRuntimeStatus({
+      scanId,
+      symbol: lastUnicornCandidateSymbol,
+      stage: lastUnicornStage,
+      blockReason: unicornFinalNoBuyReason,
+      confirmationReason: lastUnicornConfirmationReason,
+      executionDecision: unicornPositionCreatedCount > 0 ? 'BUY_OPENED' : unicornSubmittedSymbols.length > 0 ? 'SUBMIT_ATTEMPTED' : unicornSelected.length > 0 ? 'EXECUTION_SELECTED' : unicornFinalNoBuyReason,
+      submitAttempted: unicornSubmittedSymbols.length > 0,
+      adapterCalled: unicornAdapterCalled,
+      buyAllowed: unicornFinalNoBuyReason === 'none',
+    });
+    logger.info(`UNICORN_EXECUTION_SELECTION_AUDIT: scanId=${scanId} selectedCount=${unicornSelected.length} selectedSymbols=${unicornSelected.map(c => c.symbol).join('|') || 'none'} submitAttempted=${String(unicornSubmittedSymbols.length > 0)} adapterCalled=${String(unicornAdapterCalled)} finalNoBuyReason=${unicornFinalNoBuyReason}`);
+    logger.info(`UNICORN_EXECUTION_DECISION_AUDIT: scanId=${scanId} lastUnicornCandidateSymbol=${lastUnicornCandidateSymbol ?? 'none'} lastUnicornStage=${lastUnicornStage} lastUnicornBlockReason=${unicornFinalNoBuyReason} lastUnicornConfirmationReason=${lastUnicornConfirmationReason} lastUnicornExecutionDecision=${unicornPositionCreatedCount > 0 ? 'BUY_OPENED' : unicornSubmittedSymbols.length > 0 ? 'SUBMIT_ATTEMPTED' : unicornSelected.length > 0 ? 'EXECUTION_SELECTED' : unicornFinalNoBuyReason} lastUnicornSubmitAttempted=${String(unicornSubmittedSymbols.length > 0)} lastUnicornAdapterCalled=${String(unicornAdapterCalled)} sharedBudget=false`);
+    logger.info(`UNICORN_SUBMIT_ATTEMPT_AUDIT: scanId=${scanId} symbol=${lastUnicornCandidateSymbol ?? 'none'} selectedCount=${unicornSelected.length} submitAttempted=${String(unicornSubmittedSymbols.length > 0)} submitAttemptedSymbols=${unicornSubmittedSymbols.join('|') || 'none'} adapterCalled=${String(unicornAdapterCalled)} blockReason=${unicornFinalNoBuyReason}`);
+    if (unicornPositionCreatedCount > 0) {
+      logger.info(`UNICORN_BUY_OPENED_AUDIT: scanId=${scanId} symbol=${lastUnicornCandidateSymbol ?? unicornSubmittedSymbols[0] ?? 'none'} submitAttempted=true positionCreated=true source=unicorn_hunter`);
+    }
+    if (unicornFinalNoBuyReason !== 'none') {
+      const cooldownUntil = Date.now() + 5 * 60 * 1000;
+      for (const candidate of unicornSelected) {
+        const state = this.unicornWatchlistBySymbol.get(candidate.symbol);
+        if (state?.stage === 'READY' || state?.stage === 'ENTRY_READY' || state?.stage === 'EXECUTION_SELECTED') {
+          this.setUnicornDecisionState(candidate.symbol, {
+            ...state,
+            stage: this.unicornStageForBlockReason(unicornFinalNoBuyReason),
+            cooldownUntil,
+            lastReason: unicornFinalNoBuyReason,
+          });
+          logger.info(`UNICORN_WATCHLIST_EXPIRE_AUDIT symbol=${candidate.symbol} previousStage=READY expiredReason=ready_not_bought_short_cooldown cooldownUntil=${new Date(cooldownUntil).toISOString()} finalNoBuyReason=${unicornFinalNoBuyReason}`);
+        }
+      }
+    }
     logger.info(`SELECTIVE_ENTRY_FINAL_GATE_SUMMARY: totalCandidates=${rankedCandidatesToAnnotate.length} marketAction=${noBuySummary?.marketAction ?? 'unknown'} bestFitStrategy=${noBuySummary?.bestFit ?? 'unknown'} buyReadyCount=${finalExecutionPool.length} waitCount=${waitCount} blockedCount=${blockedCount} blockedBySpread=${blockedBySpread} blockedBySlippage=${blockedBySlippage} blockedByDip=${blockedByDip} blockedByRebound=${blockedByRebound} blockedByMomentum=${blockedByMomentum} blockedByTpRoom=${blockedByTpRoom} blockedByTp1Invalid=${blockedByTp1Invalid} blockedByFinalExecutableFalse=${blockedByFinalExecutableFalse} selectedForExecutionCount=${executionPlan.selectedCandidates.length} finalNoBuyReason=${finalNoBuyReason}`);
+    if (!noBuySummary) {
+      noBuySummary = {
+        executionPoolSize,
+        watchPoolSize,
+        nearMissPoolSize,
+        topReasons: finalNoBuyReason !== 'none' ? [finalNoBuyReason] : [],
+        nearestCandidates: watchPool.slice(0, 5).map(c => c.symbol).concat(nearMissPool.slice(0, 3).map(c => c.symbol)).slice(0, 5),
+        requiredNextActions: extractNextActions(rankedEntryCandidates),
+      };
+    }
     if (noBuySummary) {
       noBuySummary.buyReadyCount = buyCount;
+      noBuySummary.buyCandidateCount = candidatePoolActionability.buyCandidateCount;
+      noBuySummary.actionableBuyCountNow = candidatePoolActionability.actionableBuyCountNow;
+      noBuySummary.blockedByPacingCount = candidatePoolActionability.blockedByPacingCount;
+      noBuySummary.blockedByCooldownCount = candidatePoolActionability.blockedByCooldownCount;
+      noBuySummary.blockedByBudgetCount = candidatePoolActionability.blockedByBudgetCount;
+      noBuySummary.blockedByDuplicateCount = candidatePoolActionability.blockedByDuplicateCount;
+      noBuySummary.blockedByRiskCount = candidatePoolActionability.blockedByRiskCount;
+      noBuySummary.blockedByOpenPositionLimitCount = candidatePoolActionability.blockedByOpenPositionLimitCount;
+      noBuySummary.maxExecutionQueuePerScan = executionPlan.maxExecutionQueuePerScan ?? 10;
+      noBuySummary.executionQueueAcceptedCount = executionPlan.queueAcceptedCount ?? executionPlan.selectedCandidates.length;
+      noBuySummary.deferredByQueueLimitCount = executionPlan.deferredByQueueLimitCount ?? 0;
+      noBuySummary.queueRejectedCount = executionPlan.queueRejectedCount ?? executionPlan.deferredByQueueLimitCount ?? 0;
+      noBuySummary.queueAcceptedSymbols = executionPlan.queueAcceptedSymbols ?? executionPlan.selectedCandidates.map((candidate) => candidate.symbol);
+      noBuySummary.deferredByQueueLimitSymbols = executionPlan.deferredByQueueLimitSymbols ?? [];
+      noBuySummary.queueRejectedReasons = executionPlan.queueRejectedReasons ?? [];
+      noBuySummary.nextQueueRetry = (executionPlan.deferredByQueueLimitCount ?? 0) > 0 ? 'next scan' : 'none';
+      noBuySummary.selectedButNotSubmittedCount = candidatePoolActionability.selectedButNotSubmittedCount;
+      noBuySummary.submitAttemptedCount = candidatePoolActionability.submitAttemptedCount;
+      noBuySummary.selectedButNotSubmittedReasons = candidatePoolActionability.selectedButNotSubmittedReasons;
+      noBuySummary.lastBuyAt = candidatePoolActionability.lastBuyAt;
+      noBuySummary.minBuyIntervalMs = candidatePoolActionability.minBuyIntervalMs;
+      noBuySummary.cooldownUntil = candidatePoolActionability.cooldownUntil;
+      noBuySummary.nextBuyAllowedAt = candidatePoolActionability.nextBuyAllowedAt;
+      noBuySummary.msUntilNextBuyAllowed = candidatePoolActionability.msUntilNextBuyAllowed;
+      noBuySummary.buyPacingActive = candidatePoolActionability.buyPacingActive;
+      noBuySummary.buyCooldownActive = candidatePoolActionability.buyCooldownActive;
+      noBuySummary.buyPacingReason = candidatePoolActionability.buyPacingReason;
+      noBuySummary.countSourceUsed = candidatePoolActionability.sourceUsed;
       noBuySummary.blockedCount = blockedCount;
       noBuySummary.blockedBySpread = blockedBySpread;
       noBuySummary.blockedBySlippage = blockedBySlippage;
@@ -3288,11 +5344,33 @@ export class MarketScanner {
       noBuySummary.blockedByFinalExecutableFalse = blockedByFinalExecutableFalse;
       noBuySummary.selectedForExecutionCount = executionPlan.selectedCandidates.length;
       noBuySummary.finalNoBuyReason = finalNoBuyReason;
+      if (riskOffNoEntries) {
+        noBuySummary.actionableBuyCountNow = 0;
+        noBuySummary.topReasons = ['GLOBAL_RISK_OFF', ...noBuySummary.topReasons.filter(reason => reason !== 'GLOBAL_RISK_OFF')];
+        noBuySummary.requiredNextCondition = ['Strong local setup, blocked by global market risk-off'];
+      }
+      const uiQueueAccepted = noBuySummary.executionQueueAcceptedCount ?? 0;
+      const pipelineQueueAccepted = executionPlan.queueAcceptedCount ?? executionPlan.selectedCandidates.length;
+      const uiDeferredCount = noBuySummary.deferredByQueueLimitCount ?? 0;
+      const pipelineDeferredCount = executionPlan.deferredByQueueLimitCount ?? 0;
+      const queueParityMismatch = uiQueueAccepted !== pipelineQueueAccepted || uiDeferredCount !== pipelineDeferredCount;
+      logger.info(
+        `EXECUTION_QUEUE_PARITY_AUDIT: ` +
+        `uiQueueAccepted=${uiQueueAccepted} ` +
+        `pipelineQueueAccepted=${pipelineQueueAccepted} ` +
+        `maxExecutionQueuePerScan=${executionPlan.maxExecutionQueuePerScan ?? 10} ` +
+        `uiDeferredCount=${uiDeferredCount} ` +
+        `pipelineDeferredCount=${pipelineDeferredCount} ` +
+        `mismatchDetected=${String(queueParityMismatch)} ` +
+        `invariantOk=${String(!queueParityMismatch)} ` +
+        `failureReason=${queueParityMismatch ? 'execution_queue_ui_pipeline_mismatch' : 'none'}`
+      );
     }
     logger.info(`FINAL_SCAN_NO_BUY_REASON_AUDIT: scanId=${scanId} selectedCount=${executionPlan.selectedCandidates.length} positionCreated=${String(positionCreated)} executionBlockedReason=${executionBlockedReason ?? 'none'} plannerTopReason=${executionPlan.noBuyReasons[0] ?? 'none'} finalNoBuyReason=${finalNoBuyReason}`);
+    logger.info(`UNICORN_EXECUTION_HANDOFF_AUDIT scanId=${scanId} radarCount=${unicornRadarCount} readyQueuedCount=${unicornExecutableQueuedCount} executableAdded=${unicornExecutableAddedCount} duplicateBlocked=${unicornDuplicateBlockedCount} executionPoolCount=${unicornExecutionPool.length} selectedCount=${unicornSelected.length} selectedSymbols=${unicornSelected.map(c => c.symbol).join('|') || 'none'} submitAttemptedCount=${unicornSubmittedSymbols.length} submitAttemptedSymbols=${unicornSubmittedSymbols.join('|') || 'none'} adapterCalled=${String(unicornAdapterCalled)} positionCreatedCount=${unicornPositionCreatedCount} finalNoBuyReason=${unicornFinalNoBuyReason} source=unicorn_hunter sharedPipeline=ExecutionPlanner`);
     logger.info(`FINAL_SCAN_EXECUTION_PROOF: scanId=${scanId} scannerCandidates=${rankedCandidatesToAnnotate.length} executionPoolCandidates=${finalExecutionPool.length} selectedForExecutionCandidates=${executionPlan.selectedCandidates.length} adapterSubmittedCandidates=${submitAttemptedSymbols.length} positionsCreated=${positionCreated ? 1 : 0} buyReadyCount=${finalExecutionPool.length} executionPoolSize=${finalExecutionPool.length} plannerInputCount=${executionPlan.plannerInputCount ?? executionPlan.executionPoolSize} plannerInputWithEntryPlan=${executionPlan.plannerInputWithEntryPlan ?? 0} generatedEntryPlanCount=${executionPlan.generatedEntryPlanCount ?? 0} entryPlanBlockedCount=${executionPlan.entryPlanBlockedCount ?? 0} confirmationBlockedCount=${executionPlan.confirmationBlockedCount ?? 0} spreadBlockedCount=${executionPlan.spreadBlockedCount ?? 0} selectedCount=${executionPlan.selectedCandidates.length} selectedSymbols=${executionPlan.selectedCandidates.map(c => c.symbol).join('|') || 'none'} selectedWithEntryPlan=${selectedWithEntryPlan} controllerReceivedCount=${controllerReceivedCount} submitAttemptedSymbols=${submitAttemptedSymbols.join('|') || 'none'} adapterCalled=${String(adapterCalled)} fillCreated=${String(fillCreated)} positionCreated=${String(positionCreated)} openPositionsBefore=${openSymbols.length} openPositionsAfter=${finalOpenPositionsAfter} finalNoBuyReason=${finalNoBuyReason}`);
 
-    logger.info(`SCAN_TO_EXECUTION_PIPELINE_AUDIT: scanId=${scanId} scannerCandidates=${rankedCandidates.length} strategyEligibleCandidates=${rankedCandidates.filter(c => c.status !== 'AVOID').length} entryGateEvaluatedCandidates=${rankedCandidates.filter(c => c.entryGateDecision !== undefined && c.entryGateDecision !== null).length} entryGatePassedCandidates=${rankedCandidates.filter(c => c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW').length} entryGateBlockedCandidates=${blockCount + avoidCount} executionPoolCandidates=${finalExecutionPool.length} selectedForExecutionCandidates=${executionPlan.selectedCandidates.length} adapterSubmittedCandidates=${submitAttemptedSymbols.length} positionsCreated=${positionCreated ? 1 : 0} scannerBuySignalCount=${rpBuyCount} executionPoolInputCount=${finalExecutionPool.length} finalExecutableCount=${finalExecutionPool.length} controllerReceivedCount=${controllerReceivedCount} adapterCalled=${String(adapterCalled)} positionCreated=${String(positionCreated)} topDropReasonsByStage=${executionPlan.selectedCandidates.length === 0 ? (executionPlan.noBuyReasons[0] ?? 'no_executable_candidates') : 'none'}`);
+    logger.info(`SCAN_TO_EXECUTION_PIPELINE_AUDIT: scanId=${scanId} scannerCandidates=${rankedCandidates.length} strategyEligibleCandidates=${rankedCandidates.filter(c => c.status !== 'AVOID').length} entryGateEvaluatedCandidates=${rankedCandidates.filter(c => c.entryGateDecision !== undefined && c.entryGateDecision !== null).length} entryGatePassedCandidates=${rankedCandidates.filter(c => c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW').length} entryGateBlockedCandidates=${blockCount + avoidCount} executionPoolCandidates=${finalExecutionPool.length} selectedForExecutionCandidates=${executionPlan.selectedCandidates.length} adapterSubmittedCandidates=${submitAttemptedSymbols.length} positionsCreated=${positionCreated ? 1 : 0} scannerBuySignalCount=${rpBuyCount} executionPoolInputCount=${finalExecutionPool.length} finalExecutableCount=${finalExecutionPool.length} finalActionableBuyCount=${finalActionableBuyCount} selectedButSubmitBlockedCount=${selectedButSubmitBlockedCount} submitBlockedReason=${submitAttemptedCount === 0 ? finalGlobalSubmitBlockedReason : 'none'} controllerReceivedCount=${controllerReceivedCount} adapterCalled=${String(adapterCalled)} positionCreated=${String(positionCreated)} topDropReasonsByStage=${executionPlan.selectedCandidates.length === 0 ? (executionPlan.noBuyReasons[0] ?? 'no_executable_candidates') : finalGlobalSubmitBlockedReason}`);
 
     this.state = 'COOLDOWN';
 
@@ -3303,7 +5381,7 @@ export class MarketScanner {
       status: 'COOLDOWN',
       universeMode: mode,
       universeSize: universe.beforeFilterCount,
-      scannedCount: rankedCandidatesToAnnotate.length,
+      scannedCount: rankedCandidates.length,
       candidateCount: rankedCandidatesToAnnotate.length,
       buyCount: finalExecutionPool.length,
       waitCount,
@@ -3323,6 +5401,8 @@ export class MarketScanner {
       nearMissPoolSize: finalNearMissPool.length,
       topExecutionCandidates,
       topWatchCandidates,
+      unicornRadar: this.unicornRadar,
+      unicornWatchlistSummary: this.getUnicornWatchlistSummary(),
       noBuySummary,
       autoStrategySummary,
       executionPlan,
@@ -3370,7 +5450,7 @@ export class MarketScanner {
     // Audit: scanner/cooldown state at scan end
     const cooldownRemainingSec = Math.max(0, Math.round(cooldownMs / 1000));
     logger.info(`AUTOBOTS_BLOCKED_BY_SCANNER_STATE: candidatesCount=${candidates.length} executionPoolSize=${finalExecutionPool.length} buyReady=${finalExecutionPool.length} cooldownActive=true cooldownRemainingSec=${cooldownRemainingSec} reason=${finalExecutionPool.length === 0 && this.paperAutoEnabled ? 'no_executable_candidates' : this.paperAutoEnabled ? 'buyable_waiting' : 'paper_auto_disabled'}`);
-    logger.info(`AUTOBOTS_STATE_SOURCE_AUDIT: autoExecutionEnabled=${this.paperAutoEnabled} executionMode=demo executionAdapter=demo_simulated manualMode=${this.manualMode} manualStrategy=${this.manualStrategy ?? 'none'} buyCount=${finalExecutionPool.length} executionSelectedCount=${executionPlan.selectedCandidates.length} canExecute=${executionPlan.canExecute}`);
+    logger.info(`AUTOBOTS_STATE_SOURCE_AUDIT: autoExecutionEnabled=${this.paperAutoEnabled} executionMode=demo executionAdapter=demo_simulated manualMode=${this.manualMode} manualStrategy=${this.manualStrategy ?? 'none'} buyCount=${finalActionableBuyCount} localBuySignalCount=${finalExecutionPool.length} executionSelectedCount=${executionPlan.selectedCandidates.length} canExecute=${executionPlan.canExecute && !riskOffNoEntries} submitBlockedReason=${finalGlobalSubmitBlockedReason}`);
     if (this.paperAutoEnabled && executionPoolSize === 0) {
       logger.info(`AUTOBOTS_COOLDOWN_DEPENDENCY_AUDIT: cooldownRemainingSec=${cooldownRemainingSec} freshCandidates=${candidates.length} buyCount=${buyCount} blocked=${!executionPlan.canExecute}`);
     }
@@ -3386,7 +5466,7 @@ export class MarketScanner {
     logger.info(`SCANNER_RUNTIME_SETTINGS_APPLIED: scanId=${scanId} universeMode=${mode} refPeriod=${this.scannerReferencePeriod} enabledGroups=${Object.entries(this.scannerRiskGroups).filter(([, v]) => v).map(([k]) => k).join(',')} banList=${candidates.length}scanned`);
     if (noBuySummary) {
       logger.info(`SCANNER_NO_BUY_FROM_POOL: executionPoolSize=${noBuySummary.executionPoolSize} watchPoolSize=${noBuySummary.watchPoolSize} topReasons=${noBuySummary.topReasons.join(',')} nearestCandidates=${noBuySummary.nearestCandidates.join(',')} requiredNextActions=${noBuySummary.requiredNextActions.join(',')}`);
-      logger.info(`WHY_NO_BUY_EXPLANATION_AUDIT: marketAction=${noBuySummary.marketAction ?? 'n/a'} bestFit=${noBuySummary.bestFit ?? 'n/a'} htf=${noBuySummary.htf ?? 'n/a'} primary=${noBuySummary.primary ?? 'n/a'} ltf=${noBuySummary.ltf ?? 'n/a'} marketConfidence=${noBuySummary.marketConfidence ?? 'n/a'} marketBias=${noBuySummary.marketBias ?? 'n/a'} topBlockers=${noBuySummary.topBlockers?.join('|') ?? noBuySummary.topReasons.join('|')} requiredNextCondition=${noBuySummary.requiredNextCondition?.join('|') ?? 'n/a'} momentumPockets=${noBuySummary.momentumPockets?.detected ? `detected=${noBuySummary.momentumPockets.count}:${noBuySummary.momentumPockets.entries.map(e => `${e.symbol}=${e.momentum}%:${e.blocker ?? 'none'}`).join('|')}` : 'none'} explanation=No BUY — market is ${noBuySummary.marketAction ?? 'unknown'}. ${noBuySummary.primary ? 'Price is ' + noBuySummary.primary.replace(/_/g, ' ') + '.' : ''} ${noBuySummary.ltf === 'not_confirmed' ? 'LTF rebound is not confirmed.' : ''} ${noBuySummary.marketBias ? 'Bias: ' + noBuySummary.marketBias.replace(/_/g, ' ') + '.' : ''} bestFit=${noBuySummary.bestFit ?? 'n/a'} confidence=${noBuySummary.marketConfidence ?? '?'}%`);
+      logger.info(`WHY_NO_BUY_EXPLANATION_AUDIT: marketAction=${noBuySummary.marketAction ?? 'n/a'} bestFit=${noBuySummary.bestFit ?? 'n/a'} htf=${noBuySummary.htf ?? 'n/a'} primary=${noBuySummary.primary ?? 'n/a'} ltf=${noBuySummary.ltf ?? 'n/a'} marketConfidence=${noBuySummary.marketConfidence ?? 'n/a'} marketBias=${noBuySummary.marketBias ?? 'n/a'} topBlockers=${noBuySummary.topBlockers?.join('|') ?? noBuySummary.topReasons.join('|')} requiredNextCondition=${noBuySummary.requiredNextCondition?.join('|') ?? 'n/a'} momentumPockets=${noBuySummary.momentumPockets?.detected ? `detected=${noBuySummary.momentumPockets.count}:${noBuySummary.momentumPockets.entries.map(e => `${e.symbol}=${e.momentum}%:${e.blocker ?? 'none'}`).join('|')}` : 'none'} explanation=${riskOffNoEntries ? `No BUY — ${selectedBuyCandidates.length} candidates had local BUY signals, but global market is RISK-OFF, entries disabled.` : `No BUY — market is ${noBuySummary.marketAction ?? 'unknown'}. ${noBuySummary.primary ? 'Price is ' + noBuySummary.primary.replace(/_/g, ' ') + '.' : ''} ${noBuySummary.ltf === 'not_confirmed' ? 'LTF rebound is not confirmed.' : ''} ${noBuySummary.marketBias ? 'Bias: ' + noBuySummary.marketBias.replace(/_/g, ' ') + '.' : ''}`} bestFit=${noBuySummary.bestFit ?? 'n/a'} confidence=${noBuySummary.marketConfidence ?? '?'}%`);
     }
     if (scanDurationMs > 5000) {
       const avgMsPerSymbol = snapshot.scannedCount > 0 ? Math.round(scanDurationMs / snapshot.scannedCount) : 0;
@@ -3524,7 +5604,7 @@ export class MarketScanner {
           }
         }
 
-        if (this.shouldEmitPerSymbolAudit()) logger.info(`V3_REFERENCE_CONTRACT_AUDIT symbol=${symbol} scannerPeriod=${this.scannerReferencePeriod} referenceMode=${this.referenceMode} interval=${refConfig.interval} fetchLimit=${refConfig.limit} scannerReferenceCandles=${refConfig.scannerReferenceCandles} candlesFetched=${period.closes.length} candlesUsedForRef=${Math.min(refConfig.scannerReferenceCandles, period.closes.length)} refPrice=${refPrice.toFixed(4)} currentPrice=${price.last.toFixed(4)} dipFromRef=${dipFromRef.toFixed(2)}% reboundFromLocalLow=${reboundFromLocalLow.toFixed(2)}% rawPeriodChangePct=${period.changePct.toFixed(2)}% freshnessStatus=${freshnessStatus} contractMatchesV3=true sourceFunction=analyzeSymbol`);
+        if (this.shouldEmitPerSymbolAudit()) logger.info(`REFERENCE_CONTRACT_AUDIT symbol=${symbol} scannerPeriod=${this.scannerReferencePeriod} referenceMode=${this.referenceMode} interval=${refConfig.interval} fetchLimit=${refConfig.limit} scannerReferenceCandles=${refConfig.scannerReferenceCandles} candlesFetched=${period.closes.length} candlesUsedForRef=${Math.min(refConfig.scannerReferenceCandles, period.closes.length)} refPrice=${refPrice.toFixed(4)} currentPrice=${price.last.toFixed(4)} dipFromRef=${dipFromRef.toFixed(2)}% reboundFromLocalLow=${reboundFromLocalLow.toFixed(2)}% rawPeriodChangePct=${period.changePct.toFixed(2)}% freshnessStatus=${freshnessStatus} contractMatchesReference=true sourceFunction=analyzeSymbol`);
 
         if (this.shouldEmitPerSymbolAudit()) logger.info(`REBOUND_CALCULATION_SOURCE_AUDIT symbol=${symbol} scannerPeriod=${this.scannerReferencePeriod} referenceMode=${this.referenceMode} scannerReferenceCandles=${refConfig.scannerReferenceCandles} candlesUsedForRebound=${refCloses.length} currentPrice=${price.last.toFixed(4)} reboundPct=${reboundFromLocalLow.toFixed(2)} rawPeriodChange=${period.changePct.toFixed(2)}% reboundTimestamp=${reboundTimestamp ?? 'n/a'} reboundAgeMs=${freshnessCanBeValidated ? String((refCloses.length - 1) * 240 * 60 * 1000) : 'n/a'} freshnessStatus=${freshnessStatus} freshnessCanBeValidated=${freshnessCanBeValidated} sourceFunction=analyzeSymbol`);
       }
@@ -3820,6 +5900,93 @@ export class MarketScanner {
         ...candidate,
         status: requestedStatus,
       } as ScannerCandidate);
+      const mlBrainPrediction = decision.mlPrediction;
+      if (mlBrainPrediction) {
+        const mlPredictBuySettings = loadMLPredictBuySettings();
+        const mlPredictBuyPrediction = buildMLPredictBuyPredictionFromBrain({
+          symbol,
+          winProbability: mlBrainPrediction.winProbability,
+          badEntryRisk: mlBrainPrediction.badEntryRisk,
+          expectedMovePct: mlBrainPrediction.expectedMovePct,
+          confidenceAdjustment: mlBrainPrediction.confidenceAdjustment,
+          suggestedAction: mlBrainPrediction.suggestedAction,
+          rowsUsed: mlBrainPrediction.rowsUsed,
+          modelVersion: mlBrainPrediction.modelVersion,
+          featureSchemaVersion: 'cryptobud-v4-ml-feature-schema-v1',
+          reason: mlBrainPrediction.reasons.join('; ') || 'none',
+        });
+        mlPredictBuyPrediction.sampleSizeOk = mlBrainPrediction.rowsUsed >= mlPredictBuySettings.minTrainingRowsForAutoBuy;
+        const mlPredictBuyDecision = evaluateMLPredictBuy({
+          settings: mlPredictBuySettings,
+          prediction: mlPredictBuyPrediction,
+          context: {
+            symbol,
+            scanCycleId: candidateScanId,
+            executionAdapter: this.liveBuyFn && !this.paperAutoEnabled ? 'binance_live' : 'paper_simulated',
+            strategy: candidate.selectedStrategy,
+            riskGroup: candidate.riskGroup,
+            modelStatus: mlBrainPrediction.isTrained ? 'TRAINED' : 'UNTRAINED',
+            brainLoaded: mlBrainPrediction.modelVersion !== 'untrained' && mlBrainPrediction.modelVersion !== 'off',
+            preMlGatePassed: isV3Eligible && runtimeReadyAtBirth,
+            mlGuardBlocked: mlBrainPrediction.suggestedAction === 'BLOCK',
+            priceFreshOk: mq.priceFresh && priceFreshFromAge,
+            bookFreshOk: mq.bookFresh,
+            spreadOk: spreadPass,
+            tpRoomOk: candidate.tpRoomOk !== false,
+            notAlreadyOpen: true,
+            notDuplicatePosition: true,
+            notInCooldown: !this.recentlyClosedSymbols.has(symbol),
+            maxPositionsOk: true,
+            groupCapOk: true,
+            mlMaxOpenPositionsOk: true,
+            mlMaxBuysPerHourOk: true,
+            banlistOk: !(candidate as any).banned,
+            capitalOk: true,
+            marketGuardOk: !decision.blockReasons.some(r => r.toLowerCase().includes('market') || r.toLowerCase().includes('regime')),
+            btcAnchorOk: !decision.blockReasons.some(r => r.toLowerCase().includes('btc')),
+            professionalGateOk: (setupAudit as any).professionalGatePassed !== false,
+            strategyValidatorOk: setupAudit.strategyContractValid !== false && setupAudit.finalExecutable !== false,
+            scannerAgreementOk: candidate.entryGateDecision?.decision === 'ALLOW' || candidate.status === 'BUY' || candidate.status === 'WAIT',
+            emergencyStopOk: true,
+            executionAdapterHealthy: true,
+            dbOk: true,
+            persistenceOk: true,
+            entryGateDecision: candidate.entryGateDecision,
+          },
+        });
+        candidate.mlPredictBuyPrediction = mlPredictBuyPrediction;
+        candidate.mlPredictBuyDecision = mlPredictBuyDecision;
+        logger.info(
+          `ML_PREDICT_BUY_EVALUATION_AUDIT: ` +
+          `scanCycleId=${candidateScanId} ` +
+          `symbol=${symbol} ` +
+          `executionMode=${mlPredictBuyDecision.executionMode} ` +
+          `executionAdapter=${mlPredictBuyDecision.executionAdapter} ` +
+          `modelStatus=${mlBrainPrediction.isTrained ? 'TRAINED' : 'UNTRAINED'} ` +
+          `brainLoaded=${String(mlPredictBuyDecision.rowsUsed > 0 || mlBrainPrediction.modelVersion !== 'untrained')} ` +
+          `rowsUsed=${mlPredictBuyDecision.rowsUsed} ` +
+          `sampleSizeOk=${String(mlPredictBuyDecision.sampleSizeOk)} ` +
+          `predictedAction=${mlPredictBuyDecision.predictedAction} ` +
+          `predictedWinProb=${mlPredictBuyDecision.predictedWinProb} ` +
+          `badEntryRisk=${mlPredictBuyDecision.badEntryRisk} ` +
+          `expectedPnlPct=${mlPredictBuyDecision.expectedPnlPct} ` +
+          `modelConfidence=${mlPredictBuyDecision.modelConfidence} ` +
+          `featureCompleteness=${mlPredictBuyDecision.featureCompleteness} ` +
+          `scannerScore=${candidate.confidence} ` +
+          `strategy=${mlPredictBuyDecision.strategy} ` +
+          `riskGroup=${mlPredictBuyDecision.riskGroup ?? 'unknown'} ` +
+          `preMlGatePassed=${String(mlPredictBuyDecision.preMlGatePassed)} ` +
+          `mlGuardBlocked=${String(mlPredictBuyDecision.mlGuardBlocked)} ` +
+          `requireScannerAgreement=${String(mlPredictBuySettings.requireScannerAgreement)} ` +
+          `requireStrategyValidator=${String(mlPredictBuySettings.requireStrategyValidator)} ` +
+          `requireMarketGuard=${String(mlPredictBuySettings.requireMarketGuard)} ` +
+          `requireProfessionalGate=${String(mlPredictBuySettings.requireProfessionalGate)} ` +
+          `postMlHardGatesPassed=${String(mlPredictBuyDecision.postMlHardGatesPassed)} ` +
+          `entryGateApproved=${String(mlPredictBuyDecision.entryGateApproved)} ` +
+          `finalDecision=${mlPredictBuyDecision.finalDecision} ` +
+          `blockedReason=${mlPredictBuyDecision.blockedReason ?? 'none'}`
+        );
+      }
       if (candidate.gateAudit) {
         candidate.gateAudit.finalExecutable = candidate.finalExecutable ?? setupAudit.finalExecutable;
         candidate.gateAudit.buyAllowed = candidate.buyAllowed ?? setupAudit.buyAllowed;
@@ -3964,7 +6131,7 @@ export class MarketScanner {
     return 'UNKNOWN_EMPTY_UNIVERSE';
   }
 
-  private buildEmptySnapshot(reason?: string): ScannerSnapshot {
+  private buildEmptySnapshot(reason?: string, scanId?: string): ScannerSnapshot {
     this.diag.emptyUniverseReason = reason;
     const summary = reason === 'WATCHLIST_EMPTY' ? 'Watchlist is empty. Add symbols or switch to Binance Top 250.'
       : reason === 'ALL_RISK_GROUPS_DISABLED' ? 'Enable at least one risk group.'
@@ -3972,7 +6139,7 @@ export class MarketScanner {
           : reason === 'EXCHANGE_INFO_NOT_READY' || reason === 'TICKERS_NOT_READY' ? 'Waiting for public market data...'
             : 'Scanner idle. No universe available.';
     return {
-      scanId: nextScanId(),
+      scanId: scanId ?? nextScanId(),
       startedAt: new Date().toISOString(),
       finishedAt: new Date().toISOString(),
       status: 'IDLE',

@@ -1,6 +1,7 @@
 import { logger } from '../../utils/logger';
 
 export type QueueItemStatus = 'queued' | 'revalidating' | 'blocked' | 'executed' | 'expired';
+export type AutoBuyExecutionModule = 'autobots' | 'unicorn_hunter' | 'ml_predict_buy' | 'global';
 
 export interface AutoBuyQueueItem {
   id: string;
@@ -17,7 +18,9 @@ export interface AutoBuyQueueItem {
 export interface AutoBuyQueueState {
   items: AutoBuyQueueItem[];
   lastBuyAt: number;
+  lastBuyAtByModule: Partial<Record<AutoBuyExecutionModule, number>>;
   cooldownMs: number;
+  cooldownMsByModule: Partial<Record<AutoBuyExecutionModule, number>>;
   maxQueuedAgeMs: number;
   buysInLast30s: string[];
 }
@@ -29,10 +32,16 @@ const RATE_LIMIT_WINDOW_MS = 30000;
 let state: AutoBuyQueueState = {
   items: [],
   lastBuyAt: 0,
+  lastBuyAtByModule: {},
   cooldownMs: DEFAULT_COOLDOWN_MS,
+  cooldownMsByModule: {},
   maxQueuedAgeMs: DEFAULT_MAX_QUEUED_AGE_MS,
   buysInLast30s: [],
 };
+
+function cooldownMsForModule(module: AutoBuyExecutionModule): number {
+  return Math.max(0, state.cooldownMsByModule[module] ?? state.cooldownMs);
+}
 
 function pruneExpired(): void {
   const now = Date.now();
@@ -61,20 +70,28 @@ function pruneRateWindow(): void {
 
 export const autoBuyQueue = {
   getState(): Readonly<AutoBuyQueueState> {
-    return { ...state, items: [...state.items] };
+    return { ...state, items: [...state.items], lastBuyAtByModule: { ...state.lastBuyAtByModule }, cooldownMsByModule: { ...state.cooldownMsByModule } };
   },
 
-  canSubmitBuy(): boolean {
-    const now = Date.now();
-    const elapsed = now - state.lastBuyAt;
-    return state.lastBuyAt === 0 || elapsed >= state.cooldownMs;
+  setModuleCooldownMs(module: AutoBuyExecutionModule, cooldownMs: number): void {
+    const resolved = Math.max(0, Math.floor(Number(cooldownMs) || 0));
+    state.cooldownMsByModule[module] = resolved;
+    logger.info(`AUTO_BUY_MODULE_COOLDOWN_CONFIGURED module=${module} cooldownMs=${resolved}`);
   },
 
-  cooldownRemainingMs(): number {
+  canSubmitBuy(module: AutoBuyExecutionModule = 'global'): boolean {
     const now = Date.now();
-    if (state.lastBuyAt === 0) return 0;
-    const elapsed = now - state.lastBuyAt;
-    return Math.max(0, state.cooldownMs - elapsed);
+    const lastBuyAt = module === 'global' ? state.lastBuyAt : state.lastBuyAtByModule[module] ?? 0;
+    const elapsed = now - lastBuyAt;
+    return lastBuyAt === 0 || elapsed >= cooldownMsForModule(module);
+  },
+
+  cooldownRemainingMs(module: AutoBuyExecutionModule = 'global'): number {
+    const now = Date.now();
+    const lastBuyAt = module === 'global' ? state.lastBuyAt : state.lastBuyAtByModule[module] ?? 0;
+    if (lastBuyAt === 0) return 0;
+    const elapsed = now - lastBuyAt;
+    return Math.max(0, cooldownMsForModule(module) - elapsed);
   },
 
   enqueue(params: {
@@ -148,10 +165,11 @@ export const autoBuyQueue = {
     }
   },
 
-  recordBuySubmitted(symbol: string): void {
+  recordBuySubmitted(symbol: string, module: AutoBuyExecutionModule = 'global'): void {
     const now = Date.now();
     state.lastBuyAt = now;
-    state.buysInLast30s.push(`${symbol}_${now}`);
+    state.lastBuyAtByModule[module] = now;
+    state.buysInLast30s.push(`${module}|${symbol}_${now}`);
     pruneRateWindow();
 
     // Mark matched queue items as executed
@@ -162,18 +180,22 @@ export const autoBuyQueue = {
     }
 
     // Log rate-limit invariant
-    const violation = state.buysInLast30s.length > 1;
-    logger.info(`AUTO_BUY_RATE_LIMIT_INVARIANT windowMs=${RATE_LIMIT_WINDOW_MS} buysInWindow=${state.buysInLast30s.length} symbolsInWindow=${state.buysInLast30s.map(s => s.split('_')[0]).join(',')} violation=${violation} blockedSymbols=${violation ? state.buysInLast30s.slice(1).map(s => s.split('_')[0]).join(',') : 'none'}`);
+    const moduleWindow = state.buysInLast30s.filter((buyId) => buyId.startsWith(`${module}|`));
+    const moduleSymbols = moduleWindow.map(s => s.split('|')[1]?.split('_')[0] ?? s.split('_')[0]);
+    const violation = moduleWindow.length > 1;
+    logger.info(`AUTO_BUY_RATE_LIMIT_INVARIANT windowMs=${RATE_LIMIT_WINDOW_MS} module=${module} buysInWindow=${moduleWindow.length} symbolsInWindow=${moduleSymbols.join(',')} violation=${violation} blockedSymbols=${violation ? moduleSymbols.slice(1).join(',') : 'none'}`);
 
     if (violation) {
-      logger.warn(`AUTO_BUY_RATE_LIMIT_VIOLATION: ${state.buysInLast30s.length} buys in last ${RATE_LIMIT_WINDOW_MS}ms. Symbols: ${state.buysInLast30s.map(s => s.split('_')[0]).join(',')}`);
+      logger.warn(`AUTO_BUY_RATE_LIMIT_VIOLATION: module=${module} ${moduleWindow.length} buys in last ${RATE_LIMIT_WINDOW_MS}ms. Symbols: ${moduleSymbols.join(',')}`);
     }
   },
 
-  blockIfCooldownActive(symbol: string): { blocked: boolean; remainingMs: number } {
-    const remaining = this.cooldownRemainingMs();
+  blockIfCooldownActive(symbol: string, module: AutoBuyExecutionModule = 'global'): { blocked: boolean; remainingMs: number } {
+    const remaining = this.cooldownRemainingMs(module);
+    const lastBuyAt = module === 'global' ? state.lastBuyAt : state.lastBuyAtByModule[module] ?? 0;
+    const requiredCooldownMs = cooldownMsForModule(module);
     if (remaining > 0) {
-      logger.info(`AUTO_BUY_COOLDOWN_BLOCKED symbol=${symbol} lastAutoBuyAt=${state.lastBuyAt} elapsedMs=${Date.now() - state.lastBuyAt} requiredCooldownMs=${state.cooldownMs} nextAllowedBuyAt=${new Date(Date.now() + remaining).toISOString()} reason=min_seconds_between_auto_buys`);
+      logger.info(`AUTO_BUY_COOLDOWN_BLOCKED symbol=${symbol} module=${module} lastAutoBuyAt=${lastBuyAt} elapsedMs=${Date.now() - lastBuyAt} requiredCooldownMs=${requiredCooldownMs} nextAllowedBuyAt=${new Date(Date.now() + remaining).toISOString()} reason=min_seconds_between_auto_buys`);
       return { blocked: true, remainingMs: remaining };
     }
     return { blocked: false, remainingMs: 0 };
@@ -196,7 +218,9 @@ export const autoBuyQueue = {
     state = {
       items: [],
       lastBuyAt: 0,
+      lastBuyAtByModule: {},
       cooldownMs: DEFAULT_COOLDOWN_MS,
+      cooldownMsByModule: {},
       maxQueuedAgeMs: DEFAULT_MAX_QUEUED_AGE_MS,
       buysInLast30s: [],
     };

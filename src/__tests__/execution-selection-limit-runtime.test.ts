@@ -1,4 +1,6 @@
 import { buildExecutionPlan } from '../core/scanner/ExecutionPlanner';
+import { buildCandidateExecutionPrecheckSnapshot, buildCandidateRuntimeSnapshot, buildCandidateStrategyDecisionSnapshot } from '../core/scanner/CandidateLifecycle';
+import { resolveAutoBotsRuntimeState } from '../core/runtime/autobots-state';
 import type { EntryGateOutput, ScannerCandidate, ScannerSnapshot } from '../core/types';
 
 let passed = 0;
@@ -10,7 +12,19 @@ function gateAllow(): EntryGateOutput {
 }
 
 function makeCandidate(symbol: string, rank: number): ScannerCandidate {
-  return {
+  const runtimeState = resolveAutoBotsRuntimeState({
+    executionMode: 'paper_simulated',
+    buildMode: 'production',
+    tauriDetected: true,
+    uiAutoBotsOn: true,
+    strategySource: 'autobots',
+    persistedAutoBotsOn: true,
+    scannerAutoEnabled: true,
+    paperAutoExecutionEnabled: true,
+    marketScannerPaperAutoEnabled: true,
+    paperAutoBuyFnPresent: true,
+  });
+  const candidate = {
     candidateId: `cand_${symbol}`,
     symbol,
     createdAt: new Date().toISOString(),
@@ -51,7 +65,74 @@ function makeCandidate(symbol: string, rank: number): ScannerCandidate {
     autoStrategyDecision: { effectiveStrategy: 'momentum', strategySource: 'autobots', groupTrend: 'bullish', groupRecommendedStrategy: 'momentum', confidenceTier: 'high', reason: 'test' } as any,
     strategySource: 'autobots',
     groupTrend: 'bullish',
+    runtimeSnapshot: buildCandidateRuntimeSnapshot({ scanId: 'selection_limit_runtime_scan', runtimeState }),
+    autoBotsRuntimeState: runtimeState,
+    finalExecutionStrategy: 'momentum',
+    effectiveStrategy: 'momentum',
+    buyAllowed: true,
+    finalExecutable: true,
+    tradingTargetOwnership: {
+      strategySource: 'autobots',
+      tp1Source: 'AutoBots dynamic per coin',
+      tp1Value: 1.8,
+      tp2Source: 'disabled',
+      tp2Value: 0,
+      slSource: 'user',
+      slValue: 1.5,
+      dynamicTrailingEnabled: false,
+      trailingStartsAt: 'TP1',
+      trailPullbackValue: 0.25,
+      reason: 'test',
+    },
   } as unknown as ScannerCandidate;
+  candidate.strategyDecision = buildCandidateStrategyDecisionSnapshot({
+    scanId: 'selection_limit_runtime_scan',
+    candidate,
+    resolution: {
+      symbol,
+      riskGroup: 'mid_caps',
+      groupTrend: 'bullish',
+      groupRecommendedStrategy: 'momentum',
+      groupConfidence: 0.9,
+      marketBestFit: 'momentum',
+      userSelectedRuntimeStrategy: 'momentum',
+      dynamicPerCoinStrategy: true,
+      perCoinSelectedStrategy: 'momentum',
+      finalExecutionStrategy: 'momentum',
+      strategySourceResolved: 'AUTOBOTS_DYNAMIC',
+      fallbackApplied: false,
+      fallbackType: 'NONE',
+      fallbackReason: null,
+      overrideApplied: false,
+      overrideReason: null,
+      mismatchAllowed: true,
+      mismatchReason: 'unchanged',
+      routerPath: 'smart_strategy_router',
+      strategyDecisionTrace: ['source=autobots'],
+      evaluatedStrategies: [],
+      selectedStrategy: 'momentum',
+      selectionReason: 'runtime_limit_test',
+      noValidStrategyReason: null,
+      noValidStrategyTrace: [],
+      fallbackCanSubmitBuy: true,
+      fallbackSubmitGuardReason: 'runtime_limit_test',
+    } as any,
+  });
+  candidate.executionPrecheckSnapshot = buildCandidateExecutionPrecheckSnapshot({
+    candidate,
+    priceFresh: true,
+    bookFresh: true,
+    spreadOk: true,
+    tpRoomOk: true,
+    riskGroupResolved: true,
+    professionalGateResolved: true,
+    entryContractResolved: true,
+    entryContractValid: true,
+    capitalAvailable: true,
+    duplicateChecked: true,
+    pendingOrderChecked: true,
+  });
+  return candidate;
 }
 
 function makeSnapshot(candidates: ScannerCandidate[]): ScannerSnapshot {
@@ -95,19 +176,16 @@ const plan = buildExecutionPlan({
   enabledRiskGroups: { mid_caps: true },
 });
 
-const skippedByLimit = plan.skippedCandidates.filter((s) => s.reason.includes('MAX_POSITIONS') || s.reason.includes('CAPITAL_BLOCKED') || s.reason.includes('BLOCK_MAX_POSITIONS') || s.reason.includes('BLOCK_CAPITAL'));
+const skippedByLimit = plan.skippedCandidates.filter((s) => s.gate === 'ExecutionPlannerLimit');
 ok(plan.executionPoolSize === 20, 'buyReadyCount/executionPoolSize is 20');
-ok(plan.maxSelectedPerScan === 10, 'effective maxSelectedPerScan is 10 (not used as cap)');
-ok(plan.selectedCandidates.length === 20, 'selectedCount is 20 — no artificial selection cap, all candidates pass real safety');
-ok(skippedByLimit.length === 0, 'skippedByRealSafetyLimitCount is 0 — adequate slots/capital');
-ok(plan.noBuyReasons.length === 0, 'no buy reasons — all candidates selected');
+ok(plan.maxSelectedPerScan === 10, 'effective maxSelectedPerScan is 10');
+ok(plan.selectedCandidates.length === 10, 'selectedCount is capped at maxSelectedPerScan=10');
+ok(skippedByLimit.length === 0, 'no inspected candidate skipped when maxSelectedPerScan matches round-robin pool size');
+ok(plan.noBuyReasons.length === 0, 'no buy reasons when all inspected candidates are selected');
 ok(!plan.selectedCandidates.some((c) => c.reason?.includes('selection_limit_reached')), 'no candidate blocked by selection_limit_reached');
 ok(!plan.skippedCandidates.some((s) => s.reason?.includes('selection_limit')), 'no skipped reason contains selection limit');
-ok(!plan.skippedCandidates.some((s) => s.gate === 'ExecutionPlannerLimit'), 'no candidate skipped by ExecutionPlannerLimit gate');
-const skippedBySafetyGate = plan.skippedCandidates.filter((s) => s.gate === 'ExecutionPlannerLimit');
-ok(skippedBySafetyGate.length === 0, 'no candidate blocked by ExecutionPlannerLimit with 20 available slots');
 const selected = plan.selectedCandidates.map((c) => c.symbol);
-ok(selected.length === 20, 'all 20 candidates selected when slots available');
+ok(selected.length === 10, 'first 10 round-robin candidates selected when slots available and maxSelectedPerScan=10');
 
 const explicitFour = buildExecutionPlan({
   scannerSnapshot: makeSnapshot(candidates),
@@ -129,9 +207,9 @@ const explicitFour = buildExecutionPlan({
   executionAdapter: 'paper_simulated',
   enabledRiskGroups: { mid_caps: true },
 });
-ok(explicitFour.selectedCandidates.length === 4 && explicitFour.maxSelectedPerScan === 4, 'selectedCount=4 when maxPositions=4 limits via real safety (not artificial maxSelectedPerScan)');
-ok(explicitFour.skippedCandidates.length === 16, 'skipped=16 due to max positions reached, not selection limit');
-ok(explicitFour.skippedCandidates.every((s) => s.reason.includes('BLOCK_MAX_POSITIONS') || s.gate === 'ExecutionPlannerLimit'), 'skipped reasons use real safety labels');
+ok(explicitFour.selectedCandidates.length === 4 && explicitFour.maxSelectedPerScan === 4, 'selectedCount=4 when maxPositions and maxSelectedPerScan are both 4');
+ok(explicitFour.skippedCandidates.length === 6, 'remaining inspected candidates are skipped after effective selection limit is reached');
+ok(explicitFour.skippedCandidates.every((s) => s.gate === 'ExecutionPlannerLimit'), 'skipped reasons use ExecutionPlannerLimit labels');
 
 if (failed > 0) {
   console.error(`execution-selection-limit-runtime: ${passed} passed, ${failed} failed`);

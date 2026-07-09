@@ -747,6 +747,54 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
 
       <div style={{ height: 1, background: 'rgba(255,255,255,0.06)', margin: '8px 0' }} />
 
+      <div style={{ fontSize: 10, color: '#bc8cff', marginBottom: 4 }}>Unicorn Hunter</div>
+      <div className="param-grid">
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input
+            type="checkbox"
+            checked={v.unicornHunter.enabled}
+            onChange={(e) => patch("unicornHunter", { ...v.unicornHunter, enabled: e.target.checked, mode: e.target.checked && v.unicornHunter.mode === 'off' ? 'watch' : v.unicornHunter.mode })}
+          />
+          Enabled
+        </label>
+        <select
+          value={v.unicornHunter.mode}
+          onChange={(e) => patch("unicornHunter", { ...v.unicornHunter, mode: e.target.value as TradingParametersView["unicornHunter"]["mode"], enabled: e.target.value !== 'off' })}
+        >
+          <option value="watch">WATCH</option>
+          <option value="paper">PAPER</option>
+          <option value="live">LIVE</option>
+          <option value="off">OFF</option>
+        </select>
+
+        <label>Max Positions</label>
+        <input type="number" value={v.unicornHunter.maxOpenUnicornPositions} onChange={(e) => patch("unicornHunter", { ...v.unicornHunter, maxOpenUnicornPositions: Math.max(1, Number(e.target.value) || 1) })} min={1} max={3} style={numStyle} />
+
+        <label>Trades / Day</label>
+        <select value={v.unicornHunter.maxUnicornTradesPerDay} onChange={(e) => patch("unicornHunter", { ...v.unicornHunter, maxUnicornTradesPerDay: Number(e.target.value) })}>
+          <option value={1}>1</option>
+          <option value={2}>2</option>
+          <option value={3}>3</option>
+        </select>
+
+        <label>Capital %</label>
+        <input type="number" value={v.unicornHunter.capitalPctPerTrade} onChange={(e) => patch("unicornHunter", { ...v.unicornHunter, capitalPctPerTrade: Math.max(0.1, Number(e.target.value) || 0.5) })} min={0.1} step={0.1} style={numStyle} />
+
+        <label>Min Score</label>
+        <input type="number" value={v.unicornHunter.minUnicornScore} onChange={(e) => patch("unicornHunter", { ...v.unicornHunter, minUnicornScore: Math.max(1, Number(e.target.value) || 85) })} min={1} max={100} style={numStyle} />
+
+        <label>Anti-ATH Guard</label>
+        <input type="checkbox" checked={v.unicornHunter.antiAthGuardEnabled} onChange={(e) => patch("unicornHunter", { ...v.unicornHunter, antiAthGuardEnabled: e.target.checked })} />
+
+        <label>Pullback + Rebound</label>
+        <input type="checkbox" checked={v.unicornHunter.requirePullbackRebound} onChange={(e) => patch("unicornHunter", { ...v.unicornHunter, requirePullbackRebound: e.target.checked })} />
+      </div>
+      <div style={{ fontSize: 8, color: '#8b949e', marginTop: 3 }}>
+        Default is OFF/WATCH. WATCH never submits a BUY; PAPER/LIVE still use the shared AutoBots execution pipeline.
+      </div>
+
+      <div style={{ height: 1, background: 'rgba(255,255,255,0.06)', margin: '8px 0' }} />
+
       <div style={{ fontSize: 10, color: '#58a6ff', marginBottom: 4 }}>Capital Settings</div>
       <div className="param-grid">
         <label>Trading Capital</label>

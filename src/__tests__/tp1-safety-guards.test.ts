@@ -148,6 +148,12 @@ const dipperOwnership = resolveAutoTargetOwnership({
 });
 ok(dipperOwnership.isAutoTargetOwned === true && dipperOwnership.isManualOverride === false, 'The Dipper scanner trade is auto-target-owned, not manual override');
 
+const unicornOwnership = resolveAutoTargetOwnership({
+  candidate: { symbol: 'JTOUSDT', mode: 'AUTO', status: 'BUY', source: 'unicorn_hunter', candidateSource: 'unicorn_hunter', strategySource: 'autobots' } as any,
+  executionPath: 'ExecutionPlanner',
+});
+ok(unicornOwnership.isAutoTargetOwned === true && unicornOwnership.strategySource === 'unicorn_hunter', 'Unicorn scanner trade keeps unicorn_hunter strategy source even if legacy candidate fields say autobots');
+
 const manualOwnership = resolveAutoTargetOwnership({
   candidate: null,
   executionPath: 'manual_buy_button',

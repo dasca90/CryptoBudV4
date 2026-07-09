@@ -5,6 +5,13 @@ import { resolveTradingTargetOwnership } from '../core/trading/TradingTargetOwne
 import { TradingEngine } from '../core/trading/TradingEngine';
 import { MLPredictor } from '../core/ml/MLPredictor';
 import { Journal } from '../core/persistence/Journal';
+import { resolveAutoBotsRuntimeState } from '../core/runtime/autobots-state';
+import { resolveAutoBotsFinalStrategy } from '../core/scanner/AutoStrategyRouter';
+import {
+  buildCandidateExecutionPrecheckSnapshot,
+  buildCandidateRuntimeSnapshot,
+  buildCandidateStrategyDecisionSnapshot,
+} from '../core/scanner/CandidateLifecycle';
 import { buildExecutionPlan } from '../core/scanner/ExecutionPlanner';
 import { mapPositionToOpenPositionView, mapTradeRecordToClosedPositionView } from '../lib/air-scanner/tradeV4DataAdapter';
 import { MarketDataFeed } from '../utils/MarketDataFeed';
@@ -195,6 +202,20 @@ function gateAllow(): EntryGateOutput {
 }
 
 function makeExecutableAutoBotsCandidate(symbol: string, price: number, strategySource: string | null = 'AutoBots'): ScannerCandidate {
+  const scanId = 'tp1_behavior_scan';
+  const runtimeState = resolveAutoBotsRuntimeState({
+    executionMode: 'paper_simulated',
+    buildMode: 'production',
+    tauriDetected: true,
+    uiAutoBotsOn: true,
+    strategySource: 'autobots',
+    persistedAutoBotsOn: true,
+    scannerAutoEnabled: true,
+    paperAutoExecutionEnabled: true,
+    marketScannerPaperAutoEnabled: true,
+    paperAutoBuyFnPresent: true,
+  });
+  const runtimeSnapshot = buildCandidateRuntimeSnapshot({ scanId, runtimeState });
   const autoStrategyDecision = {
     effectiveStrategy: 'momentum',
     groupRecommendedStrategy: 'momentum',
@@ -204,7 +225,7 @@ function makeExecutableAutoBotsCandidate(symbol: string, price: number, strategy
     reason: 'test autobots momentum',
     warnings: [],
   } as any;
-  return {
+  const candidate = {
     candidateId: `cand_${symbol}`,
     symbol,
     createdAt: new Date().toISOString(),
@@ -261,9 +282,38 @@ function makeExecutableAutoBotsCandidate(symbol: string, price: number, strategy
     filtersOk: true,
     isTradable: true,
     autoStrategyDecision,
+    runtimeSnapshot,
+    autoBotsRuntimeState: runtimeState,
     ...(strategySource === null ? {} : { strategySource }),
     groupTrend: 'bullish',
   } as unknown as ScannerCandidate;
+  const resolution = resolveAutoBotsFinalStrategy(candidate, {
+    marketBestFit: 'momentum',
+  }, {
+    groupRecommendedStrategy: 'momentum',
+    groupTrend: 'bullish',
+  }, {
+    autoBotsOn: runtimeState.resolvedAutoBotsEnabled,
+    dynamicPerCoinStrategy: runtimeState.dynamicPerCoinStrategy,
+    userSelectedRuntimeStrategy: 'momentum',
+    manualOverrideActive: false,
+  });
+  candidate.strategyDecision = buildCandidateStrategyDecisionSnapshot({ scanId, candidate, resolution });
+  candidate.executionPrecheckSnapshot = buildCandidateExecutionPrecheckSnapshot({
+    candidate,
+    priceFresh: true,
+    bookFresh: true,
+    spreadOk: true,
+    tpRoomOk: true,
+    riskGroupResolved: true,
+    professionalGateResolved: true,
+    entryContractResolved: true,
+    entryContractValid: true,
+    capitalAvailable: true,
+    duplicateChecked: true,
+    pendingOrderChecked: true,
+  });
+  return candidate;
 }
 
 function makeSnapshot(candidates: ScannerCandidate[]): ScannerSnapshot {
@@ -370,8 +420,8 @@ async function runBehavioralPositionSnapshotTest() {
   const buyMessage = formatBuyNotification(openTrade);
   ok(buyMessage.includes(`TP1: ${risk.tp1Pct.toFixed(2)}%`), '29 Telegram BUY OPENED reads same TP1 pct from snapshot');
   const formattedTp1Target = Number(risk.tp1TargetPrice).toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
-  ok(buyMessage.includes(`TP1 target: ${formattedTp1Target}`), '30 Telegram BUY OPENED reads same TP1 target from snapshot');
-  ok(buyMessage.includes('Source: AutoBots'), '30a Telegram BUY OPENED shows Source: AutoBots');
+  ok(!buyMessage.includes(`TP1 target: ${formattedTp1Target}`), '30 Telegram BUY OPENED omits TP1 target audit detail');
+  ok(buyMessage.includes('🤖 AUTOBOTS BUY OPENED'), '30a Telegram BUY OPENED shows AutoBots in header');
   ok(buyMessage.includes('Mode: Demo'), '30b Telegram BUY OPENED shows Mode: Demo for paper adapter');
 
   const closePrice = risk.tp1TargetPrice * 1.01;

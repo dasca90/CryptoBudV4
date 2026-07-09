@@ -44,8 +44,8 @@ ok(scannerSrc.includes('GLOBAL_CAPITAL_EXHAUSTED'), 'Test 6c: GLOBAL_CAPITAL_EXH
 ok(scannerSrc.includes('ALL_SELECTED_SYMBOLS_DUPLICATE'), 'Test 6d: ALL_SELECTED_SYMBOLS_DUPLICATE in hierarchy');
 ok(scannerSrc.includes('ADAPTER_REJECTED'), 'Test 6e: ADAPTER_REJECTED in hierarchy');
 
-// Test 7: No selection limit regression
-ok(plannerSrc.includes('maxSelectedPerScan=unlimited') || plannerSrc.includes('selectionLimitApplied=false'), 'Test 7: No selection limit regression');
+// Test 7: AutoBots buy budget is explicit and audited
+ok(plannerSrc.includes('EXECUTION_SELECTION_LIMIT_AUDIT') && plannerSrc.includes('maxSelectedPerScan=${maxSelectedPerScan}'), 'Test 7: AutoBots buy budget is explicit and audited');
 
 // Test 8: Duplicate protection per-symbol, not batch
 ok(controllerSrc.includes("input.openSymbols.includes(symbol)"), 'Test 8a: PaperAutoExecutionController checks duplicate per-symbol');

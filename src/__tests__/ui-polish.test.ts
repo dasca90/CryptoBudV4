@@ -12,13 +12,16 @@ const ok = (c: boolean, m: string) => { if (c) p++; else { f++; console.error('F
   const tradeV4 = readFileSync('src/components/trade-v4/TradeV4Page.tsx', 'utf8');
   const airScanner = readFileSync('src/ui/pages/AirScannerPage.tsx', 'utf8');
   const topCand = readFileSync('src/components/trade-v4/TopCandidatesPanel.tsx', 'utf8');
+  const appCss = readFileSync('src/App.css', 'utf8');
 
   ok(tradeV4.includes('SelectedCoinInspector') && tradeV4.includes('trade-scanner-status-panel') && airScanner.includes('AirScanner3DView'), 'A TradeV4 core panels render and 3D scanner is isolated');
   ok(!settings.includes('PAPER TRADING'), 'B Paper settings not in Settings page');
   ok(topCand.includes('Status') && topCand.includes('Strategy'), 'D Watch Pool table shows Status and Strategy columns');
-  ok(topCand.includes('No BUY —'), 'E No BUY summary appears');
+  ok(topCand.includes('No BUY —') || topCand.includes('No Unicorn BUY because'), 'E No BUY summary appears');
   ok(trade.includes('scalperStartDisabled'), 'F Watchlist disabled state exists');
   ok(journal.includes('Winners') && journal.includes('Losers') && journal.includes('Training eligible'), 'H Journal filters exist');
+  ok(journal.includes('<span>PnL $</span><span>PnL %</span>') && journal.includes('formatJournalPnlPercent(t.pnlPercent)'), 'H2 Journal renders canonical PnL percent column');
+  ok(journal.includes('journal-strategy-cell') && appCss.includes('.journal-row > span') && appCss.includes('text-overflow: ellipsis'), 'H3 Journal long strategy labels truncate inside their column');
   ok(ml.includes('ML cannot force BUY. ML can only WAIT/BLOCK/reduce confidence.'), 'I ML warning exists');
   ok(logs.includes('SCANNER') && logs.includes('RISK') && logs.includes('TELEGRAM'), 'J Logs category filters exist');
   ok(settings.includes('Binance API') && settings.includes('Telegram Notifications') && settings.includes('BTC Anchor') && settings.includes('Reset ML Brain'), 'K Settings keeps API/Telegram/Anchors/Reset');

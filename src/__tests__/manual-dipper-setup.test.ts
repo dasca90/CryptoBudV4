@@ -96,7 +96,7 @@ async function main() {
   ok((row.strategySetupReboundReqLabel ?? '').includes('1.00%'), '15 Open positions shows manual rebound required');
 
   const buyMsg = formatBuyNotification(mockManualTrade());
-  ok(buyMsg.includes('required: 2.00%') && buyMsg.includes('required: 1.00%'), '16 Telegram BUY includes manual setup values');
+  ok(!buyMsg.includes('required: 2.00%') && !buyMsg.includes('required: 1.00%'), '16 Telegram BUY omits manual setup diagnostics');
   const sellMsg = formatSellNotification(mockManualTrade({
     side: 'SELL',
     status: 'closed',
@@ -105,7 +105,7 @@ async function main() {
     pnlPercent: 4,
     closeSnapshot: { exitReason: 'TP1_FIXED', fees: 0.01 },
   }));
-  ok(sellMsg.includes('required: 2.00%') && sellMsg.includes('required: 1.00%'), '17 Telegram SELL preserves manual setup from entry snapshot');
+  ok(!sellMsg.includes('required: 2.00%') && !sellMsg.includes('required: 1.00%'), '17 Telegram SELL omits manual setup diagnostics');
 
   ok(!engineSrc.includes('micro_scalper_settings') || !cardSrc.includes('Micro Scalper Setup'), '18 manual dipper setup remains separate from micro scalper settings');
 
@@ -114,4 +114,3 @@ async function main() {
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
-

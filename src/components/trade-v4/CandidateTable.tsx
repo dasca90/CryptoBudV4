@@ -1,6 +1,7 @@
 ﻿import { memo } from "react";
 import type { TradeV4CandidateView } from "./types";
 import { getCoinRepresentative, getTitleSymbol } from "../../lib/ui/uiSymbolMapper";
+import { TradeSourceBadge } from "./TradeSourceBadge";
 
 export const CandidateTable = memo(function CandidateTable(props: {
   candidates: TradeV4CandidateView[];
@@ -23,7 +24,7 @@ export const CandidateTable = memo(function CandidateTable(props: {
           <table className="data-table data-table-candidates">
             <thead>
               <tr>
-                <th>Rank</th><th>Symbol</th><th>Risk Group</th><th>Strategy</th><th>Group Trend</th><th>Group Strategy</th><th>Effective</th><th>Status</th><th>Execution</th><th>Planned Action</th><th>Confidence</th><th>Spread</th><th>TP Room</th><th>Main Reason</th>
+                <th>Rank</th><th>Symbol</th><th>Source</th><th>Risk Group</th><th>Strategy</th><th>Group Trend</th><th>Group Strategy</th><th>Effective</th><th>Status</th><th>Execution</th><th>Planned Action</th><th>Confidence</th><th>Spread</th><th>TP Room</th><th>Main Reason</th>
               </tr>
             </thead>
             <tbody>
@@ -35,6 +36,7 @@ export const CandidateTable = memo(function CandidateTable(props: {
                 >
                   <td>{c.rank ?? index + 1}</td>
                   <td><strong style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span>{getCoinRepresentative(c.symbol)}</span>{c.symbol}</strong></td>
+                  <td><TradeSourceBadge presentation={c.sourcePresentation} compact /></td>
                   <td>{c.riskGroup || "n/a"}</td>
                   <td>{c.strategy || "n/a"}</td>
                   <td>{c.groupTrend || "n/a"}</td>

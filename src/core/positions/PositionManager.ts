@@ -26,6 +26,24 @@ export class PositionManager {
 
   addPosition(symbol: string, position: Position): void {
     this.positions.set(symbol, position);
+    const bs = position.buySnapshot as any;
+    logger.info(
+      `POSITION_OWNER_PERSISTENCE_AUDIT: ` +
+      `symbol=${symbol} ` +
+      `positionId=${position.tradeId ?? bs?.tradeId ?? 'unknown'} ` +
+      `stage=position_manager_add ` +
+      `candidateSource=${bs?.candidateSource ?? 'unknown'} ` +
+      `ownerType=${bs?.ownerType ?? position.ownerType ?? 'unknown'} ` +
+      `ownerName=${bs?.ownerName ?? (position as any).ownerName ?? 'unknown'} ` +
+      `scannerModule=${bs?.scannerModule ?? 'unknown'} ` +
+      `selectedBy=${bs?.selectedBy ?? 'unknown'} ` +
+      `executedBy=${bs?.executedBy ?? 'unknown'} ` +
+      `source=${bs?.source ?? 'unknown'} ` +
+      `strategySource=${bs?.strategySource ?? 'unknown'} ` +
+      `executionSource=${bs?.executionSource ?? 'unknown'} ` +
+      `finalExecutionStrategy=${bs?.finalExecutionStrategy ?? bs?.selectedStrategy ?? 'unknown'} ` +
+      `entryRule=${bs?.entryRule ?? bs?.settingsSnapshot?.entryRule ?? 'unknown'}`
+    );
     logger.info(`POSITION_MANAGER_ADD: ${symbol} mode=${position.mode} qty=${position.quantity} price=${position.avgEntryPrice}`);
     this.emit('add', symbol);
   }

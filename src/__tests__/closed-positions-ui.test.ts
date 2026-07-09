@@ -3,7 +3,7 @@ import path from 'node:path';
 import { buildTradeV4PageModel } from '../lib/air-scanner/tradeV4DataAdapter';
 import type { TradeRecord } from '../core/types';
 import { logger } from '../utils/logger';
-import { V3_CLOSED_POSITION_COLUMNS } from '../components/trade-v4/ClosedPositionsPanel';
+import { CLOSED_POSITION_COLUMNS, CLOSED_POSITION_DETAILED_COLUMNS } from '../components/trade-v4/closedPositionsPanelModel';
 
 let passed = 0;
 let failed = 0;
@@ -104,7 +104,7 @@ function main() {
   });
 
   const row = model.closedPositions[0];
-  ok(JSON.stringify(V3_CLOSED_POSITION_COLUMNS) === JSON.stringify(['Symbol','Owner','Strategy','Mode','Qty','Entry Value','Entry Price','Exit Price','Exit Value','Realized PnL %','Realized PnL $','Gross Result','Opened At','Closed At','Hold','Exit Reason','Ref@Entry','Dip@Entry','Rebound@Entry','Trend@Entry','Notes']), '1 V3 closed default column order exactly');
+  ok(JSON.stringify(CLOSED_POSITION_COLUMNS) === JSON.stringify(['Symbol','Owner','Strategy','Mode','Qty','Entry Value','Entry Price','Exit Price','Exit Value','Realized PnL %','Gross PnL $','Fees $','Net PnL $','Opened At','Closed At','Hold','Exit Reason','Ref@Entry','Dip@Entry','Rebound@Entry','Trend@Entry','Notes']), '1 V4 closed default column order exactly');
   ok(row.sourceLabel === 'AutoBots', '2 closed owner/source is AutoBots');
   ok(row.modeLabel === 'AUTO' && row.executionMode === 'Demo', '3 closed separates trade mode AUTO from execution mode Demo');
   ok(row.tp1Pct === 1.3 && row.tp1TargetPrice === 1.013 && row.tp1Source === 'AutoBots dynamic per coin', '4 closed row preserves canonical TP1 snapshot over close legacy zero');
@@ -117,9 +117,10 @@ function main() {
   ok(row.groupTrendAtEntry === 'bullish', '11 Trend@Entry comes from entry snapshot');
 
   const panelSource = readFileSync(path.resolve(process.cwd(), 'src/components/trade-v4/ClosedPositionsPanel.tsx'), 'utf8');
-  const defaultColumnBlock = panelSource.slice(panelSource.indexOf('export const V3_CLOSED_POSITION_COLUMNS'), panelSource.indexOf('const V4_CLOSED_DETAILED_COLUMNS'));
+  const modelSource = readFileSync(path.resolve(process.cwd(), 'src/components/trade-v4/closedPositionsPanelModel.ts'), 'utf8');
+  const defaultColumnBlock = modelSource.slice(modelSource.indexOf('export const CLOSED_POSITION_COLUMNS'), modelSource.indexOf('export const CLOSED_POSITION_DETAILED_COLUMNS'));
   ok(!defaultColumnBlock.includes('TP1 Target') && !defaultColumnBlock.includes('TP1 Source') && !defaultColumnBlock.includes('Quality'), '12 closed default columns do not include TP/debug extras');
-  ok(panelSource.includes('V4_CLOSED_DETAILED_COLUMNS') && panelSource.includes('"TP1 Target"') && panelSource.includes('"TP1 Source"'), '13 closed TP/debug extras are available only in detailed mode');
+  ok(CLOSED_POSITION_DETAILED_COLUMNS.includes('TP1 Target') && CLOSED_POSITION_DETAILED_COLUMNS.includes('TP1 Source'), '13 closed TP/debug extras are available only in detailed mode');
   ok(panelSource.includes('v3-positions-window') && panelSource.includes('v3-scrollbar-strip') && panelSource.includes('Sold Positions'), '13a closed panel uses V3 visual shell/title/scroll strip');
 
   const logs = logger.export();

@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { resolveClosePrice, formatClosePriceUnavailableAudit } from '../core/market-data/close-price-resolver';
 import { MarketDataFeed } from '../utils/MarketDataFeed';
-import { resolveTopCandidateDisplay } from '../components/trade-v4/TopCandidatesPanel';
+import { resolveTopCandidateDisplay } from '../components/trade-v4/topCandidatesPanelModel';
 import type { TradeV4CandidateView } from '../components/trade-v4/types';
 
 function mockResponse(data: unknown, ok = true): Response {

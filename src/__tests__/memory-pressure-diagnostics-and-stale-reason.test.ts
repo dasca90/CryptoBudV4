@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { formatMemoryBufferStatusAudit, formatMemoryGrowthReasonAudit, formatMemoryPressureReasonAudit, updateMemoryPressure } from '../core/diagnostics/memoryLifecycle';
 import { resolveExecutionDecision, type ExecutionDecisionParams } from '../core/scanner/executionDecision';
-import { resolveTopCandidateDisplay } from '../components/trade-v4/TopCandidatesPanel';
+import { resolveTopCandidateDisplay } from '../components/trade-v4/topCandidatesPanelModel';
 import type { TradeV4CandidateView } from '../components/trade-v4/types';
 
 const root = process.cwd();
@@ -191,6 +191,7 @@ assert.notEqual(buyReadyDisplay.whyLabel, 'MAX_POSITIONS_REACHED', 'BUY_READY ro
 const memoryLifecycle = read('src', 'core', 'diagnostics', 'memoryLifecycle.ts');
 const app = read('src', 'App.tsx');
 const topCandidates = read('src', 'components', 'trade-v4', 'TopCandidatesPanel.tsx');
+const topCandidatesModel = read('src', 'components', 'trade-v4', 'topCandidatesPanelModel.ts');
 const tradeAdapter = read('src', 'lib', 'air-scanner', 'tradeV4DataAdapter.ts');
 const scanner = read('src', 'core', 'scanner', 'MarketScanner.ts');
 const docs = read('docs', 'OVERNIGHT_OOM_ROOT_CAUSE.md');
@@ -204,7 +205,7 @@ assert.ok(app.includes('formatMemoryBufferStatusAudit'), 'App emits memory buffe
 assert.ok(app.includes('formatMemoryGrowthReasonAudit'), 'App emits memory growth reason audit');
 assert.ok(app.includes('open_position_store_mismatch'), 'memory growth audit can identify open-position store mismatch as probable source');
 assert.ok(app.includes('OVERNIGHT_STARTUP_GRACE_MS'), 'App uses startup grace for overnight pressure display');
-assert.ok(topCandidates.includes("previousFinalNoBuyReason = isExecutableBuyReady(c) ? 'none'"), 'TopCandidates clears stale previous reason for BUY_READY rows');
+assert.ok(topCandidatesModel.includes("previousFinalNoBuyReason: isExecutableBuyReady(candidate) ? 'none'"), 'TopCandidates clears stale previous reason for BUY_READY rows');
 assert.ok(tradeAdapter.includes('strategyAudit.finalExecutable === true && strategyAudit.buyAllowed === true'), 'TradeV4 adapter clears stale finalNoBuyReason for executable candidates');
 assert.ok(scanner.includes('EXECUTION_SUBMIT_RESULT_AUDIT'), 'scanner emits execution submit result audit');
 assert.ok(scanner.includes('EXECUTION_NO_SUBMIT_REASON_AUDIT'), 'scanner emits no-submit reason audit');

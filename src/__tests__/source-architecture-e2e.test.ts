@@ -57,7 +57,7 @@ async function main() {
 
   const auto = baseTrade();
   const buyAuto = formatBuyNotification(auto);
-  ok(buyAuto.includes('Source: AutoBots'), '6 AutoBots BUY telegram source is AutoBots');
+  ok(buyAuto.includes('🤖 AUTOBOTS BUY OPENED'), '6 AutoBots BUY telegram source is AutoBots in header');
   ok(!buyAuto.includes('Source: Micro Scalping'), '7 AutoBots BUY telegram source is not Micro');
 
   const sellAuto = formatSellNotification(baseTrade({
@@ -68,7 +68,7 @@ async function main() {
     pnlPercent: 7.69,
     closeSnapshot: { exitReason: 'TP1_FIXED', fees: 0.01 },
   }));
-  ok(sellAuto.includes('Source: AutoBots'), '8 AutoBots SELL telegram source preserved from entry');
+  ok(sellAuto.includes('🤖 AUTOBOTS SELL PROFIT'), '8 AutoBots SELL telegram source preserved from entry in header');
   ok(!sellAuto.includes('Source: Micro Scalping'), '9 AutoBots SELL telegram source is not Micro');
 
   const pos: any = {
@@ -90,7 +90,7 @@ async function main() {
     buySnapshot: auto.buySnapshot,
   };
   const openRow = mapPositionToOpenPositionView(pos);
-  ok(openRow.sourceLabel === 'AutoBots' && buyAuto.includes(`Source: ${openRow.sourceLabel}`), '10 Open row source matches Telegram BUY source');
+  ok(openRow.sourceLabel === 'AutoBots' && buyAuto.includes('🤖 AUTOBOTS BUY OPENED'), '10 Open row source matches Telegram BUY header');
 
   const closedRow = mapTradeRecordToClosedPositionView(baseTrade({
     side: 'SELL',
@@ -100,7 +100,7 @@ async function main() {
     pnlPercent: 7.69,
     closeSnapshot: { exitReason: 'TP1_FIXED', fees: 0.01 },
   }));
-  ok(closedRow.sourceLabel === 'AutoBots' && sellAuto.includes(`Source: ${closedRow.sourceLabel}`), '11 Closed row source matches Telegram SELL source');
+  ok(closedRow.sourceLabel === 'AutoBots' && sellAuto.includes('🤖 AUTOBOTS SELL PROFIT'), '11 Closed row source matches Telegram SELL header');
 
   const legacyUnknown = resolveTradeSourceLabel({ coin: 'OLDUSDT', strategy: 'legacy' } as any);
   ok(legacyUnknown.label === 'Unknown / Legacy', '12 legacy/missing source is Unknown/Legacy, never Micro');
@@ -125,11 +125,10 @@ async function main() {
       candidateSource: 'micro_scalper',
     },
   });
-  ok(formatBuyNotification(microTrade).includes('Source: Micro Scalping'), '14 only true micro trade shows Micro source');
+  ok(formatBuyNotification(microTrade).includes('MICRO BUY OPENED'), '14 only true micro trade shows Micro source in header');
 
   console.log(`source-architecture-e2e: ${p} passed, ${f} failed`);
   if (f > 0) process.exit(1);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
-

@@ -11,6 +11,7 @@ import {
   getTpRiskExplanation,
   translateBlocker,
 } from '../components/trade-v4/SelectedCoinInspector';
+import { mlRuntimeGuard } from '../core/ml/ml-runtime-guard';
 
 function candidate(overrides: Partial<TradeV4CandidateView> = {}): TradeV4CandidateView {
   return {
@@ -89,7 +90,9 @@ assert.equal(translateBlocker('WAITING_EXECUTION_GATE'), 'Entry contract is not 
 }
 
 assert.equal(getTpRiskExplanation(candidate()), 'TP1 downgraded because TP room is limited.');
-assert.equal(getMlGuardExplanation(candidate({ mlBadEntryRisk: null })), 'ML Guard active, but no usable ML score for this coin.');
+mlRuntimeGuard.setMode('shadow_only');
+assert.equal(getMlGuardExplanation(candidate({ mlBadEntryRisk: null })), 'ML Shadow Only — not blocking');
+assert.equal(mlRuntimeGuard.canBlockBuy(), false, 'ML Shadow Only cannot block buy');
 assert.equal(formatStrategyLabel('dip_and_rebound'), 'Dip And Rebound');
 
 {
@@ -118,6 +121,8 @@ assert.ok(selectedSrc.includes('<details className="panel selected-raw-audit" op
 assert.ok(selectedSrc.includes('useState(false)'), 'raw audit hidden by default');
 assert.ok(!selectedSrc.includes('STRATEGY AUDIT</div>'), 'old raw strategy audit section is not shown by default');
 assert.ok(selectedSrc.includes('Market setup') && selectedSrc.includes('Runtime mode') && selectedSrc.includes('Final decision') && selectedSrc.includes('Final strategy'), 'selected coin separates strategy layers instead of collapsing to WAIT');
+assert.ok(selectedSrc.includes('Can Block BUY'), 'selected coin shows whether ML can block BUY');
+assert.ok(selectedSrc.indexOf('ML Shadow Only') < selectedSrc.indexOf('ML Guard active'), 'selected coin checks shadow mode before active ML Guard wording');
 
 const engineSrc = readFileSync(path.resolve(process.cwd(), 'src/core/trading/TradingEngine.ts'), 'utf8');
 const scannerSrc = readFileSync(path.resolve(process.cwd(), 'src/core/scanner/MarketScanner.ts'), 'utf8');

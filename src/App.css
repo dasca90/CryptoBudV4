@@ -65,9 +65,14 @@ h1, h2, h3, h4 {
 }
 
 .journal-layout .page-panel,
-.ml-lab-layout .page-panel,
 .logs-layout .page-panel {
   height: 100%;
+}
+
+.ml-lab-layout .page-panel {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
 }
 
 .panel-section {
@@ -563,7 +568,7 @@ select option {
 
 .journal-table-wrapper {
   flex: 1;
-  overflow-y: auto;
+  overflow: auto;
 }
 
 .virtual-spacer {
@@ -574,15 +579,28 @@ select option {
 .journal-table {
   font-size: 10px;
   font-family: 'Consolas', 'Courier New', monospace;
+  min-width: 720px;
 }
 
 .journal-row {
   display: grid;
-  grid-template-columns: 48px 42px 42px 65px 65px 65px 60px 65px 50px 55px 38px;
+  grid-template-columns: 48px 42px 42px minmax(88px, 1.2fr) 62px 62px 58px 52px 72px 50px 52px 42px;
   gap: 3px;
   padding: 2px 3px;
   border-bottom: 1px solid var(--border-subtle);
   align-items: center;
+}
+
+.journal-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.journal-strategy-cell,
+.journal-exit-reason-cell {
+  font-size: 10px;
 }
 
 .journal-header {
@@ -931,6 +949,25 @@ select option {
 .ml-lab-layout {
   height: 100%;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-subtle) transparent;
+}
+
+.ml-lab-layout::-webkit-scrollbar {
+  width: 8px;
+}
+
+.ml-lab-layout::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ml-lab-layout::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 4px;
+}
+
+.ml-lab-layout::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
 }
 
 .ml-counts-grid {
@@ -1019,6 +1056,36 @@ select option {
 
 .ml-mode-btn--active {
   font-weight: 700;
+}
+
+.ml-predict-buy-mode-btn--active {
+  color: #f0f6fc;
+  box-shadow: 0 0 0 1px rgba(88,166,255,0.18), 0 0 14px rgba(88,166,255,0.14);
+}
+
+.ml-predict-buy-mode-btn--off.ml-predict-buy-mode-btn--active {
+  border-color: rgba(139,148,158,0.55);
+  background: rgba(139,148,158,0.12);
+  color: #c9d1d9;
+}
+
+.ml-predict-buy-mode-btn--predict_only.ml-predict-buy-mode-btn--active {
+  border-color: rgba(88,166,255,0.65);
+  background: rgba(88,166,255,0.12);
+  color: #58a6ff;
+}
+
+.ml-predict-buy-mode-btn--suggest_buy.ml-predict-buy-mode-btn--active {
+  border-color: rgba(210,153,34,0.65);
+  background: rgba(210,153,34,0.12);
+  color: #d29922;
+}
+
+.ml-predict-buy-mode-btn--auto_buy.ml-predict-buy-mode-btn--active {
+  border-color: rgba(63,185,80,0.7);
+  background: rgba(63,185,80,0.13);
+  color: #3fb950;
+  box-shadow: 0 0 0 1px rgba(63,185,80,0.18), 0 0 14px rgba(63,185,80,0.15);
 }
 
 /* ── ML Panels Row ────────────────────────────────── */
@@ -1150,6 +1217,18 @@ select option {
   margin-top: 6px;
 }
 
+.ml-impact-panel {
+  border: 1px solid rgba(0,234,255,0.12);
+  border-radius: 6px;
+  padding: 12px;
+  background: rgba(0,234,255,0.02);
+  min-width: 0;
+}
+
+.ml-impact-panel .ml-impact-grid {
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+}
+
 .ml-impact-card {
   text-align: center;
   padding: 8px 4px;
@@ -1179,6 +1258,14 @@ select option {
   border-radius: 6px;
   padding: 12px;
   background: rgba(63,185,80,0.03);
+  min-width: 0;
+}
+
+.ml-training-impact-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
 }
 
 .ml-training-body {
@@ -1213,6 +1300,63 @@ select option {
 .ml-train-main-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.ml-exit-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+
+.ml-exit-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: #3fb950;
+}
+
+.ml-exit-toggle-state {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  font-family: 'Consolas', 'Courier New', monospace;
+  letter-spacing: 0;
+}
+
+.ml-exit-toggle--on {
+  border-color: rgba(63,185,80,0.65);
+  background: rgba(63,185,80,0.08);
+  box-shadow: 0 0 0 1px rgba(63,185,80,0.15), 0 0 14px rgba(63,185,80,0.16);
+}
+
+.ml-exit-toggle--on .ml-exit-toggle-state {
+  color: #3fb950;
+  background: rgba(63,185,80,0.16);
+}
+
+.ml-exit-toggle--off {
+  border-color: rgba(248,81,73,0.5);
+  background: rgba(248,81,73,0.06);
+  box-shadow: 0 0 0 1px rgba(248,81,73,0.1);
+}
+
+.ml-exit-toggle--off .ml-exit-toggle-state {
+  color: #f85149;
+  background: rgba(248,81,73,0.14);
+}
+
+@media (max-width: 1100px) {
+  .ml-training-impact-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── ML Equity Curve Card ─────────────────────────── */

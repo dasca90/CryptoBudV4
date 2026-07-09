@@ -6,6 +6,7 @@ import { resolveFinalNoBuyReasonPriority } from './finalNoBuyReasonPriority';
 export type FinalNoBuyReason =
   | 'PRICE_STALE'
   | 'BOOK_STALE'
+  | 'REBOUND_STALE'
   | 'SPREAD_TOO_HIGH'
   | 'TP_ROOM_NOT_OK'
   | 'CAPITAL_LIMIT'
@@ -19,6 +20,7 @@ export type FinalNoBuyReason =
   | 'AUTO_EXECUTION_DISABLED'
   | 'MISSING_RISK_GROUP'
   | 'STRATEGY_HANDOFF_INTEGRITY_FAILED'
+  | 'DIP_NOT_CONFIRMED'
   | 'LOWER_RANK_THAN_SELECTED'
   | 'NOT_SELECTED_THIS_CYCLE'
   | 'ADAPTER_REJECTED'
@@ -112,6 +114,8 @@ export interface ExecutionDecision {
   telegramSent: boolean;
   finalDecision: FinalDecision;
   finalNoBuyReason: string;
+  finalNoBuyReasonCode: string;
+  finalNoBuyReasonLabel: string;
   actionableNoBuyReason: string;
   technicalNoBuyReason: string;
   secondaryDiagnosticReasons: string[];
@@ -170,6 +174,10 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
     finalNoBuyReason = 'BUY_SPACING_30S_ACTIVE';
     finalNoBuyReasonSource = 'buySpacingOk=false';
     addTrace('BUY_SPACING_30S_ACTIVE', false, 'Buy spacing 30s active');
+  } else if (!params.priceFresh && params.bookFresh === false) {
+    finalNoBuyReason = 'BOOK_STALE';
+    finalNoBuyReasonSource = 'priceFresh=false;bookFresh=false';
+    addTrace('PRICE_NOT_FRESH / BOOK_STALE', false, 'Price and book are stale');
   } else if (!params.priceFresh) {
     finalNoBuyReason = 'PRICE_STALE';
     finalNoBuyReasonSource = 'priceFresh=false';
@@ -218,9 +226,13 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
     runtimeReason: params.runtimeReason,
     handoffMismatch: params.handoffMismatch,
   });
-  finalNoBuyReason = priority.resolvedFinalNoBuyReason as FinalNoBuyReason;
+  finalNoBuyReason = priority.finalNoBuyReasonCode as FinalNoBuyReason;
   finalNoBuyReasonSource = priority.prioritySource;
-  const reasonPriorityInvariantOk = finalNoBuyReason === priority.resolvedFinalNoBuyReason;
+  const finalNoBuyReasonCode = priority.finalNoBuyReasonCode;
+  const finalNoBuyReasonLabel = !params.priceFresh && params.bookFresh === false && finalNoBuyReasonCode === 'BOOK_STALE'
+    ? 'PRICE_NOT_FRESH / BOOK_STALE'
+    : priority.finalNoBuyReasonLabel;
+  const reasonPriorityInvariantOk = finalNoBuyReason === finalNoBuyReasonCode;
   logger.info(
     `EXECUTION_DECISION_REASON_PRIORITY_AUDIT: ` +
     `symbol=${params.symbol} ` +
@@ -232,12 +244,14 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
     `primaryBlocker=${params.primaryBlocker ?? 'none'} ` +
     `setupResult=${params.setupResult ?? 'none'} ` +
     `previousExecutionDecisionFinalNoBuyReason=${previousExecutionDecisionFinalNoBuyReason} ` +
+    `finalNoBuyReasonCode=${finalNoBuyReasonCode} ` +
+    `finalNoBuyReasonLabel=${finalNoBuyReasonLabel} ` +
     `resolvedFinalNoBuyReason=${priority.resolvedFinalNoBuyReason} ` +
     `actionableNoBuyReason=${priority.actionableNoBuyReason} ` +
     `technicalNoBuyReason=${priority.technicalNoBuyReason} ` +
     `secondaryDiagnosticReasons=${priority.secondaryDiagnosticReasons.join('|') || 'none'} ` +
     `prioritySource=${priority.prioritySource} ` +
-    `executionDecisionFinalNoBuyReason=${finalNoBuyReason} ` +
+    `executionDecisionFinalNoBuyReason=${finalNoBuyReasonCode} ` +
     `invariantOk=${String(reasonPriorityInvariantOk && priority.invariantOk)} ` +
     `failureReason=${reasonPriorityInvariantOk ? priority.failureReason : 'EXECUTION_DECISION_REASON_NOT_CANONICAL'}`
   );
@@ -262,7 +276,8 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
   })();
 
   if (!invariantOk && finalNoBuyReason === 'MAX_OPEN_POSITIONS_REACHED' && params.maxOpenPositionsOk) {
-    const fallbackReason = !params.priceFresh ? 'PRICE_STALE'
+    const fallbackReason = !params.priceFresh && params.bookFresh === false ? 'BOOK_STALE'
+      : !params.priceFresh ? 'PRICE_STALE'
       : params.bookFresh === false ? 'BOOK_STALE'
       : !params.spreadOk ? 'SPREAD_TOO_HIGH'
       : !params.tpRoomOk ? 'TP_ROOM_NOT_OK'
@@ -278,7 +293,7 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
   const selfConsistentFinalExecutable = finalNoBuyReason === 'none' ? params.finalExecutable : false;
   const selfConsistentBuyAllowed = finalNoBuyReason === 'none' ? params.buyAllowed : false;
   const selfConsistencyOk = selfConsistencyFailure === 'none';
-  logger.info(`EXECUTION_DECISION_SELF_CONSISTENCY_AUDIT: symbol=${params.symbol} scanId=${params.scanId} finalExecutable=${String(selfConsistentFinalExecutable)} buyAllowed=${String(selfConsistentBuyAllowed)} finalNoBuyReason=${finalNoBuyReason} selectedForExecution=false submitAttempted=false adapterCalled=false invariantOk=${String(selfConsistencyOk)} failureReason=${selfConsistencyFailure}`);
+  logger.info(`EXECUTION_DECISION_SELF_CONSISTENCY_AUDIT: symbol=${params.symbol} scanId=${params.scanId} finalExecutable=${String(selfConsistentFinalExecutable)} buyAllowed=${String(selfConsistentBuyAllowed)} finalNoBuyReasonCode=${finalNoBuyReasonCode} finalNoBuyReasonLabel=${finalNoBuyReasonLabel} finalNoBuyReason=${finalNoBuyReason} selectedForExecution=false submitAttempted=false adapterCalled=false invariantOk=${String(selfConsistencyOk)} failureReason=${selfConsistencyFailure}`);
 
   return {
     symbol: params.symbol,
@@ -319,6 +334,8 @@ export function resolveExecutionDecision(params: ExecutionDecisionParams): Execu
     telegramSent: false,
     finalDecision,
     finalNoBuyReason,
+    finalNoBuyReasonCode,
+    finalNoBuyReasonLabel,
     actionableNoBuyReason: priority.actionableNoBuyReason,
     technicalNoBuyReason: priority.technicalNoBuyReason,
     secondaryDiagnosticReasons: priority.secondaryDiagnosticReasons,
@@ -366,6 +383,8 @@ export function emitCanonicalExecutionDecisionAudit(decision: ExecutionDecision)
     `journalPersisted=${String(decision.journalPersisted)} ` +
     `telegramSent=${String(decision.telegramSent)} ` +
     `finalDecision=${decision.finalDecision} ` +
+    `finalNoBuyReasonCode=${decision.finalNoBuyReasonCode} ` +
+    `finalNoBuyReasonLabel=${decision.finalNoBuyReasonLabel} ` +
     `finalNoBuyReason=${decision.finalNoBuyReason} ` +
     `actionableNoBuyReason=${decision.actionableNoBuyReason} ` +
     `technicalNoBuyReason=${decision.technicalNoBuyReason} ` +

@@ -164,18 +164,21 @@ assert.equal(report24.performance.tradesClosed, 3, '24h report includes closed t
 assert.equal(report12.performance.winningClosedTrades, 1, 'win count is calculated');
 assert.equal(report12.performance.losingClosedTrades, 1, 'loss count is calculated');
 assert.equal(report12.performance.winRatePct, 50, 'win rate is calculated');
-assert.equal(report12.performance.realizedPnlUsd, 8, 'realized PnL is calculated');
-assert.equal(report12.performance.bestTrade, 'WINUSDT +$12.00', 'best trade is identified');
-assert.equal(report12.performance.worstTrade, 'LOSSUSDT -$4.00', 'worst trade is identified');
+assert.equal(report12.performance.realizedGrossPnlUsd, 8, 'realized gross PnL is calculated');
+assert.equal(report12.performance.feesUsd, 0.2, 'fees paid are calculated');
+assert.equal(report12.performance.realizedNetPnlUsd, 7.800000000000001, 'realized net PnL is calculated');
+assert.equal(report12.performance.realizedPnlUsd, 7.800000000000001, 'realized PnL aliases realized net after fees');
+assert.equal(report12.performance.bestTrade, 'WINUSDT +$11.90', 'best trade is identified by net PnL');
+assert.equal(report12.performance.worstTrade, 'LOSSUSDT -$4.10', 'worst trade is identified by net PnL');
 assert.equal(report12.mode, 'mixed', 'paper and live adapters are marked as mixed when both are present');
 
 const momentum = report12.strategyBreakdown.find((row) => row.key === 'momentum');
 assert.equal(momentum?.sells, 1, 'strategy breakdown counts closed sells');
-assert.equal(momentum?.pnlUsd, -4, 'strategy breakdown sums PnL');
+assert.equal(momentum?.pnlUsd, -4.1, 'strategy breakdown sums net PnL');
 
 const highRisk = report12.riskGroupBreakdown.find((row) => row.key === 'high_risk');
 assert.equal(highRisk?.sells, 1, 'risk group breakdown counts closed trades');
-assert.equal(highRisk?.pnlUsd, -4, 'risk group breakdown sums PnL');
+assert.equal(highRisk?.pnlUsd, -4.1, 'risk group breakdown sums net PnL');
 assert.equal(highRisk?.avgScore, 55, 'risk group breakdown uses available score data only');
 
 assert.equal(report12.scannerPipeline.buyBlockedCount, 1, 'scanner pipeline counts BUY blocks from logs');

@@ -121,7 +121,7 @@ fn get_open_position_count(state: State<AppState>) -> Result<i64, String> {
     db.get_open_position_count().map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn delete_open_position(state: State<AppState>, trade_id: String) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.delete_open_position(&trade_id).map_err(|e| e.to_string())

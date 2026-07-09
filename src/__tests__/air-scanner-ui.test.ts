@@ -70,7 +70,7 @@ ok(airScannerCssSrc.includes('core-scan-ping 10s') && airScannerCssSrc.includes(
 ok(airScannerCssSrc.includes('.scanner-has-coins .capture-beam') && airScannerCssSrc.includes('opacity: 0.08'), 'Q14d scanner pulse quiets after coins appear');
 ok(!airScannerCssSrc.includes('core-breathe 6s ease-in-out infinite'), 'Q14e scanner core no longer breathes continuously');
 ok(openSrc.includes('v3-pill') && openSrc.includes('trendTone') && openSrc.includes('strategyTone'), 'Q15 open positions use V3-style colored badges');
-ok(openSrc.includes('Strategy') && openSrc.includes('Trend') && openSrc.includes('V3_OPEN_POSITION_COLUMNS'), 'Q16 open positions render V3 strategy + trend columns');
+ok(openSrc.includes('Strategy') && openSrc.includes('Trend') && openSrc.includes('OPEN_POSITION_COLUMNS'), 'Q16 open positions render V4 strategy + trend columns');
 ok(closedSrc.includes('closeReasonTone') && closedSrc.includes('v3-pill'), 'Q17 closed positions use V3-style close reason badges');
 ok(cssSrc.includes('.pill-green') && cssSrc.includes('.pill-red') && cssSrc.includes('.pill-yellow') && cssSrc.includes('.pill-purple'), 'Q18 V3 badge color palette classes exist');
 ok(openSrc.includes('panel-shell-open') && cssSrc.includes('.panel-shell-open'), 'Q19 open panel renders dedicated visible border shell token');

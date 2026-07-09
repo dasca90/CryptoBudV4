@@ -6,6 +6,17 @@ import { logger } from "../../utils/logger";
 import { formatLocalTime } from "../../utils/timeFormatter";
 import { useVirtualWindow } from "../../lib/ui/virtualization";
 import { getMemoryPressureState } from "../../core/diagnostics/memoryLifecycle";
+import { TradeSourceBadge } from "./TradeSourceBadge";
+import {
+  getVisibleOpenPositions,
+  OPEN_POSITION_COLUMNS,
+  OPEN_POSITION_DETAILED_COLUMNS,
+  type OpenPositionOwnerFilter,
+  type OpenPositionPriceFilter,
+  type OpenPositionResultFilter,
+  type OpenPositionSortBy,
+  type OpenPositionSortDir,
+} from "./openPositionsPanelModel";
 
 const PAGE_SIZE = 10;
 const POSITION_VIRTUALIZATION_THRESHOLD = 25;
@@ -38,86 +49,6 @@ const stateTone = (p: TradeV4OpenPositionView) => {
   if (p.pnlUsd < 0) return { cls: 'pill-red', label: 'Loss' };
   return { cls: 'pill-gray', label: 'Flat' };
 };
-export const V3_OPEN_POSITION_COLUMNS = [
-  "Symbol",
-  "State",
-  "Strategy",
-  "Trend",
-  "Qty",
-  "Entry Value",
-  "Dip",
-  "Rebound",
-  "PnL%",
-  "Unrealized",
-  "Risk",
-  "TP1 (%)",
-  "TP2 (%)",
-  "Stop (%)",
-  "Entry",
-  "Ref",
-  "Last",
-  "Stop Trigger",
-  "Decision",
-  "Owner",
-  "Opened At",
-  "Hold",
-] as const;
-const V4_OPEN_DETAILED_COLUMNS = [
-  "Mode",
-  "Execution",
-  "Setup",
-  "Dip/Req",
-  "Rebound/Req",
-  "Mom",
-  "Setup Result",
-  "Why",
-  "TP1 Target",
-  "TP/SL Source",
-  "Live Source",
-  "Spread",
-  "Used $",
-  "Rule",
-  "Score/Conf",
-  "Reason/Quality",
-  "Diag",
-] as const;
-
-export type OpenPositionOwnerFilter = 'all' | 'manual' | 'auto';
-export type OpenPositionResultFilter = 'all' | 'profit' | 'loss' | 'flat';
-export type OpenPositionPriceFilter = 'all' | 'fresh' | 'stale' | 'pending' | 'unavailable' | 'fallback';
-export type OpenPositionSortBy = 'age' | 'pnl_pct' | 'pnl_usd' | 'symbol';
-export type OpenPositionSortDir = 'asc' | 'desc';
-
-export function getVisibleOpenPositions(params: {
-  positions: TradeV4OpenPositionView[];
-  ownerFilter: OpenPositionOwnerFilter;
-  resultFilter: OpenPositionResultFilter;
-  priceFilter: OpenPositionPriceFilter;
-  sortBy: OpenPositionSortBy;
-  sortDir: OpenPositionSortDir;
-}): TradeV4OpenPositionView[] {
-  const { positions, ownerFilter, resultFilter, priceFilter, sortBy, sortDir } = params;
-  return positions.filter((p) => {
-    if (ownerFilter === 'all') return true;
-    if (ownerFilter === 'manual') return String(p.ownerType ?? '').toLowerCase().includes('manual');
-    return !String(p.ownerType ?? '').toLowerCase().includes('manual');
-  }).filter((p) => {
-    if (resultFilter === 'profit') return p.pnlUsd > 0;
-    if (resultFilter === 'loss') return p.pnlUsd < 0;
-    if (resultFilter === 'flat') return Math.abs(p.pnlUsd) < 0.0001;
-    return true;
-  }).filter((p) => (priceFilter === 'all' ? true : p.priceQuality === priceFilter))
-    .sort((a, b) => {
-      const sign = sortDir === 'asc' ? 1 : -1;
-      if (sortBy === 'pnl_pct') return (a.pnlPct - b.pnlPct) * sign;
-      if (sortBy === 'pnl_usd') return (a.pnlUsd - b.pnlUsd) * sign;
-      if (sortBy === 'symbol') return a.symbol.localeCompare(b.symbol) * sign;
-      const as = Number.parseInt(String(a.ageLabel).replace(/[^\d]/g, ''), 10) || 0;
-      const bs = Number.parseInt(String(b.ageLabel).replace(/[^\d]/g, ''), 10) || 0;
-      return (as - bs) * sign;
-    });
-}
-
 export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { positions: TradeV4OpenPositionView[]; restoring?: boolean }) {
   const [page, setPage] = useState(1);
   const [detailed, setDetailed] = useState(false);
@@ -219,7 +150,7 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
     const table = panel?.querySelector('table') as HTMLElement | null;
     const tableWidth = table?.scrollWidth ?? 0;
     const horizontalScrollRequired = tableWidth > panelWidth && panelWidth > 0;
-    logger.info(`OPEN_POSITIONS_TABLE_COLUMNS_AUDIT: visibleColumns=${V3_OPEN_POSITION_COLUMNS.join('|')} hiddenColumns=none trendColumnVisible=false pnlColumnsVisible=true unrealizedColumnVisible=true riskColumnVisible=true horizontalScrollRequired=${String(horizontalScrollRequired)} tableWidth=${tableWidth} availablePanelWidth=${panelWidth} rowCount=${rows.length} pageSize=${PAGE_SIZE}`);
+    logger.info(`OPEN_POSITIONS_TABLE_COLUMNS_AUDIT: visibleColumns=${OPEN_POSITION_COLUMNS.join('|')} hiddenColumns=none trendColumnVisible=false pnlColumnsVisible=true unrealizedColumnVisible=true riskColumnVisible=true horizontalScrollRequired=${String(horizontalScrollRequired)} tableWidth=${tableWidth} availablePanelWidth=${panelWidth} rowCount=${rows.length} pageSize=${PAGE_SIZE}`);
   }, [rows]);
 
   return (
@@ -261,13 +192,13 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
             <table className="data-table data-table-wide-open" style={{ fontSize: 10 }}>
               <thead>
                 <tr>
-                  {V3_OPEN_POSITION_COLUMNS.map((col) => <th key={col}>{col}</th>)}
-                  {detailed && V4_OPEN_DETAILED_COLUMNS.map((col) => <th key={col}>{col}</th>)}
+                  {OPEN_POSITION_COLUMNS.map((col) => <th key={col}>{col}</th>)}
+                  {detailed && OPEN_POSITION_DETAILED_COLUMNS.map((col) => <th key={col}>{col}</th>)}
                 </tr>
               </thead>
               <tbody>
                 {virtualWindow.isVirtualized && virtualWindow.topSpacerPx > 0 && (
-                  <tr className="virtual-table-spacer"><td colSpan={V3_OPEN_POSITION_COLUMNS.length + (detailed ? V4_OPEN_DETAILED_COLUMNS.length : 0)} style={{ height: virtualWindow.topSpacerPx, padding: 0 }} /></tr>
+                  <tr className="virtual-table-spacer"><td colSpan={OPEN_POSITION_COLUMNS.length + (detailed ? OPEN_POSITION_DETAILED_COLUMNS.length : 0)} style={{ height: virtualWindow.topSpacerPx, padding: 0 }} /></tr>
                 )}
                 {rows.map((p) => (
                   <tr
@@ -298,6 +229,22 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                     <td><span className={`v3-pill ${trendTone(p.groupTrend ?? p.marketRegimeAtEntry)}`}>{p.groupTrend ?? p.marketRegimeAtEntry ?? 'n/a'}</span></td>
                     <td>{p.quantity != null ? Number(p.quantity).toFixed(4) : 'n/a'}</td>
                     <td>{p.usedCapitalUsd != null ? `$${p.usedCapitalUsd.toFixed(2)}` : 'n/a'}</td>
+                    <td>
+                      <span className="pnl-tooltip-wrap">
+                        ${(p.feeUsdEntry ?? p.pnlBreakdown?.feeUsdEntry ?? 0).toFixed(2)}
+                        <span className="pnl-tooltip-card">
+                          <b>Open Fee Breakdown</b><br />
+                          Operator/Exchange: {p.operatorName ?? p.pnlBreakdown?.operatorName ?? 'n/a'}<br />
+                          Entry value: ${(p.usedCapitalUsd ?? p.pnlBreakdown?.usedCapital ?? 0).toFixed(6)}<br />
+                          Entry fee paid: ${(p.feeUsdEntry ?? p.pnlBreakdown?.feeUsdEntry ?? 0).toFixed(6)}<br />
+                          Est. exit fee: ${(p.feeUsdExitEstimated ?? p.pnlBreakdown?.feeUsdExitEstimated ?? 0).toFixed(6)}<br />
+                          Total estimated fees: ${(p.feeUsdTotalEstimated ?? p.pnlBreakdown?.feeUsdTotalEstimated ?? 0).toFixed(6)}<br />
+                          Fee rate: {p.feeRate != null ? `${(p.feeRate * 100).toFixed(4)}%` : 'n/a'}<br />
+                          Source: {p.feeSource ?? p.pnlBreakdown?.feeSource ?? 'n/a'}
+                        </span>
+                      </span>
+                    </td>
+                    <td className="status-warn">${(p.feeUsdExitEstimated ?? p.pnlBreakdown?.feeUsdExitEstimated ?? 0).toFixed(2)} est.</td>
                     <td>{p.dipPct != null ? (p.dipPct === 0 && p.strategy === 'dip_and_rebound' ? '--' : (p.dipPct > 0 && p.dipPct < 0.005 ? '<0.01%' : `${Math.abs(p.dipPct).toFixed(2)}%`)) : '--'}</td>
                     <td>{(() => {
                       const r = p.reboundPct;
@@ -325,7 +272,10 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                           Used capital: {(p.pnlBreakdown?.usedCapital ?? 0).toFixed(6)}<br />
                           Gross PnL $: {(p.pnlBreakdown?.grossPnlUsd ?? 0).toFixed(6)}<br />
                           Gross PnL %: {(p.pnlBreakdown?.grossPnlPct ?? 0).toFixed(6)}<br />
-                          Estimated fees: {(p.pnlBreakdown?.feesEstimated ?? 0).toFixed(6)}<br />
+                          Entry fee paid: ${(p.pnlBreakdown?.feeUsdEntry ?? 0).toFixed(6)}<br />
+                          Est. exit fee: ${(p.pnlBreakdown?.feeUsdExitEstimated ?? 0).toFixed(6)}<br />
+                          Total estimated fees: ${(p.pnlBreakdown?.feesEstimated ?? 0).toFixed(6)}<br />
+                          Operator/Exchange: {p.pnlBreakdown?.operatorName}<br />
                           Net PnL $: {(p.pnlBreakdown?.netPnlUsd ?? 0).toFixed(6)}<br />
                           Net PnL %: {(p.pnlBreakdown?.netPnlPct ?? 0).toFixed(6)}<br />
                           Formula: {p.pnlBreakdown?.formulaUsed}<br />
@@ -355,7 +305,7 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                     <td>{p.livePrice > 0 ? <span title={`${p.priceFreshnessStatus ?? p.livePriceSource ?? p.priceQuality} · age ${p.livePriceAgeMs ?? 'n/a'}ms`}>{p.livePrice.toFixed(4)}</span> : <span className={`v3-pill ${freshnessTone(p.priceQuality)}`}>{p.priceQuality === 'pending' ? 'PRICE PENDING' : 'PRICE UNAVAILABLE'}</span>}</td>
                     <td style={{ fontSize: 9 }}>{p.slPct != null ? `$${(p.entryPrice * (1 - (p.slPct / 100))).toFixed(6)}` : 'n/a'}</td>
                     <td><span className="v3-pill pill-gray">{p.exitStatus === 'sl_risk' ? 'DEFEND' : 'HOLD'}</span></td>
-                    <td><span className={`v3-pill ${String(p.ownerType ?? '').toLowerCase().includes('manual') ? 'pill-gray' : 'pill-cyan'}`}>{p.sourceLabel ?? p.ownerType ?? 'n/a'}</span></td>
+                    <td><TradeSourceBadge presentation={p.sourcePresentation} compact /></td>
                     <td>{formatLocalTime(p.openedAtLabel, { format: 'datetime' })}</td>
                     <td>{p.ageLabel}</td>
                     {detailed && <td><span className={`v3-pill ${String(p.mode ?? '').toLowerCase().includes('live') ? 'pill-orange' : 'pill-blue'}`}>{p.mode ?? 'n/a'}</span></td>}
@@ -371,6 +321,7 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                     {detailed && <td><span className={`v3-pill ${freshnessTone(p.priceQuality)}`}>{p.livePriceSource ?? 'n/a'} {p.priceQuality}</span></td>}
                     {detailed && <td>{p.spreadPct != null ? `${p.spreadPct.toFixed(3)}%` : 'n/a'}</td>}
                     {detailed && <td>{p.usedCapitalUsd != null ? p.usedCapitalUsd.toFixed(2) : 'n/a'}</td>}
+                    {detailed && <td>{p.feeSource ?? 'n/a'}</td>}
                     {detailed && <td>{p.entryRule ?? p.entryReason ?? p.strategy}</td>}
                     {detailed && <td>{p.score ?? 'n/a'} / {p.confidence != null ? `${p.confidence}%` : 'n/a'}</td>}
                     {detailed && <td>{p.entryReason ?? 'n/a'} / {p.dataQuality ?? 'n/a'}</td>}
@@ -378,7 +329,7 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
                   </tr>
                 ))}
                 {virtualWindow.isVirtualized && virtualWindow.bottomSpacerPx > 0 && (
-                  <tr className="virtual-table-spacer"><td colSpan={V3_OPEN_POSITION_COLUMNS.length + (detailed ? V4_OPEN_DETAILED_COLUMNS.length : 0)} style={{ height: virtualWindow.bottomSpacerPx, padding: 0 }} /></tr>
+                  <tr className="virtual-table-spacer"><td colSpan={OPEN_POSITION_COLUMNS.length + (detailed ? OPEN_POSITION_DETAILED_COLUMNS.length : 0)} style={{ height: virtualWindow.bottomSpacerPx, padding: 0 }} /></tr>
                 )}
               </tbody>
             </table>
@@ -405,13 +356,17 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
               <div>Symbol: {diagRow.symbol}</div>
               <div>Position ID: {diagRow.diagnostic?.positionId}</div>
               <div>Created at: {diagRow.diagnostic?.createdAt}</div>
-              <div>Source/Owner: {diagRow.diagnostic?.source}</div>
+              <div>Source/Owner: <TradeSourceBadge presentation={diagRow.sourcePresentation} /></div>
               <div>Mode: {diagRow.diagnostic?.mode}</div>
               <div>Entry price: {diagRow.entryPrice}</div>
               <div>Live price: {diagRow.livePrice}</div>
               <div>Live price source: {diagRow.livePriceSource}</div>
               <div>Qty: {diagRow.quantity}</div>
               <div>Used capital: {diagRow.usedCapitalUsd}</div>
+              <div>Operator/Exchange: {diagRow.operatorName ?? 'n/a'}</div>
+              <div>Entry fee paid: ${((diagRow.feeUsdEntry ?? 0)).toFixed(6)}</div>
+              <div>Estimated exit fee: ${((diagRow.feeUsdExitEstimated ?? 0)).toFixed(6)} (estimate)</div>
+              <div>Total estimated fees: ${((diagRow.feeUsdTotalEstimated ?? 0)).toFixed(6)}</div>
               <div>Strategy: {diagRow.strategy}</div>
               <div>Setup source: {diagRow.strategySetupSource ?? 'n/a'}</div>
               <div>selectedStrategy: {audit.selectedStrategy ?? audit.strategySelected ?? 'UNKNOWN / N/A'}</div>
@@ -474,7 +429,8 @@ export const OpenPositionsPanel = memo(function OpenPositionsPanel(props: { posi
           <div className="row-tooltip-section"><b>TP2:</b> {tooltipState.position.tp2Pct != null ? `${tooltipState.position.tp2Pct.toFixed(2)}%` : '0.00%'} · source: {tooltipState.position.tp2Source ?? tooltipState.position.riskSnapshotStatus ?? 'n/a'}</div>
           <div className="row-tooltip-section"><b>SL:</b> {tooltipState.position.slPct != null ? `${tooltipState.position.slPct.toFixed(2)}%` : 'n/a'} · source: {tooltipState.position.slSource ?? tooltipState.position.riskSnapshotStatus ?? 'n/a'}</div>
           <div className="row-tooltip-section"><b>PnL:</b> <span className={tooltipState.position.pnlUsd >= 0 ? 'status-good' : 'status-bad'}>{tooltipState.position.pnlPct.toFixed(2)}% / ${tooltipState.position.pnlUsd.toFixed(2)}</span> · source: {tooltipState.position.pnlBreakdown?.livePriceSource ?? 'n/a'}</div>
-          <div className="row-tooltip-section"><b>Owner:</b> {tooltipState.position.sourceLabel ?? tooltipState.position.ownerType ?? 'n/a'}</div>
+          <div className="row-tooltip-section"><b>Fees:</b> entry ${((tooltipState.position.feeUsdEntry ?? 0)).toFixed(4)} paid, est. exit ${((tooltipState.position.feeUsdExitEstimated ?? 0)).toFixed(4)} · {tooltipState.position.operatorName ?? 'n/a'}</div>
+          <div className="row-tooltip-section"><b>Owner:</b> <TradeSourceBadge presentation={tooltipState.position.sourcePresentation} /></div>
           <div className="row-tooltip-section"><b>Mode:</b> {tooltipState.position.mode ?? 'n/a'} · {tooltipState.position.executionMode ?? 'Demo'}</div>
           <div className="row-tooltip-section"><b>Entry Rule:</b> {tooltipState.position.entryRule ?? 'n/a'}</div>
           {tooltipState.position.hasSnapshot === false && <div className="row-tooltip-section status-bad">MISSING ENTRY SNAPSHOT</div>}

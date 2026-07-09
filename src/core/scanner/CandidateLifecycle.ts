@@ -20,13 +20,33 @@ export type CandidateLifecycleStatus =
   | 'WAIT_RISK_GROUP'
   | 'WAIT_ENTRY_CONTRACT'
   | 'WAIT_PROFESSIONAL_GATE'
-  | 'INVALID_RUNTIME_STATE';
+  | 'INVALID_RUNTIME_STATE'
+  | 'FILTERED_ALREADY_OPEN_POSITION';
 
 export type CandidateRuntimeSnapshot = {
   id: string;
   scanId: string;
   scannerCycleId: string;
   createdAt: string;
+  symbol: string | null;
+  price: number | null;
+  referencePrice: number | null;
+  livePrice: number | null;
+  spreadPct: number | null;
+  tpRoomOk: boolean | null;
+  strategy: string | null;
+  finalExecutionStrategy: string | null;
+  entryRule: string | null;
+  riskGroup: string | null;
+  confidence: number | null;
+  score: number | null;
+  dipPercent: number | null;
+  reboundPercent: number | null;
+  momentumPct: number | null;
+  reboundConfirmed: boolean | null;
+  momentumConfirmed: boolean | null;
+  freshnessStatus: string | null;
+  sourceOwner: 'AutoBots' | 'Unicorn' | 'UnicornHunter' | 'ML_PREDICT_BUY' | 'unknown';
   autoBotsUiOn: boolean;
   autoBotsResolvedOn: boolean;
   scannerAutoEnabled: boolean;
@@ -153,13 +173,54 @@ export function buildCandidateRuntimeSnapshot(input: {
   scannerCycleId?: string | null;
   createdAt?: string | null;
   runtimeState: AutoBotsCanonicalState;
+  candidate?: Partial<ScannerCandidate> | null;
+  sourceOwner?: CandidateRuntimeSnapshot['sourceOwner'] | null;
 }): CandidateRuntimeSnapshot {
   const runtime = input.runtimeState;
-  return {
+  const candidate = input.candidate ?? null;
+  const candidateAny = candidate as any;
+  const sourceOwner = input.sourceOwner
+    ?? (String(candidateAny?.executionSource ?? candidateAny?.candidateSource ?? candidateAny?.source ?? candidateAny?.ownerName ?? '').toLowerCase().includes('unicorn')
+      ? 'Unicorn'
+      : candidateAny?.mlPredictBuyDecision?.finalDecision === 'BUY_READY' || String(candidateAny?.executionSource ?? '').toLowerCase().includes('ml_predict')
+        ? 'ML_PREDICT_BUY'
+        : candidate
+          ? 'AutoBots'
+          : 'unknown');
+  const strategy = String(candidateAny?.effectiveStrategy ?? candidateAny?.selectedStrategy ?? candidateAny?.strategyDecision?.finalExecutionStrategy ?? candidateAny?.autoStrategyDecision?.effectiveStrategy ?? '').trim() || null;
+  const finalExecutionStrategy = String(candidateAny?.finalExecutionStrategy ?? candidateAny?.strategyDecision?.finalExecutionStrategy ?? strategy ?? '').trim() || null;
+  const entryRule = String(
+    candidateAny?.finalEntryRule
+    ?? candidateAny?.entryRule
+    ?? candidateAny?.traderBrainDecision?.entryPlan?.reason
+    ?? candidateAny?.entryPlan?.reason
+    ?? candidateAny?.mainReason
+    ?? '',
+  ).trim() || null;
+  const snapshot: CandidateRuntimeSnapshot = {
     id: `${input.scanId}:${input.scannerCycleId ?? 'scanner'}:runtime`,
     scanId: input.scanId,
     scannerCycleId: input.scannerCycleId ?? input.scanId,
     createdAt: input.createdAt ?? new Date().toISOString(),
+    symbol: candidate?.symbol ?? null,
+    price: Number.isFinite(Number(candidate?.price)) ? Number(candidate?.price) : null,
+    referencePrice: Number.isFinite(Number(candidateAny?.referencePrice ?? candidate?.price)) ? Number(candidateAny?.referencePrice ?? candidate?.price) : null,
+    livePrice: Number.isFinite(Number(candidateAny?.livePrice ?? candidate?.price)) ? Number(candidateAny?.livePrice ?? candidate?.price) : null,
+    spreadPct: Number.isFinite(Number(candidate?.spreadPct)) ? Number(candidate?.spreadPct) : null,
+    tpRoomOk: typeof candidate?.tpRoomOk === 'boolean' ? candidate.tpRoomOk : null,
+    strategy,
+    finalExecutionStrategy,
+    entryRule,
+    riskGroup: candidate?.riskGroup ?? null,
+    confidence: Number.isFinite(Number(candidate?.confidence)) ? Number(candidate?.confidence) : null,
+    score: Number.isFinite(Number(candidate?.rawScore ?? candidate?.rank)) ? Number(candidate?.rawScore ?? candidate?.rank) : null,
+    dipPercent: Number.isFinite(Number(candidate?.dipPercent)) ? Number(candidate?.dipPercent) : null,
+    reboundPercent: Number.isFinite(Number(candidate?.reboundPercent)) ? Number(candidate?.reboundPercent) : null,
+    momentumPct: Number.isFinite(Number(candidate?.m5Change ?? candidateAny?.periodMomentum ?? candidateAny?.recencyWeightedMomentum)) ? Number(candidate?.m5Change ?? candidateAny?.periodMomentum ?? candidateAny?.recencyWeightedMomentum) : null,
+    reboundConfirmed: typeof candidate?.reboundConfirmed === 'boolean' ? candidate.reboundConfirmed : null,
+    momentumConfirmed: typeof candidate?.momentumConfirmed === 'boolean' ? candidate.momentumConfirmed : null,
+    freshnessStatus: String(candidate?.reboundFreshnessStatus ?? (candidate?.priceFresh === false ? 'price_stale' : 'fresh')).trim() || null,
+    sourceOwner,
     autoBotsUiOn: runtime.uiAutoBotsOn ?? runtime.uiAutoBotsButtonState,
     autoBotsResolvedOn: runtime.autoBotsResolvedOn ?? runtime.resolvedAutoBotsEnabled,
     scannerAutoEnabled: runtime.scannerAutoEnabled,
@@ -176,6 +237,97 @@ export function buildCandidateRuntimeSnapshot(input: {
     invariantOk: runtime.invariantOk,
     failureReason: runtime.failureReason,
   };
+  logger.info(`CANDIDATE_RUNTIME_SNAPSHOT_CREATED_AUDIT: symbol=${snapshot.symbol ?? 'unknown'} scanId=${snapshot.scanId} sourceOwner=${snapshot.sourceOwner} price=${snapshot.price ?? 'missing'} spreadPct=${snapshot.spreadPct ?? 'missing'} tpRoomOk=${String(snapshot.tpRoomOk ?? 'missing')} strategy=${snapshot.strategy ?? 'missing'} finalExecutionStrategy=${snapshot.finalExecutionStrategy ?? 'missing'} entryRule=${snapshot.entryRule ?? 'missing'} riskGroup=${snapshot.riskGroup ?? 'missing'} confidence=${snapshot.confidence ?? 'missing'} freshnessStatus=${snapshot.freshnessStatus ?? 'missing'} invariantOk=${String(snapshot.invariantOk)}`);
+  return {
+    ...snapshot,
+  };
+}
+
+function runtimeSnapshotRequiredMissingFields(runtime: CandidateRuntimeSnapshot | null): string[] {
+  if (!runtime) {
+    return [
+      'runtimeSnapshot',
+      'symbol',
+      'price',
+      'livePrice',
+      'spreadPct',
+      'tpRoomOk',
+      'strategy',
+      'finalExecutionStrategy',
+      'entryRule',
+      'riskGroup',
+      'confidence',
+      'dipPercent',
+      'reboundPercent',
+      'momentumPct',
+      'freshnessStatus',
+      'sourceOwner',
+    ];
+  }
+  const missing: string[] = [];
+  if (!runtime.symbol) missing.push('symbol');
+  if (runtime.price == null) missing.push('price');
+  if (runtime.livePrice == null) missing.push('livePrice');
+  if (runtime.spreadPct == null) missing.push('spreadPct');
+  if (runtime.tpRoomOk == null) missing.push('tpRoomOk');
+  if (!runtime.strategy) missing.push('strategy');
+  if (!runtime.finalExecutionStrategy) missing.push('finalExecutionStrategy');
+  if (!runtime.entryRule) missing.push('entryRule');
+  if (!runtime.riskGroup) missing.push('riskGroup');
+  if (runtime.confidence == null) missing.push('confidence');
+  if (runtime.dipPercent == null) missing.push('dipPercent');
+  if (runtime.reboundPercent == null) missing.push('reboundPercent');
+  if (runtime.momentumPct == null) missing.push('momentumPct');
+  if (!runtime.freshnessStatus) missing.push('freshnessStatus');
+  if (!runtime.sourceOwner || runtime.sourceOwner === 'unknown') missing.push('sourceOwner');
+  return missing;
+}
+
+export function refreshCandidateRuntimeSnapshotContext(input: {
+  candidate: ScannerCandidate;
+  scanId: string;
+  sourcePath: string;
+}): ScannerCandidate {
+  const existing = input.candidate.runtimeSnapshot;
+  if (!existing) return input.candidate;
+  const refreshed = buildCandidateRuntimeSnapshot({
+    scanId: existing.scanId || input.scanId,
+    scannerCycleId: existing.scannerCycleId || input.scanId,
+    createdAt: existing.createdAt,
+    runtimeState: {
+      uiAutoBotsOn: existing.autoBotsUiOn,
+      uiAutoBotsButtonState: existing.autoBotsUiOn,
+      autoBotsResolvedOn: existing.autoBotsResolvedOn,
+      resolvedAutoBotsEnabled: existing.autoBotsResolvedOn,
+      scannerAutoEnabled: existing.scannerAutoEnabled,
+      paperAutoExecutionEnabled: existing.paperAutoExecutionEnabled,
+      manualOverrideRequested: existing.manualOverrideRequested,
+      manualOverrideEnabled: existing.manualOverrideEnabled,
+      dynamicPerCoinStrategy: existing.dynamicPerCoinStrategy,
+      strategySourceResolved: existing.strategySourceResolved,
+      routerPath: existing.routerPath,
+      runtimeStrategyDropdown: existing.runtimeStrategyDropdown,
+      executionMode: existing.executionMode,
+      buildMode: existing.buildMode,
+      tauriDetected: existing.tauriMode === 'tauri',
+      invariantOk: existing.invariantOk,
+      failureReason: existing.failureReason,
+    } as AutoBotsCanonicalState,
+    candidate: input.candidate,
+    sourceOwner: existing.sourceOwner === 'unknown' ? null : existing.sourceOwner,
+  });
+  const runtimeSnapshot = {
+    ...refreshed,
+    id: existing.id,
+    createdAt: existing.createdAt,
+    invariantOk: existing.invariantOk,
+    failureReason: existing.failureReason,
+  };
+  logger.info(`CANDIDATE_RUNTIME_SNAPSHOT_REFRESH_AUDIT: symbol=${input.candidate.symbol} scanId=${input.scanId} sourcePath=${input.sourcePath} hadSnapshot=true missingFieldsBefore=${runtimeSnapshotRequiredMissingFields(existing).join('|') || 'none'} missingFieldsAfter=${runtimeSnapshotRequiredMissingFields(runtimeSnapshot).join('|') || 'none'} invariantOk=${String(runtimeSnapshot.invariantOk && runtimeSnapshotRequiredMissingFields(runtimeSnapshot).length === 0)}`);
+  return {
+    ...input.candidate,
+    runtimeSnapshot,
+  } as ScannerCandidate;
 }
 
 function uniqueReasons(reasons: unknown[]): string[] {
@@ -187,6 +339,7 @@ function uniqueReasons(reasons: unknown[]): string[] {
 function runtimeFailureReason(candidate: ScannerCandidate): string {
   const runtime = candidate.runtimeSnapshot ?? null;
   if (!runtime) return 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING';
+  if (runtimeSnapshotRequiredMissingFields(runtime).length > 0) return 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING';
   return runtime.invariantOk === false
     ? (runtime.failureReason && runtime.failureReason !== 'none' ? runtime.failureReason : 'AUTOBOTS_RUNTIME_STATE_INTEGRITY_FAILED')
     : 'none';
@@ -216,14 +369,17 @@ export function attachCandidateRuntimeSnapshot(input: {
   sourcePath: string;
 }): ScannerCandidate {
   const existing = input.candidate.runtimeSnapshot;
-  const runtimeSnapshot = existing && existing.invariantOk !== false
-    ? existing
-    : buildCandidateRuntimeSnapshot({
+  const refreshedRuntimeSnapshot = buildCandidateRuntimeSnapshot({
       scanId: input.scanId,
       scannerCycleId: input.scannerCycleId ?? input.scanId,
       createdAt: input.candidate.createdAt,
       runtimeState: input.runtimeState,
+      candidate: input.candidate,
     });
+  const runtimeSnapshot = existing && existing.invariantOk !== false
+    ? { ...refreshedRuntimeSnapshot, id: existing.id, createdAt: existing.createdAt, invariantOk: existing.invariantOk, failureReason: existing.failureReason }
+    : refreshedRuntimeSnapshot;
+  logger.info(`CANDIDATE_RUNTIME_SNAPSHOT_REFRESH_AUDIT: symbol=${input.candidate.symbol} scanId=${input.scanId} sourcePath=${input.sourcePath} hadSnapshot=${String(Boolean(existing))} missingFieldsBefore=${runtimeSnapshotRequiredMissingFields(existing ?? null).join('|') || 'none'} missingFieldsAfter=${runtimeSnapshotRequiredMissingFields(runtimeSnapshot).join('|') || 'none'} invariantOk=${String(runtimeSnapshot.invariantOk && runtimeSnapshotRequiredMissingFields(runtimeSnapshot).length === 0)}`);
   const runtimeBlockers = new Set(['CANDIDATE_RUNTIME_SNAPSHOT_MISSING', 'AUTOBOTS_RUNTIME_STATE_INTEGRITY_FAILED']);
   const sanitizedBlockReasons = (input.candidate.blockReasons ?? []).filter((reason) => !runtimeBlockers.has(String(reason)));
   const clearRuntimeReason = (reason: string | undefined): string | undefined => reason && runtimeBlockers.has(reason) ? undefined : reason;
@@ -247,14 +403,23 @@ export function assertCandidateRuntimeReady(input: {
   sourcePath: string;
   blockedBeforeEntryGate?: boolean;
 }): { ready: true; candidate: ScannerCandidate } | { ready: false; candidate: ScannerCandidate; audit: CandidateRuntimeGuardAudit } {
-  const runtimeReason = runtimeFailureReason(input.candidate);
-  if (runtimeReason === 'none') return { ready: true, candidate: input.candidate };
+  const candidate = refreshCandidateRuntimeSnapshotContext({
+    candidate: input.candidate,
+    scanId: input.scanId,
+    sourcePath: input.sourcePath,
+  });
+  const runtimeReason = runtimeFailureReason(candidate);
+  const missingFields = runtimeSnapshotRequiredMissingFields(candidate.runtimeSnapshot ?? null);
+  if (runtimeReason === 'none') {
+    logger.info(`CANDIDATE_RUNTIME_SNAPSHOT_CONSUMED_AUDIT: symbol=${candidate.symbol} candidateId=${candidate.candidateId ?? 'unknown'} scanId=${input.scanId} sourcePath=${input.sourcePath} missingFields=${missingFields.join('|') || 'none'} finalStatus=${candidate.lifecycleStatus ?? candidate.status} sourceOwner=${candidate.runtimeSnapshot?.sourceOwner ?? 'unknown'} invariantOk=${String(missingFields.length === 0)}`);
+    return { ready: true, candidate };
+  }
   const finalStatus: CandidateLifecycleStatus = runtimeReason === 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING'
     ? 'WAIT_RUNTIME_STATE'
     : 'INVALID_RUNTIME_STATE';
-  const suppressedSecondaryBlockers = collectSecondaryBlockers(input.candidate, runtimeReason);
+  const suppressedSecondaryBlockers = collectSecondaryBlockers(candidate, runtimeReason);
   const guarded = {
-    ...input.candidate,
+    ...candidate,
     status: finalStatus as ScannerCandidate['status'],
     lifecycleStatus: finalStatus,
     entryGateDecision: null,
@@ -269,12 +434,12 @@ export function assertCandidateRuntimeReady(input: {
     candidateStatusSource: 'runtime_snapshot_guard',
   } as ScannerCandidate;
   const audit: CandidateRuntimeGuardAudit = {
-    symbol: input.candidate.symbol,
-    candidateId: input.candidate.candidateId ?? 'unknown',
+    symbol: candidate.symbol,
+    candidateId: candidate.candidateId ?? 'unknown',
     scanId: input.scanId,
     sourcePath: input.sourcePath,
-    runtimeSnapshotPresent: Boolean(input.candidate.runtimeSnapshot),
-    runtimeSnapshotInvariantOk: Boolean(input.candidate.runtimeSnapshot) && input.candidate.runtimeSnapshot?.invariantOk !== false,
+    runtimeSnapshotPresent: Boolean(candidate.runtimeSnapshot),
+    runtimeSnapshotInvariantOk: Boolean(candidate.runtimeSnapshot) && candidate.runtimeSnapshot?.invariantOk !== false,
     blockedBeforeEntryGate: input.blockedBeforeEntryGate ?? true,
     finalStatus,
     finalNoBuyReason: runtimeReason,
@@ -282,6 +447,10 @@ export function assertCandidateRuntimeReady(input: {
     invariantOk: true,
   };
   logger.info(`CANDIDATE_RUNTIME_SNAPSHOT_GUARD_AUDIT: symbol=${audit.symbol} candidateId=${audit.candidateId} scanId=${audit.scanId} sourcePath=${audit.sourcePath} runtimeSnapshotPresent=${String(audit.runtimeSnapshotPresent)} runtimeSnapshotInvariantOk=${String(audit.runtimeSnapshotInvariantOk)} blockedBeforeEntryGate=${String(audit.blockedBeforeEntryGate)} finalStatus=${audit.finalStatus} finalNoBuyReason=${audit.finalNoBuyReason} suppressedSecondaryBlockers=${audit.suppressedSecondaryBlockers.join('|') || 'none'} invariantOk=${String(audit.invariantOk)}`);
+  logger.warn(`CANDIDATE_RUNTIME_SNAPSHOT_MISSING_AUDIT: symbol=${audit.symbol} candidateId=${audit.candidateId} scanId=${audit.scanId} sourcePath=${audit.sourcePath} finalStatus=${audit.finalStatus} finalNoBuyReason=BLOCK_CANDIDATE_RUNTIME_SNAPSHOT_MISSING missingFields=${missingFields.join('|') || 'runtimeSnapshot'} submitAllowed=false adapterCallAllowed=false`);
+  if (candidate.status === 'BUY' || candidate.lifecycleStatus === 'BUY_READY') {
+    logger.warn(`BUY_READY_BLOCKED_BY_RUNTIME_SNAPSHOT_AUDIT: symbol=${audit.symbol} candidateId=${audit.candidateId} scanId=${audit.scanId} sourcePath=${audit.sourcePath} previousStatus=${candidate.lifecycleStatus ?? candidate.status} finalStatus=${audit.finalStatus} finalNoBuyReason=BLOCK_CANDIDATE_RUNTIME_SNAPSHOT_MISSING missingFields=${missingFields.join('|') || 'runtimeSnapshot'} displayBuyAllowed=false`);
+  }
   return { ready: false, candidate: guarded, audit };
 }
 
@@ -458,6 +627,7 @@ export function normalizeCandidateDisplayStatus(candidate: ScannerCandidate): Sc
   const attemptedBuyAllowed = Boolean(c.executionDecision?.buyAllowed ?? c.buyAllowed ?? c.strategyAuditSnapshot?.buyAllowed ?? false);
   const hasBlocker = primaryBlocker !== 'none' || (finalNoBuyReason !== 'none' && finalNoBuyReason !== 'undefined');
   const runtimeOk = Boolean(c.runtimeSnapshot) && c.runtimeSnapshot?.invariantOk !== false;
+  const runtimeMissingFields = runtimeSnapshotRequiredMissingFields(c.runtimeSnapshot ?? null);
   const strategyDecisionOk = Boolean(c.strategyDecision) && c.strategyDecision?.invariantOk !== false;
   const executionPrecheckOk = Boolean(c.executionPrecheckSnapshot) && c.executionPrecheckSnapshot?.invariantOk !== false;
   const priceFresh = c.executionPrecheckSnapshot?.priceFresh ?? candidate.priceFresh !== false;
@@ -472,6 +642,7 @@ export function normalizeCandidateDisplayStatus(candidate: ScannerCandidate): Sc
     && attemptedBuyAllowed
     && !hasBlocker
     && runtimeOk
+    && runtimeMissingFields.length === 0
     && strategyDecisionOk
     && executionPrecheckOk
     && isExecutableStrategy(candidate)
@@ -489,7 +660,7 @@ export function normalizeCandidateDisplayStatus(candidate: ScannerCandidate): Sc
     : mapBlockedStatus({ primaryBlocker, finalNoBuyReason, setupResult, finalExecutionStrategy });
   const rawStatus: ScannerCandidate['status'] = validBuy ? 'BUY' : canonicalStatus as ScannerCandidate['status'];
   const blockedPromotionReason = validBuy ? 'none' : finalNoBuyReason !== 'none' ? finalNoBuyReason : primaryBlocker !== 'none' ? primaryBlocker
-    : !runtimeOk ? 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING'
+    : !runtimeOk || runtimeMissingFields.length > 0 ? 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING'
       : !strategyDecisionOk ? 'STRATEGY_DECISION_MISSING'
         : !executionPrecheckOk ? 'EXECUTION_PRECHECK_SNAPSHOT_MISSING'
           : !priceFresh ? 'PRICE_STALE'
@@ -508,12 +679,12 @@ export function normalizeCandidateDisplayStatus(candidate: ScannerCandidate): Sc
       ? 'FINAL_NO_BUY_WITH_EXECUTABLE_TRUE'
       : 'none';
   const invariantOk = failureReason === 'none';
-  const suppressedSecondaryBlockers = validBuy ? candidate.suppressedSecondaryBlockers : !runtimeOk
+  const suppressedSecondaryBlockers = validBuy ? candidate.suppressedSecondaryBlockers : !runtimeOk || runtimeMissingFields.length > 0
     ? collectSecondaryBlockers(candidate, blockedPromotionReason)
     : candidate.suppressedSecondaryBlockers;
   const normalizedBlockReasons = validBuy
     ? candidate.blockReasons
-    : !runtimeOk
+    : !runtimeOk || runtimeMissingFields.length > 0
       ? [blockedPromotionReason]
       : Array.from(new Set([...(candidate.blockReasons ?? []), finalNoBuyReason !== 'none' ? finalNoBuyReason : primaryBlocker].filter(Boolean)));
   if (finalNoBuyReason !== 'none' && (attemptedFinalExecutable || attemptedBuyAllowed)) {
@@ -537,6 +708,7 @@ export function normalizeCandidateDisplayStatus(candidate: ScannerCandidate): Sc
     failureReason,
   };
   logger.info(`TOP_CANDIDATE_CANONICAL_STATUS_AUDIT: symbol=${candidate.symbol} scanId=${candidate.candidateId ?? c.scanId ?? 'unknown'} canonicalStatus=${audit.canonicalStatus} rawStatus=${audit.rawStatus} displayStatus=${audit.displayStatus} signal=${audit.signal} finalExecutable=${String(audit.finalExecutable)} buyAllowed=${String(audit.buyAllowed)} primaryBlocker=${audit.primaryBlocker} finalNoBuyReason=${audit.finalNoBuyReason} setupResult=${audit.setupResult} statusSource=${audit.statusSource} normalizedBy=${audit.normalizedBy} invariantOk=${String(audit.invariantOk)} failureReason=${audit.failureReason}`);
+  logger.info(`CANDIDATE_CANONICAL_STATUS_PARITY_AUDIT: symbol=${candidate.symbol} candidateRowStatus=${audit.displayStatus} selectedCoinStatus=${audit.canonicalStatus} executionPlanStatus=${audit.canonicalStatus} canonicalStatus=${audit.canonicalStatus} finalExecutable=${String(audit.finalExecutable)} actionableNow=${String(audit.finalExecutable && audit.buyAllowed)} submitEligible=${String(audit.finalExecutable && audit.buyAllowed)} submitAttempted=${String(Boolean(c.executionDecision?.submitAttempted))} executionSkipped=${String(!(audit.finalExecutable && audit.buyAllowed))} blockerList=${normalizedBlockReasons?.join('|') || audit.finalNoBuyReason || 'none'} mismatchDetected=false invariantOk=true failureReason=none`);
   return {
     ...candidate,
     status: rawStatus,

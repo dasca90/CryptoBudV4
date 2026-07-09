@@ -1,9 +1,10 @@
-import type { MLBrainModel, MlRuntimeCounters, MlRuntimeEvent, MlRuntimeMode } from '../types';
+import type { MLBrainModel, MLPredictBuyMode, MLPredictBuySettings, MlRuntimeCounters, MlRuntimeEvent, MlRuntimeMode } from '../types';
 import { logger } from '../../utils/logger';
 
 const STORAGE_KEY = 'ml_brain';
 const RUNTIME_MODE_KEY = 'ml_runtime_mode';
 const RUNTIME_ML_EXITS_ENABLED_KEY = 'ml_runtime_ml_exits_enabled';
+const ML_PREDICT_BUY_SETTINGS_KEY = 'ml_predict_buy_settings_v1';
 const RUNTIME_EVENTS_KEY = 'ml_runtime_events_v1';
 const RUNTIME_EVENTS_MAX = 500;
 const RUNTIME_EVENTS_MAX_BYTES = 240_000;
@@ -161,6 +162,79 @@ export function loadMLRuntimeMlExitsEnabled(): boolean {
     return store.getItem(RUNTIME_ML_EXITS_ENABLED_KEY) === 'true';
   } catch {
     return false;
+  }
+}
+
+export const DEFAULT_ML_PREDICT_BUY_SETTINGS: MLPredictBuySettings = {
+  mlPredictBuyEnabled: false,
+  mlPredictBuyMode: 'OFF',
+  minTrainingRowsForPredict: 50,
+  minTrainingRowsForAutoBuy: 100,
+  minPredictedWinProb: 0.65,
+  maxBadEntryRisk: 0.35,
+  minExpectedPnlPct: 1.5,
+  maxMlBuysPerHour: 2,
+  maxMlOpenPositions: 2,
+  requireScannerAgreement: true,
+  requireStrategyValidator: true,
+  requireMarketGuard: true,
+  requireBtcAnchorIfEnabled: true,
+  requireProfessionalGate: true,
+  requireFreshRevalidationBeforeSubmit: true,
+  requireExecutionModeParity: true,
+  requireMlGuardNotBlocked: true,
+};
+
+function normalizeMLPredictBuyMode(value: unknown): MLPredictBuyMode {
+  return value === 'PREDICT_ONLY' || value === 'SUGGEST_BUY' || value === 'AUTO_BUY' ? value : 'OFF';
+}
+
+function finiteOrDefault(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+export function normalizeMLPredictBuySettings(input: Partial<MLPredictBuySettings> | null | undefined): MLPredictBuySettings {
+  const raw = input ?? {};
+  const mode = normalizeMLPredictBuyMode(raw.mlPredictBuyMode);
+  return {
+    mlPredictBuyEnabled: raw.mlPredictBuyEnabled === true && mode !== 'OFF',
+    mlPredictBuyMode: mode,
+    minTrainingRowsForPredict: finiteOrDefault(raw.minTrainingRowsForPredict, DEFAULT_ML_PREDICT_BUY_SETTINGS.minTrainingRowsForPredict),
+    minTrainingRowsForAutoBuy: finiteOrDefault(raw.minTrainingRowsForAutoBuy, DEFAULT_ML_PREDICT_BUY_SETTINGS.minTrainingRowsForAutoBuy),
+    minPredictedWinProb: finiteOrDefault(raw.minPredictedWinProb, DEFAULT_ML_PREDICT_BUY_SETTINGS.minPredictedWinProb),
+    maxBadEntryRisk: finiteOrDefault(raw.maxBadEntryRisk, DEFAULT_ML_PREDICT_BUY_SETTINGS.maxBadEntryRisk),
+    minExpectedPnlPct: finiteOrDefault(raw.minExpectedPnlPct, DEFAULT_ML_PREDICT_BUY_SETTINGS.minExpectedPnlPct),
+    maxMlBuysPerHour: finiteOrDefault(raw.maxMlBuysPerHour, DEFAULT_ML_PREDICT_BUY_SETTINGS.maxMlBuysPerHour),
+    maxMlOpenPositions: finiteOrDefault(raw.maxMlOpenPositions, DEFAULT_ML_PREDICT_BUY_SETTINGS.maxMlOpenPositions),
+    requireScannerAgreement: raw.requireScannerAgreement !== false,
+    requireStrategyValidator: raw.requireStrategyValidator !== false,
+    requireMarketGuard: raw.requireMarketGuard !== false,
+    requireBtcAnchorIfEnabled: raw.requireBtcAnchorIfEnabled !== false,
+    requireProfessionalGate: raw.requireProfessionalGate !== false,
+    requireFreshRevalidationBeforeSubmit: raw.requireFreshRevalidationBeforeSubmit !== false,
+    requireExecutionModeParity: raw.requireExecutionModeParity !== false,
+    requireMlGuardNotBlocked: raw.requireMlGuardNotBlocked !== false,
+  };
+}
+
+export function saveMLPredictBuySettings(settings: MLPredictBuySettings): void {
+  const normalized = normalizeMLPredictBuySettings(settings);
+  try {
+    store.setItem(ML_PREDICT_BUY_SETTINGS_KEY, JSON.stringify(normalized));
+    logger.info(`ML_PREDICT_BUY_SETTINGS_SAVED mode=${normalized.mlPredictBuyMode} enabled=${String(normalized.mlPredictBuyEnabled)} minRowsAutoBuy=${normalized.minTrainingRowsForAutoBuy}`);
+  } catch (err) {
+    logger.error(`ML_PREDICT_BUY_SETTINGS_SAVE_FAILED: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export function loadMLPredictBuySettings(): MLPredictBuySettings {
+  try {
+    const json = store.getItem(ML_PREDICT_BUY_SETTINGS_KEY);
+    if (!json) return { ...DEFAULT_ML_PREDICT_BUY_SETTINGS };
+    return normalizeMLPredictBuySettings(JSON.parse(json) as Partial<MLPredictBuySettings>);
+  } catch (err) {
+    logger.warn(`ML_PREDICT_BUY_SETTINGS_LOAD_FAILED: ${err instanceof Error ? err.message : String(err)}, using defaults`);
+    return { ...DEFAULT_ML_PREDICT_BUY_SETTINGS };
   }
 }
 

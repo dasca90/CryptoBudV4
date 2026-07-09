@@ -59,29 +59,28 @@ function isClean(msg: string): boolean {
 function hasStructuredLines(msg: string): boolean {
   const hasSymbol = msg.includes('\n📌 Symbol:') || msg.includes('\nSymbol:');
   const hasMode = msg.includes('\n🧪 Mode:') || msg.includes('\nMode:');
-  const hasSource = msg.includes('\n🤖 Source:') || msg.includes('\nSource:');
-  return hasSymbol && hasMode && hasSource;
+  return hasSymbol && hasMode;
 }
 
 async function main() {
   const buy = formatBuyNotification(mockTrade());
-  ok(buy.includes('Source: AutoBots'), '27 BUY includes real source from entry snapshot');
+  ok(buy.includes('🤖 AUTOBOTS BUY OPENED'), '27 BUY includes real source in compact header');
   ok(!buy.includes('Source: Micro Scalping'), '28 BUY does not default to Micro Scalping');
-  ok(buy.includes('Source: AutoBots'), '29 Micro OFF path AutoBots BUY source label stays AutoBots');
+  ok(buy.includes('🤖 AUTOBOTS BUY OPENED'), '29 Micro OFF path AutoBots BUY source label stays AutoBots');
 
   const buyScanner = formatBuyNotification(mockTrade({ buySnapshot: { ...(mockTrade().buySnapshot as any), source: 'scanner', strategySource: 'scanner', ownerName: 'The Dipper / Scanner' } as any }));
-  ok(buyScanner.includes('Source: The Dipper / Scanner') || buyScanner.includes('Source: Scanner') || buyScanner.includes('Source: The Dipper'), '30 scanner BUY source label is scanner/the dipper, not micro');
+  ok(buyScanner.includes('🤖 AUTOBOTS BUY OPENED'), '30 scanner BUY source resolves to AutoBots header, not micro');
 
   ok(buy.includes('🧠 Strategy') && buy.includes('• Selected:'), '31 BUY includes strategy');
   ok(buy.includes('Entry rule:'), '32 BUY includes entry rule');
-  ok(buy.includes('Dip:') && buy.includes('required:'), '33 BUY includes dip actual/required');
-  ok(buy.includes('Rebound:') && buy.includes('required:'), '34 BUY includes rebound actual/required');
-  ok(buy.includes('Momentum:'), '35 BUY includes momentum status');
-  ok(buy.includes('Setup result:'), '35b BUY includes setup result');
-  ok(buy.includes('Final executable:'), '36 BUY includes setup result/finalExecutable');
+  ok(!buy.includes('Dip:') && !buy.includes('required:'), '33 BUY omits dip actual/required debug setup');
+  ok(!buy.includes('Rebound:'), '34 BUY omits rebound actual/required debug setup');
+  ok(!buy.includes('Momentum:'), '35 BUY omits momentum status');
+  ok(!buy.includes('Setup result:'), '35b BUY omits setup result');
+  ok(!buy.includes('Final executable:'), '36 BUY omits finalExecutable');
   ok(buy.includes('TP1:') && buy.includes('TP2:') && buy.includes('SL:'), '37 BUY includes TP1/TP2/SL');
   ok(buy.includes('TP1: 1.70%'), '37a BUY TP1 comes from canonical risk snapshot, not legacy settings');
-  ok(buy.includes('TP1 target: 0.000004') && buy.includes('TP1 source: AutoBots dynamic per coin'), '37b BUY includes TP1 target/source from risk snapshot');
+  ok(!buy.includes('TP1 target:') && !buy.includes('TP1 source:'), '37b BUY omits TP1 target/source audit details');
   ok(buy.includes('TP2: 0% / disabled'), '37c BUY keeps AutoBots TP2 zero');
   ok(buy.includes('SL: -1.50%'), '37d BUY SL comes from risk snapshot user SL');
   ok(!buy.includes('TP1: 0.00%'), '37e BUY never silently displays TP1=0 when snapshot has TP1');
@@ -113,16 +112,16 @@ async function main() {
   });
   const sell = formatSellNotification(sellTrade);
 
-  ok(sell.includes('Source: AutoBots'), '41 SELL preserves original entry source');
+  ok(sell.includes('🤖 AUTOBOTS SELL PROFIT'), '41 SELL preserves original entry source in compact header');
   ok(!sell.includes('Source: Micro Scalping'), '42 SELL does not default to Micro Scalping');
   ok(sell.includes('Reason: TP1_FIXED'), '43 SELL includes close reason');
   ok(sell.includes('Strategy at entry:'), '44 SELL includes strategy at entry');
-  ok(sell.includes('Entry rule:'), '45 SELL includes entry rule at entry');
-  ok(sell.includes('Setup at entry') && sell.includes('Dip:') && sell.includes('Rebound:'), '46 SELL includes dip/rebound setup at entry');
-  ok(sell.includes('Final executable:'), '46b SELL includes setup result/final executable at entry');
-  ok(sell.includes('Entry: 2') && sell.includes('Exit: 2.019'), '47 SELL uses closedTrade entry snapshot/current trade snapshot, not current settings');
-  ok(sell.includes('Exit: 2.019'), '48 SELL uses trade exitPrice for pnl display context');
-  ok(sell.includes('Formula: (exit - entry) × qty'), '49 SELL includes pnl formula summary');
+  ok(!sell.includes('Entry rule:'), '45 SELL omits entry rule');
+  ok(!sell.includes('Setup at entry') && !sell.includes('Dip:') && !sell.includes('Rebound:'), '46 SELL omits setup at entry debug details');
+  ok(!sell.includes('Final executable:'), '46b SELL omits final executable at entry');
+  ok(!sell.includes('Entry: 2') && !sell.includes('Exit: 2.019'), '47 SELL omits entry/exit price section');
+  ok(!sell.includes('Exit: 2.019'), '48 SELL omits trade exitPrice display context');
+  ok(!sell.includes('Formula:'), '49 SELL omits pnl formula summary');
   ok(sell.includes('TP1:') && sell.includes('TP2:') && sell.includes('SL:'), '50 SELL includes TP1/TP2/SL from entry snapshot');
   ok(!sell.includes('??'), '51 SELL has no ?? placeholders');
   ok(isClean(sell), '52 SELL has no undefined/null/NaN/[object Object]');
@@ -131,16 +130,16 @@ async function main() {
   const autoBuyNonMicro = formatBuyNotification(mockTrade({ buySnapshot: { ...(mockTrade().buySnapshot as any), ownerType: 'scanner', strategySource: 'autobots', source: 'autobots', ownerName: 'AutoBots' } as any }));
   ok(!autoBuyNonMicro.includes('Source: Micro Scalping'), '54 micro OFF safety: autobots trade cannot emit micro source');
   const manualBuy = formatBuyNotification(mockTrade({ buySnapshot: { ...(mockTrade().buySnapshot as any), ownerType: 'manual', strategySource: 'manual', source: 'manual', ownerName: 'Manual' } as any }));
-  ok(manualBuy.includes('Source: Manual'), '54b manual trade source is Manual');
+  ok(manualBuy.includes('MANUAL BUY OPENED'), '54b manual trade source is Manual');
 
   const sellLegacyMicro = formatSellNotification(mockTrade({
     side: 'SELL', status: 'closed',
     buySnapshot: { ...(mockTrade().buySnapshot as any), ownerType: 'micro_scalper', strategySource: 'micro_scalper', source: 'micro_scalper', ownerName: 'Micro Scalping' } as any,
     closeSnapshot: { exitReason: 'MANUAL_CLOSE', fees: 0 } as any,
   }));
-  ok(sellLegacyMicro.includes('SELL CLOSED'), '55 existing old Micro position can close/notify normally after micro disabled');
+  ok(sellLegacyMicro.includes('SELL LOSS') || sellLegacyMicro.includes('SELL PROFIT') || sellLegacyMicro.includes('SELL BREAKEVEN'), '55 existing old Micro position can close/notify normally after micro disabled');
 
-  ok(autoBuyNonMicro.includes('Source: AutoBots') && sell.includes('Source: AutoBots'), '56 open/closed/telegram source labels match for autobots path');
+  ok(autoBuyNonMicro.includes('🤖 AUTOBOTS BUY OPENED') && sell.includes('🤖 AUTOBOTS SELL PROFIT'), '56 open/closed/telegram source labels match for autobots path');
 
   const missingRiskBuy = formatBuyNotification(mockTrade({
     buySnapshot: {

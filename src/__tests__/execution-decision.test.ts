@@ -157,8 +157,8 @@ function baseParams(overrides: Partial<ExecutionDecisionParams> = {}): Execution
     blockReasons: ['STRATEGY_HANDOFF_INTEGRITY_FAILED'],
     handoffMismatch: true,
   }));
-  eq(d.finalNoBuyReason, 'candle_exhaustion', 'candle exhaustion wins over handoff');
-  eq(d.actionableNoBuyReason, 'candle_exhaustion', 'actionable reason is candle exhaustion');
+  eq(d.finalNoBuyReason, 'CANDLE_EXHAUSTION', 'candle exhaustion wins over handoff');
+  eq(d.actionableNoBuyReason, 'CANDLE_EXHAUSTION', 'actionable reason is candle exhaustion');
   ok(d.finalNoBuyReason !== 'STRATEGY_HANDOFF_INTEGRITY_FAILED', 'handoff does not mask candle exhaustion');
 }
 
@@ -297,6 +297,12 @@ function baseParams(overrides: Partial<ExecutionDecisionParams> = {}): Execution
   ok(src.includes('executionSelectedCount'), 'pipeline: executionSelectedCount tracks selected');
   ok(src.includes('submitAttemptedCount'), 'pipeline: submitAttemptedCount tracks submit attempts');
   ok(src.includes('telegramSentCount'), 'pipeline: telegramSentCount counter exists');
+  ok(src.includes('FINAL_EXECUTION_GLOBAL_GUARD_AUDIT'), 'pipeline: final global execution guard audit exists');
+  ok(src.includes("const finalActionableSelectedBuyCandidates = riskOffNoEntries ? [] : selectedBuyCandidates"), 'pipeline: risk-off blocks final actionable buy list after selection');
+  ok(src.includes('if (executionPlan.canExecute && !riskOffNoEntries)'), 'pipeline: non-risk-off BUY-ready candidates continue to submit routing');
+  ok(src.includes("finalNoSubmitReason = riskOffNoEntries"), 'pipeline: no-submit reason is explicit for global risk-off');
+  ok(src.includes('submitBlockedReason'), 'pipeline: submitBlockedReason is logged when submitAttemptedCount is zero');
+  ok(src.includes('GLOBAL_RISK_OFF'), 'pipeline: GLOBAL_RISK_OFF reason is emitted');
 }
 
 // ===== 12. Source — executionDecision on TradeV4CandidateView =====

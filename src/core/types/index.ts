@@ -290,6 +290,10 @@ export interface Position {
   unrealizedPnlPercent: number;
   ownerType: string;
   adapter: string;
+  feeUsdEntry?: number;
+  feeRate?: number;
+  feeSource?: string;
+  operatorName?: string;
 }
 
 export type MLDataQuality = 'GOOD' | 'MEDIUM' | 'BAD';
@@ -313,6 +317,14 @@ export interface CloseSnapshot {
   pnlPercent: number;
   pnlUsd: number;
   fees: number;
+  feeUsdEntry?: number;
+  feeUsdExit?: number;
+  feeUsdTotal?: number;
+  feeRate?: number;
+  feeSource?: string;
+  operatorName?: string;
+  grossPnlUsd?: number;
+  netPnlUsd?: number;
   slippagePct: number;
   durationMs: number;
   highestPrice: number;
@@ -455,6 +467,14 @@ export interface TradeRecord {
   quantity: number;
   pnl?: number;
   pnlPercent?: number;
+  grossPnlUsd?: number;
+  netPnlUsd?: number;
+  feeUsdEntry?: number;
+  feeUsdExit?: number;
+  feeUsdTotal?: number;
+  feeRate?: number;
+  feeSource?: string;
+  operatorName?: string;
   entryTime: string;
   exitTime?: string;
   status: TradeStatus;
@@ -482,6 +502,14 @@ export interface BuySnapshot {
   btcRegime: string | null;
   groupRegime: string | null;
   entryPrice: number;
+  feeUsdEntry?: number;
+  feeUsdExit?: number;
+  feeUsdTotal?: number;
+  feeRate?: number;
+  feeSource?: string;
+  operatorName?: string;
+  grossPnlUsd?: number;
+  netPnlUsd?: number;
   realMarketPriceAtBuy: number;
   entryPriceSource: string;
   entryPriceAgeMs: number;
@@ -545,10 +573,23 @@ export interface BuySnapshot {
   paperExecutionReport?: PaperExecutionResult;
   ownerType?: string;
   ownerName?: string;
+  sourceOwner?: string;
+  sourceLabel?: string;
+  executionOwner?: string;
+  positionOwner?: string;
   source?: string;
   strategySource?: string;
   candidateSource?: string;
   executionSource?: string;
+  scannerModule?: string;
+  selectedBy?: string;
+  executedBy?: string;
+  finalExecutionStrategy?: string | null;
+  entryRule?: string | null;
+  mlPredictBuyDecision?: MLPredictBuyDecision | null;
+  mlPredictBuyPrediction?: MLPredictBuyPrediction | null;
+  modelVersionAtEntry?: string | null;
+  featureSchemaVersionAtEntry?: string | null;
 }
 
 export interface MLLabel {
@@ -956,7 +997,7 @@ export interface EntryGateSnapshotContext {
 export type AutoStrategyName = 'conservative' | 'balanced' | 'momentum' | 'dip_and_rebound' | 'wait' | 'avoid';
 export type AutoStrategySource = 'group_recommendation' | 'per_coin_selector' | 'user_forced' | 'safety_downgrade' | 'ml_downgrade' | 'fallback_conservative' | 'manual_user_selected';
 export type StrategyConfidenceTier = 'A_80_PLUS' | 'B_70_80' | 'C_BELOW_70';
-export type StrategySourceOwner = 'ManualOverride' | 'AutoBots' | 'AutoBots_SafeFallback' | 'Takeover';
+export type StrategySourceOwner = 'ManualOverride' | 'AutoBots' | 'AutoBots_SafeFallback' | 'Takeover' | 'UnicornHunter';
 export type StrategySourceDetail =
   | 'manual_override'
   | 'takeover_validated'
@@ -966,7 +1007,8 @@ export type StrategySourceDetail =
   | 'confidence_below_tier'
   | 'market_context'
   | 'fallback_conservative'
-  | 'data_stale_safe_fallback';
+  | 'data_stale_safe_fallback'
+  | 'unicorn_hunter_parallel_lane';
 
 export interface AutoStrategyDecision {
   symbol: string;
@@ -1013,7 +1055,8 @@ export type CandidateStatus =
   | 'WAIT_ENTRY_CONTRACT'
   | 'WAIT_RISK_GROUP'
   | 'WAIT_PROFESSIONAL_GATE'
-  | 'INVALID_RUNTIME_STATE';
+  | 'INVALID_RUNTIME_STATE'
+  | 'FILTERED_ALREADY_OPEN_POSITION';
 
 export interface ScannerCandidate {
   candidateId: string;
@@ -1086,7 +1129,12 @@ export interface ScannerCandidate {
   actionableNoBuyReason?: string;
   technicalNoBuyReason?: string;
   secondaryDiagnosticReasons?: string[];
+  filteredReason?: 'FILTERED_ALREADY_OPEN_POSITION' | string;
+  filteredBy?: 'PositionManager' | string;
+  removedFromTopCandidates?: boolean;
+  removedFromExecutionPool?: boolean;
   handoffIntegrityStatus?: 'ok' | 'failed' | 'not_applicable' | string;
+  unicornDp?: import('../unicorn/UnicornHunterTypes').UnicornDpConfirmation;
   finalExecutable?: boolean;
   buyAllowed?: boolean;
   professionalGateMode?: 'advisory' | 'hard_gate' | string;
@@ -1121,8 +1169,8 @@ export interface ScannerCandidate {
   overrideAllowed?: boolean;
   fixRequired?: boolean;
   tradingTargetOwnership?: {
-    strategySource: 'autobots' | 'manual_override';
-    tp1Source: 'AutoBots dynamic per coin' | 'AutoBots' | 'user';
+    strategySource: 'autobots' | 'manual_override' | 'unicorn_hunter';
+    tp1Source: 'AutoBots dynamic per coin' | 'Unicorn dynamic per coin' | 'AutoBots' | 'user';
     tp1Value: number;
     tp1Min?: number;
     tp1Max?: number;
@@ -1156,6 +1204,17 @@ export interface ScannerCandidate {
     buyAllowed: boolean;
     setupMissing: string[];
   };
+  mlPredictBuyDecision?: MLPredictBuyDecision | null;
+  mlPredictBuyPrediction?: MLPredictBuyPrediction | null;
+  candidateSource?: 'Scanner' | 'AutoBots' | 'ML_PREDICT_BUY' | string;
+  executionSource?: 'auto' | 'manual' | 'ML_PREDICT_BUY' | string;
+  ownerType?: string;
+  ownerName?: string;
+  source?: string;
+  scannerModule?: string;
+  selectedBy?: string;
+  executedBy?: string;
+  entryRule?: string;
 }
 
 export interface ScannerDiagnostics {
@@ -1225,6 +1284,8 @@ export interface ScannerSnapshot {
   nearMissPoolSize?: number;
   topExecutionCandidates?: string[];
   topWatchCandidates?: string[];
+  unicornRadar?: import('../unicorn/UnicornHunterTypes').UnicornRadarRow[];
+  unicornWatchlistSummary?: import('../unicorn/UnicornHunterTypes').UnicornWatchlistSummary;
   noBuySummary?: {
     executionPoolSize: number;
     watchPoolSize: number;
@@ -1265,6 +1326,34 @@ export interface ScannerSnapshot {
     topHighRiskMomentum?: Array<{ symbol: string; momentum: number; riskGroup: string; status?: string; blocker?: string | null }>;
     topVeryHighRiskMomentum?: Array<{ symbol: string; momentum: number; riskGroup: string; status?: string; blocker?: string | null }>;
     buyReadyCount?: number;
+    buyCandidateCount?: number;
+    actionableBuyCountNow?: number;
+    blockedByPacingCount?: number;
+    blockedByCooldownCount?: number;
+    blockedByBudgetCount?: number;
+    blockedByDuplicateCount?: number;
+    blockedByRiskCount?: number;
+    blockedByOpenPositionLimitCount?: number;
+    maxExecutionQueuePerScan?: number;
+    executionQueueAcceptedCount?: number;
+    deferredByQueueLimitCount?: number;
+    queueRejectedCount?: number;
+    queueAcceptedSymbols?: string[];
+    deferredByQueueLimitSymbols?: string[];
+    queueRejectedReasons?: string[];
+    nextQueueRetry?: string;
+    selectedButNotSubmittedCount?: number;
+    submitAttemptedCount?: number;
+    selectedButNotSubmittedReasons?: string[];
+    lastBuyAt?: number | null;
+    minBuyIntervalMs?: number | null;
+    cooldownUntil?: number | null;
+    nextBuyAllowedAt?: number | null;
+    msUntilNextBuyAllowed?: number | null;
+    buyPacingActive?: boolean;
+    buyCooldownActive?: boolean;
+    buyPacingReason?: string;
+    countSourceUsed?: string;
     blockedCount?: number;
     blockedBySpread?: number;
     blockedBySlippage?: number;
@@ -1333,6 +1422,8 @@ export interface PlannedCandidate {
   capitalAllocation?: number;
   targetPolicy?: ScannerCandidate['tradingTargetOwnership'] | null;
   gateSnapshot?: EntryGateDecisionSnapshot;
+  mlPredictBuyDecision?: MLPredictBuyDecision | null;
+  mlPredictBuyPrediction?: MLPredictBuyPrediction | null;
   scannerAutoEntryConfigSnapshot?: ScannerAutoEntryConfigSnapshot | null;
 }
 
@@ -1352,9 +1443,20 @@ export interface ScannerAutoEntryConfigSnapshot {
   entryGateDecision: string;
   confidence: number;
   executionPath: 'scanner_auto';
-  ownerType: 'scanner';
-  ownerName: 'The Dipper';
-  source: 'AutoBots';
+  ownerType: 'scanner' | 'unicorn';
+  ownerName: 'The Dipper' | 'Unicorn Hunter' | 'UNICORN_HUNTER' | 'AUTOBOTS';
+  source: 'AutoBots' | 'ML_PREDICT_BUY' | 'Unicorn Hunter';
+  candidateSource?: 'AutoBots' | 'Unicorn' | 'ML_PREDICT_BUY' | string;
+  scannerModule?: string;
+  selectedBy?: string;
+  executedBy?: string;
+  entryRule?: string;
+  unicornScore?: number | null;
+  unicornMetrics?: Record<string, unknown> | null;
+  mlPredictBuyDecision?: MLPredictBuyDecision | null;
+  mlPredictBuyPrediction?: MLPredictBuyPrediction | null;
+  modelVersionAtEntry?: string | null;
+  featureSchemaVersionAtEntry?: string | null;
   strategySource: string;
   strategySourceDetail?: string | null;
   strategyReason?: string | null;
@@ -1412,10 +1514,28 @@ export interface ExecutionPlan {
   nearMissPoolSize: number;
   maxEntriesPerCycle: number;
   maxSelectedPerScan: number;
+  maxExecutionQueuePerScan?: number;
+  queueAcceptedCount?: number;
+  deferredByQueueLimitCount?: number;
+  queueRejectedCount?: number;
+  queueAcceptedSymbols?: string[];
+  deferredByQueueLimitSymbols?: string[];
+  queueRejectedReasons?: string[];
+  maxAutoBotsBuysPerCycle?: number;
+  maxUnicornBuysPerCycle?: number;
+  autoBotsSelectedThisCycle?: number;
+  unicornSelectedThisCycle?: number;
   availableSlots: number;
   capitalAvailable: number;
   decisionMode: 'unified';
   executionAdapter: 'paper_simulated' | 'binance_live';
+  autobotsSubmitAttemptedThisCycle?: number;
+  unicornSubmitAttemptedThisCycle?: number;
+  globalSubmitAttemptedThisCycle?: number;
+  unicornSelectedExecutableCount?: number;
+  unicornSelectedButNotSubmittedReason?: string;
+  unicornAdapterCalledThisCycle?: boolean;
+  autobotsConsumedGlobalSlot?: boolean;
 }
 
 export interface PaperAutoExecutionResult {
@@ -1718,6 +1838,7 @@ export type ApiStatus = 'NOT_CONFIGURED' | 'CONFIGURED' | 'TESTING' | 'VALID' | 
 export type RiskStyleName = 'conservative' | 'moderate' | 'aggressive';
 export type AllowedGroupsSetting = 'all' | 'blue_chip' | 'no_very_high_risk';
 export type GraphicsQualitySetting = 'low' | 'balanced' | 'high';
+export type { UnicornHunterMode, UnicornHunterSettings, UnicornRadarRow } from '../unicorn/UnicornHunterTypes';
 
 export interface TelegramSettings {
   enabled: boolean;
@@ -1826,6 +1947,7 @@ export interface AppSettings {
   maxTimeBasedExitsPerCycle: number;
   paperAutoExecutionEnabled: boolean;
   microScalperFeatureEnabled: boolean;
+  unicornHunter: import('../unicorn/UnicornHunterTypes').UnicornHunterSettings;
   graphicsQuality: GraphicsQualitySetting;
   autoPerformanceMode: boolean;
   manualDipperSetup: ManualDipperSetupSettings;
@@ -1909,6 +2031,30 @@ export function createDefaultAppSettings(): AppSettings {
     maxTimeBasedExitsPerCycle: 2,
     paperAutoExecutionEnabled: true,
     microScalperFeatureEnabled: true,
+    unicornHunter: {
+      enabled: false,
+      mode: 'watch',
+      maxUnicornBuysPerCycle: 1,
+      maxOpenUnicornPositions: 1,
+      maxUnicornTradesPerDay: 1,
+      unicornMinSecondsBetweenBuys: 30,
+      capitalPctPerTrade: 0.5,
+      minUnicornScore: 85,
+      maxListingAgeHours: 72,
+      min24hChangePct: 8,
+      min5mChangePct: 2,
+      minQuoteVolume: 100000,
+      antiAthGuardEnabled: true,
+      requirePullbackRebound: true,
+      maxDistanceToHighPct: 1.0,
+      minPullbackPct: 2.0,
+      maxPullbackPct: 8.0,
+      minReboundPct: 0.8,
+      maxSpreadPct: 0.35,
+      maxSlippagePct: 0.25,
+      cooldownAfterLossMinutes: 720,
+      cooldownAfterFailedBreakoutMinutes: 120,
+    },
     graphicsQuality: 'balanced',
     autoPerformanceMode: false,
     manualDipperSetup: {
@@ -2090,6 +2236,7 @@ export interface MLPredictionV2 {
   confidenceAdjustment: number;
   suggestedAction: EntryGateVerdict;
   reasons: string[];
+  rowsUsed: number;
 }
 
 export interface MLLabState {
@@ -2105,6 +2252,71 @@ export interface MLLabState {
 // ── ML Runtime Safety types ───────────────────────────
 
 export type MlRuntimeMode = 'off' | 'shadow_only' | 'advisory_only' | 'active_guarded';
+
+export type MLPredictBuyMode = 'OFF' | 'PREDICT_ONLY' | 'SUGGEST_BUY' | 'AUTO_BUY';
+export type MLPredictBuyAction = 'BUY' | 'HOLD' | 'BLOCK';
+export type MLPredictBuyFinalDecision = 'NO_INFLUENCE' | 'PREDICTED' | 'SUGGESTED' | 'BUY_READY' | 'BLOCKED';
+
+export interface MLPredictBuySettings {
+  mlPredictBuyEnabled: boolean;
+  mlPredictBuyMode: MLPredictBuyMode;
+  minTrainingRowsForPredict: number;
+  minTrainingRowsForAutoBuy: number;
+  minPredictedWinProb: number;
+  maxBadEntryRisk: number;
+  minExpectedPnlPct: number;
+  maxMlBuysPerHour: number;
+  maxMlOpenPositions: number;
+  requireScannerAgreement: boolean;
+  requireStrategyValidator: boolean;
+  requireMarketGuard: boolean;
+  requireBtcAnchorIfEnabled: boolean;
+  requireProfessionalGate: boolean;
+  requireFreshRevalidationBeforeSubmit: boolean;
+  requireExecutionModeParity: boolean;
+  requireMlGuardNotBlocked: boolean;
+}
+
+export interface MLPredictBuyPrediction {
+  symbol: string;
+  predictedAction: MLPredictBuyAction;
+  predictedWinProb: number;
+  badEntryRisk: number;
+  expectedPnlPct: number;
+  modelConfidence: number;
+  featureCompleteness: number;
+  rowsUsed: number;
+  sampleSizeOk: boolean;
+  modelVersion?: string | null;
+  featureSchemaVersion?: string | null;
+  reason: string;
+}
+
+export interface MLPredictBuyDecision {
+  symbol: string;
+  scanCycleId: string;
+  predictedAction: MLPredictBuyAction;
+  predictedWinProb: number;
+  badEntryRisk: number;
+  expectedPnlPct: number;
+  modelConfidence: number;
+  featureCompleteness: number;
+  rowsUsed: number;
+  sampleSizeOk: boolean;
+  strategy: string;
+  riskGroup: string | null;
+  preMlGatePassed: boolean;
+  mlGuardBlocked: boolean;
+  postMlHardGatesPassed: boolean;
+  entryGateApproved: boolean;
+  finalDecision: MLPredictBuyFinalDecision;
+  blockedReason: string | null;
+  failedGate: string | null;
+  executionMode: 'demo' | 'live';
+  executionAdapter: 'paper_simulated' | 'binance_live';
+  mode: MLPredictBuyMode;
+  source: 'ML_PREDICT_BUY';
+}
 
 export interface MlRuntimeEvent {
   id: string;

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { buildExecutableCandidateSet } from '../core/scanner/ExecutionPlanner';
+import { buildCandidateRuntimeSnapshot } from '../core/scanner/CandidateLifecycle';
 import type { EntryGateOutput, ScannerCandidate, ScannerSnapshot } from '../core/types';
 
 let passed = 0;
@@ -40,7 +41,7 @@ function gateAllow(): EntryGateOutput {
 
 function buyReadyCandidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate {
   const now = new Date().toISOString();
-  return {
+  const candidate = {
     candidateId: 'candidate_OPGUSDT',
     symbol: 'OPGUSDT',
     createdAt: now,
@@ -100,8 +101,78 @@ function buyReadyCandidate(overrides: Partial<ScannerCandidate> = {}): ScannerCa
       entryPlan: { side: 'BUY', price: 1.23, quantity: 10, reason: 'BUY_READY' },
       ruleDecisionTrace: { unifiedSignal: { reasonCode: 'CONSERVATIVE_OK', definition: { buyRule: 'conservative' } } },
     } as any,
+    finalExecutionStrategy: 'conservative',
+    strategyDecision: {
+      scanId: 'scan_opg',
+      symbol: 'OPGUSDT',
+      riskGroup: 'mid_caps',
+      runtimeSnapshotId: 'scan_opg:scanner:runtime',
+      autoBotsResolvedOn: true,
+      dynamicPerCoinStrategy: true,
+      strategySourceResolved: 'AUTOBOTS',
+      marketBestFit: 'conservative',
+      groupRecommendedStrategy: 'conservative',
+      perCoinSelectedStrategy: 'conservative',
+      userSelectedRuntimeStrategy: null,
+      routerPath: 'test_buy_ready_runtime_snapshot',
+      fallbackType: 'NONE',
+      fallbackApplied: false,
+      fallbackReason: null,
+      finalExecutionStrategy: 'conservative',
+      setupValidatorUsed: 'conservative',
+      entryGateStrategyInput: 'conservative',
+      tp1Strategy: 'pending',
+      strategyAtEntryToPersist: 'conservative',
+      invariantOk: true,
+      failureReason: 'none',
+    } as any,
+    executionPrecheckSnapshot: {
+      priceFresh: true,
+      bookFresh: true,
+      spreadOk: true,
+      tpRoomOk: true,
+      riskGroupResolved: true,
+      marketSnapshotFresh: true,
+      referencePriceFresh: true,
+      candleDataFresh: true,
+      professionalGateResolved: true,
+      entryContractResolved: true,
+      entryContractValid: true,
+      capitalAvailable: true,
+      duplicateChecked: true,
+      pendingOrderChecked: true,
+      invariantOk: true,
+      failureReason: 'none',
+    } as any,
     ...overrides,
   } as any;
+  if (overrides.runtimeSnapshot === undefined) {
+    candidate.runtimeSnapshot = buildCandidateRuntimeSnapshot({
+      scanId: 'scan_opg',
+      runtimeState: {
+        uiAutoBotsOn: true,
+        uiAutoBotsButtonState: true,
+        autoBotsResolvedOn: true,
+        resolvedAutoBotsEnabled: true,
+        scannerAutoEnabled: true,
+        paperAutoExecutionEnabled: true,
+        manualOverrideRequested: false,
+        manualOverrideEnabled: false,
+        dynamicPerCoinStrategy: true,
+        strategySourceResolved: 'AUTOBOTS',
+        routerPath: 'test_buy_ready_runtime_snapshot',
+        runtimeStrategyDropdown: null,
+        executionMode: 'paper_simulated',
+        buildMode: 'test',
+        tauriDetected: false,
+        invariantOk: true,
+        failureReason: 'none',
+      } as any,
+      candidate,
+      sourceOwner: 'AutoBots',
+    });
+  }
+  return candidate;
 }
 
 function snapshot(candidate: ScannerCandidate): ScannerSnapshot {
@@ -144,26 +215,42 @@ ok(ready.executableCandidates.map((c) => c.symbol).includes('OPGUSDT'), 'BUY_REA
 ok(ready.selectedCandidateForExecution === 'OPGUSDT', 'canonical set selects the BUY_READY candidate for execution');
 ok(ready.noExecutionReason === 'none', 'canonical set does not invent a no-execution reason for executable BUY_READY');
 
+const missingRuntime = buildExecutableCandidateSet({
+  scanSnapshot: snapshot(buyReadyCandidate({ runtimeSnapshot: null as any })),
+  runtimeState: { canAttemptScannerAutoExecution: true },
+  riskState: baseRisk,
+});
+ok(!missingRuntime.uiBuyReadySymbols.includes('OPGUSDT'), 'candidate with missing runtime snapshot cannot be displayed as executable BUY');
+ok(missingRuntime.blockedCandidates[0]?.finalNoBuyReason === 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING', 'missing runtime snapshot is classified before execution selection');
+
 const disabled = buildExecutableCandidateSet({
   scanSnapshot: snapshot(buyReadyCandidate()),
   runtimeState: { canAttemptScannerAutoExecution: false },
   riskState: baseRisk,
 });
-ok(disabled.skippedCandidates[0]?.finalNoBuyReason === 'AUTO_EXECUTION_DISABLED', 'runtime OFF produces exact AUTO_EXECUTION_DISABLED skip reason');
+const disabledDecision = [...disabled.skippedCandidates, ...disabled.blockedCandidates].find((candidate) => candidate.symbol === 'OPGUSDT');
+ok(disabledDecision?.finalNoBuyReason === 'AUTO_EXECUTION_DISABLED', 'runtime OFF produces exact AUTO_EXECUTION_DISABLED skip reason');
 
 const duplicate = buildExecutableCandidateSet({
   scanSnapshot: snapshot(buyReadyCandidate()),
   runtimeState: { canAttemptScannerAutoExecution: true },
   riskState: { ...baseRisk, openSymbols: ['OPGUSDT'] },
 });
-ok(duplicate.skippedCandidates[0]?.finalNoBuyReason === 'DUPLICATE_OPEN_POSITION', 'duplicate open symbol produces exact duplicate skip reason');
+const duplicateDecision = [...duplicate.skippedCandidates, ...duplicate.blockedCandidates].find((candidate) => candidate.symbol === 'OPGUSDT');
+ok(duplicateDecision?.finalNoBuyReason === 'DUPLICATE_OPEN_POSITION', 'duplicate open symbol produces exact duplicate skip reason');
 
 const plannerSrc = readFileSync('src/core/scanner/MarketScanner.ts', 'utf8');
 const executionPlannerSrc = readFileSync('src/core/scanner/ExecutionPlanner.ts', 'utf8');
+const lifecycleSrc = readFileSync('src/core/scanner/CandidateLifecycle.ts', 'utf8');
 const topCandidatesSrc = readFileSync('src/components/trade-v4/TopCandidatesPanel.tsx', 'utf8');
 ok(!plannerSrc.includes('scannerSnapshot: { scanId } as ScannerSnapshot'), 'MarketScanner no longer hands ExecutionPlanner a scanId-only snapshot');
 ok(plannerSrc.includes('candidates: rankedCandidatesToAnnotate'), 'MarketScanner planner snapshot contains the ranked candidate list');
 ok(executionPlannerSrc.includes('EXECUTION_SELECTION_INTEGRITY_AUDIT'), 'ExecutionPlanner emits selection integrity audit');
+ok(lifecycleSrc.includes('CANDIDATE_RUNTIME_SNAPSHOT_CREATED_AUDIT'), 'runtime snapshot creation audit exists');
+ok(lifecycleSrc.includes('CANDIDATE_RUNTIME_SNAPSHOT_REFRESH_AUDIT'), 'runtime snapshot refresh audit exists');
+ok(lifecycleSrc.includes('CANDIDATE_RUNTIME_SNAPSHOT_CONSUMED_AUDIT'), 'runtime snapshot consumed audit exists');
+ok(lifecycleSrc.includes('CANDIDATE_RUNTIME_SNAPSHOT_MISSING_AUDIT'), 'runtime snapshot missing audit exists');
+ok(lifecycleSrc.includes('BUY_READY_BLOCKED_BY_RUNTIME_SNAPSHOT_AUDIT'), 'BUY-ready runtime snapshot blocker audit exists');
 ok(topCandidatesSrc.includes('UNKNOWN_EXECUTION_SELECTION_BUG'), 'TopCandidatesPanel treats missing execution trigger reason as an integrity bug');
 
 console.log(`buy-ready-execution-handoff-root-cause.test: ${passed} passed, ${failed} failed`);

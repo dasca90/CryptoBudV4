@@ -29,7 +29,7 @@ import { logger } from '../../utils/logger';
 import { ScannerBrainService } from '../scanner/ScannerBrainService';
 import { isSymbolBannedForTrading } from './banned-symbols';
 import { resolveEntryRiskParams } from './entry-risk-resolver';
-import { resolveAutoTargetOwnership, resolveTradingTargetOwnership } from './TradingTargetOwnership';
+import { resolveAutoTargetOwnership, resolveCandidateExecutionOwnership, resolveTradingTargetOwnership } from './TradingTargetOwnership';
 import { createDefaultAppSettings } from '../types';
 import { buildStrategyAuditSnapshotFromCandidate } from '../strategy-audit/strategy-audit-builder';
 import { emitVisualExecutionEvent } from '../../lib/air-scanner/executionVisualEventBus';
@@ -37,10 +37,44 @@ import { logStrategyAudit } from '../strategy-audit/strategy-audit-logger';
 import { isScalperEnabled } from '../scalper/MicroScalperEngine';
 import { resolveTradeSourceLabel } from '../notifications/trade-source';
 import { validateStrategyContract } from '../strategy-audit/strategy-contracts';
+import { applyFeeAccountingToTrade, buildClosedFeeAccounting, buildEntryFeeAccounting } from '../accounting/feeAccounting';
 
 let _tradeIdCounter = 0;
 function nextTradeId(): string {
   return `trade_${Date.now()}_${++_tradeIdCounter}`;
+}
+
+function isUnicornPositionLike(row: unknown): boolean {
+  const resolved = resolveTradeSourceLabel(row as any);
+  return resolved.label === 'Unicorn'
+    || String((row as any)?.source ?? '').toLowerCase() === 'unicorn_hunter'
+    || String((row as any)?.buySnapshot?.source ?? '').toLowerCase() === 'unicorn_hunter'
+    || String((row as any)?.ownerName ?? '').toLowerCase() === 'unicorn hunter'
+    || String((row as any)?.buySnapshot?.ownerName ?? '').toLowerCase() === 'unicorn hunter';
+}
+
+function isUnicornCandidateLike(row: unknown): boolean {
+  const c = row as any;
+  const values = [
+    c?.source,
+    c?.candidateSource,
+    c?.executionSource,
+    c?.strategySource,
+    c?.ownerName,
+    c?.autoStrategyDecision?.strategySource,
+    c?.scannerAutoEntryConfigSnapshot?.source,
+    c?.scannerAutoEntryConfigSnapshot?.ownerName,
+    c?.scannerAutoEntryConfigSnapshot?.strategySource,
+  ];
+  return values.some((value) => String(value ?? '').toLowerCase().includes('unicorn'));
+}
+
+function hasCanonicalUnicornTp1Ownership(row: unknown): boolean {
+  const ownership = row as any;
+  return String(ownership?.strategySource ?? '').toLowerCase() === 'unicorn_hunter'
+    && String(ownership?.tp1Source ?? '') === 'Unicorn dynamic per coin'
+    && Number(ownership?.tp1Min) === 5
+    && Number(ownership?.tp1Max) === 10;
 }
 
 function buildEntryConfigSnapshotContractHash(snapshot: Pick<ScannerAutoEntryConfigSnapshot, 'symbol' | 'scanId' | 'sourceCandidateId' | 'selectedStrategy' | 'finalEntryRule' | 'entryPrice' | 'quantity'>): string {
@@ -88,6 +122,16 @@ export class TradingEngine {
   private _cachedMaxTimeBasedExitsPerCycle = 2;
   private _winRate = 0.5;
   private _maxDrawdownPercent = 0;
+  private lastSubmittedUnicornTrade: {
+    symbol: string;
+    submittedAt: number;
+    mode: TradingMode;
+    entryPrice: number;
+    qty: number;
+    usedCapital: number;
+  } | null = null;
+  private tradeInvariantRepairLogAt = new Map<string, number>();
+  private tradeInvariantRepairSucceeded = new Set<string>();
   private scannerBrainService: ScannerBrainService;
   private getBanlist: () => string[] = () => createDefaultAppSettings().scannerBanlist;
   private btcAnchorEnabled = true;
@@ -142,12 +186,68 @@ export class TradingEngine {
   getAutoRuntime(): AutoRuntime { return this.autoRuntime; }
   getScalperRuntime(): ScalperRuntime { return this.scalperRuntime; }
   getManualRuntime(): ManualRuntime { return this.manualRuntime; }
+  runRuntimeMemoryCleanup(now = Date.now()): {
+    scannerSnapshotsBefore: number;
+    scannerSnapshotsAfter: number;
+    scannerSnapshotsTrimmed: number;
+    scannerEventsTrimmed: number;
+    staleRecentlyClosedSymbolsRemoved: number;
+    staleTempBrainsRemoved: number;
+    periodCacheBefore: number;
+    periodCacheAfter: number;
+    periodCacheTrimmed: number;
+  } {
+    const scannerCleanup = this.autoRuntime.getScanner().runMemoryCleanup(now);
+    const protectedSymbols = [
+      ...this.positionManager.getOpenPositions().map((position) => position.coin),
+      ...Array.from(this.brains.keys()),
+    ];
+    const staleTempBrainsRemoved = this.scannerBrainService.pruneStaleTempBrains(now, 30 * 60 * 1000, protectedSymbols);
+    return { ...scannerCleanup, staleTempBrainsRemoved };
+  }
   setBanlistProvider(fn: () => string[]): void { this.getBanlist = fn; }
   setEventCallbacks(callbacks: {
     onTradeOpened?: (trade: TradeRecord) => void | Promise<void>;
     onTradeClosed?: (trade: TradeRecord) => void | Promise<void>;
   }): void {
     this.eventCallbacks = { ...this.eventCallbacks, ...callbacks };
+  }
+
+  private shouldEmitTradeInvariantRepair(key: string, now = Date.now()): boolean {
+    const previous = this.tradeInvariantRepairLogAt.get(key) ?? 0;
+    if (now - previous < 60000) return false;
+    this.tradeInvariantRepairLogAt.set(key, now);
+    return true;
+  }
+
+  private async repairClosedTradeOpenPositionConflict(input: {
+    tradeId: string;
+    symbol: string;
+    openPositionStatus: string;
+    closedReason: string;
+    action: string;
+  }): Promise<boolean> {
+    const reason = 'closed_trade_exists_in_journal';
+    const key = `${input.tradeId}|${input.action}|${reason}`;
+    if (this.tradeInvariantRepairSucceeded.has(key) && !this.positionManager.hasOpenPosition(input.symbol)) {
+      return true;
+    }
+    if (this.shouldEmitTradeInvariantRepair(key)) {
+      logger.error(`POSITION_TRADE_ID_STATE_INVARIANT: tradeId=${input.tradeId} symbol=${input.symbol} existsInOpen=${String(this.positionManager.hasOpenPosition(input.symbol))} existsInClosed=true openPositionStatus=${input.openPositionStatus} closedReason=${input.closedReason} violationDetected=true action=${input.action} dedupeKey=${key}`);
+    }
+    if (this.positionManager.hasOpenPosition(input.symbol)) {
+      this.positionManager.removePosition(input.symbol);
+    }
+    const persisted = await this.journal.deleteOpenPosition(input.tradeId);
+    if (persisted) {
+      this.tradeInvariantRepairSucceeded.add(key);
+      logger.warn(`POSITION_OPEN_CLOSED_CONFLICT_REPAIRED: symbol=${input.symbol} tradeId=${input.tradeId} action=${input.action} persistenceConfirmed=true idempotent=true`);
+      return true;
+    }
+    if (this.shouldEmitTradeInvariantRepair(`${key}|persistence_failed`)) {
+      logger.error(`POSITION_TRADE_ID_STATE_INVARIANT_REPAIR_PERSISTENCE_FAILED: tradeId=${input.tradeId} symbol=${input.symbol} action=${input.action} reason=${reason} persistenceConfirmed=false appHealth=degraded dedupeKey=${key}`);
+    }
+    return false;
   }
 
   private installDefaultPaperAutoBuyHandler(): void {
@@ -463,7 +563,7 @@ export class TradingEngine {
     if (candidate.status !== 'BUY') return;
     if (!candidate.entryGateDecision || candidate.entryGateDecision.decision !== 'ALLOW') return;
     (candidate as any).ownerType = (candidate as any).ownerType ?? 'scanner';
-    (candidate as any).ownerName = (candidate as any).ownerName ?? 'The Dipper';
+    (candidate as any).ownerName = (candidate as any).ownerName ?? 'AUTOBOTS';
     (candidate as any).source = (candidate as any).source ?? 'AutoBots';
 
     const brain = this.scannerBrainService.getOrCreateBrainForSymbol(candidate.symbol, 'AUTO').brain;
@@ -488,8 +588,22 @@ export class TradingEngine {
   }
 
   async executePlannedScannerBuy(candidate: ScannerCandidate, planEntry: PlannedCandidate, scannerSnapshot?: ScannerSnapshot, rejectedNearCandidates?: string[]): Promise<void> {
-    logger.info(`AUTOBOTS_SOURCE_MODEL_AUDIT: symbol=${candidate.symbol} source=AutoBots engine=The Dipper candidateSource=The Dipper executionSource=auto strategySource=${candidate.strategySource ?? 'unknown'} buyPath=TradingEngine.executePlannedScannerBuy`);
-    logger.info(`CANDIDATE_SOURCE_PIPELINE_AUDIT: symbol=${candidate.symbol} pipeline=autobots_scanner candidateSource=scanner executionSource=auto buyPath=TradingEngine.executePlannedScannerBuy`);
+    const plannedSource = planEntry.scannerAutoEntryConfigSnapshot?.source ?? (planEntry.mlPredictBuyDecision?.finalDecision === 'BUY_READY' ? 'ML_PREDICT_BUY' : 'AutoBots');
+    const ownershipForSubmit = resolveCandidateExecutionOwnership({
+      candidate,
+      planEntry,
+      selectedBy: planEntry.scannerAutoEntryConfigSnapshot?.selectedBy,
+      executedBy: planEntry.scannerAutoEntryConfigSnapshot?.executedBy,
+      finalExecutionStrategy: planEntry.scannerAutoEntryConfigSnapshot?.finalExecutionStrategy ?? planEntry.finalExecutionStrategy,
+      entryRule: planEntry.scannerAutoEntryConfigSnapshot?.entryRule ?? planEntry.scannerAutoEntryConfigSnapshot?.finalEntryRule,
+      executionPath: 'scanner_auto',
+    });
+    const isUnicornPlanned = ownershipForSubmit.isUnicorn || plannedSource === 'Unicorn Hunter' || isUnicornCandidateLike(candidate) || isUnicornCandidateLike(planEntry);
+    logger.info(`AUTOBOTS_SOURCE_MODEL_AUDIT: symbol=${candidate.symbol} source=${isUnicornPlanned ? 'UNICORN_HUNTER' : plannedSource} engine=${isUnicornPlanned ? 'Unicorn Hunter' : 'The Dipper'} candidateSource=${isUnicornPlanned ? 'unicorn_hunter' : plannedSource === 'ML_PREDICT_BUY' ? 'ML_PREDICT_BUY' : 'The Dipper'} executionSource=${isUnicornPlanned ? 'unicorn_hunter' : plannedSource === 'ML_PREDICT_BUY' ? 'ML_PREDICT_BUY' : 'auto'} strategySource=${isUnicornPlanned ? 'unicorn_hunter' : candidate.strategySource ?? 'unknown'} buyPath=TradingEngine.executePlannedScannerBuy`);
+    logger.info(`CANDIDATE_SOURCE_PIPELINE_AUDIT: symbol=${candidate.symbol} pipeline=scanner_auto candidateSource=${isUnicornPlanned ? 'unicorn_hunter' : plannedSource === 'ML_PREDICT_BUY' ? 'ML_PREDICT_BUY' : 'scanner'} executionSource=${isUnicornPlanned ? 'unicorn_hunter' : plannedSource === 'ML_PREDICT_BUY' ? 'ML_PREDICT_BUY' : 'auto'} buyPath=TradingEngine.executePlannedScannerBuy`);
+    logger.info(`CANDIDATE_OWNERSHIP_AUDIT: symbol=${candidate.symbol} stage=TradingEngine.executePlannedScannerBuy candidateSource=${ownershipForSubmit.candidateSource} ownerType=${ownershipForSubmit.ownerType} ownerName=${ownershipForSubmit.ownerName} scannerModule=${ownershipForSubmit.scannerModule} selectedBy=${ownershipForSubmit.selectedBy} executedBy=${ownershipForSubmit.executedBy} finalExecutionStrategy=${ownershipForSubmit.finalExecutionStrategy} entryRule=${ownershipForSubmit.entryRule} invariantOk=${String(ownershipForSubmit.invariantOk)} invariantReason=${ownershipForSubmit.invariantReason}`);
+    logger.info(`CANDIDATE_SOURCE_HANDOFF_AUDIT: symbol=${candidate.symbol} from=TradingEngine.executePlannedScannerBuy.toExecuteEntry candidateSource=${ownershipForSubmit.candidateSource} source=${ownershipForSubmit.source} strategySource=${ownershipForSubmit.strategySource} executionSource=${ownershipForSubmit.executionSource} ownerName=${ownershipForSubmit.ownerName}`);
+    logger.info(`EXECUTION_OWNER_DECISION_AUDIT: symbol=${candidate.symbol} decision=OWNER_SELECTED_BY_TRADING_ENGINE candidateSource=${ownershipForSubmit.candidateSource} selectedBy=${ownershipForSubmit.selectedBy} executedBy=${ownershipForSubmit.executedBy} reason=${isUnicornPlanned ? 'UNICORN_OWNERSHIP_PRESERVED' : 'AUTOBOTS_OWNERSHIP_PRESERVED'}`);
     if (candidate.status !== 'BUY') return;
     if (planEntry.plannedAction !== 'BUY') return;
     if (!planEntry.gateSnapshot || planEntry.gateSnapshot.decision !== 'ALLOW') return;
@@ -507,9 +621,16 @@ export class TradingEngine {
     } else {
       logger.error(`ENTRY_CONFIG_SNAPSHOT_CONTRACT_AUDIT: symbol=${candidate.symbol} boundary=inside_execute_planned_scanner_buy snapshotPresent=false selectedStrategy=missing finalEntryRule=missing contractHash=missing contractValid=false`);
     }
-    (candidate as any).ownerType = (candidate as any).ownerType ?? 'scanner';
-    (candidate as any).ownerName = (candidate as any).ownerName ?? 'The Dipper';
-    (candidate as any).source = (candidate as any).source ?? 'AutoBots';
+    (candidate as any).ownerType = ownershipForSubmit.ownerType;
+    (candidate as any).ownerName = ownershipForSubmit.ownerName;
+    (candidate as any).source = ownershipForSubmit.source;
+    (candidate as any).candidateSource = ownershipForSubmit.candidateSource;
+    (candidate as any).scannerModule = ownershipForSubmit.scannerModule;
+    (candidate as any).selectedBy = ownershipForSubmit.selectedBy;
+    (candidate as any).executedBy = ownershipForSubmit.executedBy;
+    (candidate as any).executionSource = ownershipForSubmit.executionSource;
+    (candidate as any).strategySource = ownershipForSubmit.strategySource;
+    (candidate as any).entryRule = ownershipForSubmit.entryRule;
     (candidate as any).capitalAllocation = (candidate as any).capitalAllocation ?? planEntry.capitalAllocation ?? (entryPlan.price * entryPlan.quantity);
 
     const brain = this.scannerBrainService.getOrCreateBrainForSymbol(candidate.symbol, 'AUTO').brain;
@@ -540,6 +661,21 @@ export class TradingEngine {
 
     const plannedNotional = entryPlan.price * entryPlan.quantity;
     logger.info(`CAPITAL_PER_COIN_SETTINGS_SOURCE_AUDIT: symbol=${candidate.symbol} executionPath=executePlannedScannerBuy sourceUsed=plannedCandidate.capitalAllocation uiCapitalPerCoin=${(candidate as any).capitalAllocation ?? 'n/a'} persistedCapitalPerCoin=${(candidate as any).capitalAllocation ?? 'n/a'} resolvedCapitalPerCoin=${(candidate as any).capitalAllocation ?? plannedNotional} finalOrderNotionalUsd=${plannedNotional.toFixed(4)} availableCapital=n/a reason=planned_entry_plan_consumed`);
+    if (isUnicornPlanned) {
+      const risk = scannerAutoEntryConfigSnapshot?.riskParams;
+      this.lastSubmittedUnicornTrade = {
+        symbol: candidate.symbol,
+        submittedAt: Date.now(),
+        mode: brain.mode,
+        entryPrice: entryPlan.price,
+        qty: entryPlan.quantity,
+        usedCapital: plannedNotional,
+      };
+      logger.info(`UNICORN_HUNTER_EXECUTION_HANDOFF_AUDIT: symbol=${candidate.symbol} source=unicorn_hunter owner=UnicornHunter candidateSource=unicorn_hunter strategySource=unicorn_hunter executionSource=unicorn_hunter selectedForExecution=true finalExecutable=${String(scannerAutoEntryConfigSnapshot?.finalExecutable ?? true)} entryGateApproved=${String(planEntry.gateSnapshot.decision === 'ALLOW')} submitAttempted=true blockedReason=none`);
+      logger.info(`UNICORN_HUNTER_BUY_SUBMITTED_AUDIT: symbol=${candidate.symbol} mode=${String(brain.mode).toUpperCase()} source=unicorn_hunter strategy=unicorn_hunter entryPrice=${entryPlan.price} qty=${entryPlan.quantity} usedCapital=${plannedNotional.toFixed(4)} tp1Pct=${risk?.tp1Pct ?? scannerAutoEntryConfigSnapshot?.tp1Pct ?? 'n/a'} tp2Pct=${risk?.tp2Pct ?? scannerAutoEntryConfigSnapshot?.tp2Pct ?? 'n/a'} slPct=${risk?.slPct ?? scannerAutoEntryConfigSnapshot?.slPct ?? 'n/a'}`);
+      logger.info(`UNICORN_BUY_SUBMIT_AUDIT: symbol=${candidate.symbol} scanId=${planEntry.scanId ?? scannerSnapshot?.scanId ?? 'unknown'} stage=SUBMIT_ATTEMPTED score=${(candidate as any).unicornScore ?? candidate.rawScore ?? 'n/a'} sourceOwner=${candidate.runtimeSnapshot?.sourceOwner ?? 'UnicornHunter'} ownerType=${(candidate as any).ownerType ?? 'unicorn'} candidateSource=${(candidate as any).candidateSource ?? 'UnicornHunter'} sourceLabel=${(candidate as any).sourceLabel ?? 'Unicorn Hunter'} sourcePresentation=${(candidate as any).sourcePresentation ?? '🦄 Unicorn Hunter'} executionOwner=${(candidate as any).executionOwner ?? 'UnicornHunter'} positionOwner=${(candidate as any).positionOwner ?? 'UnicornHunter'} strategy=${candidate.selectedStrategy ?? scannerAutoEntryConfigSnapshot?.selectedStrategy ?? 'missing'} finalExecutionStrategy=${candidate.finalExecutionStrategy ?? scannerAutoEntryConfigSnapshot?.finalExecutionStrategy ?? 'missing'} entryRule=${(candidate as any).finalEntryRule ?? (candidate as any).entryRule ?? scannerAutoEntryConfigSnapshot?.entryRule ?? 'missing'} setupResult=${(candidate as any).setupResult ?? scannerAutoEntryConfigSnapshot?.setupResult ?? 'missing'} entryPrice=${entryPlan.price} quantity=${entryPlan.quantity} usedCapital=${plannedNotional.toFixed(4)} tp1Pct=${risk?.tp1Pct ?? scannerAutoEntryConfigSnapshot?.tp1Pct ?? 'n/a'} tp2Pct=${risk?.tp2Pct ?? scannerAutoEntryConfigSnapshot?.tp2Pct ?? 'n/a'} slPct=${risk?.slPct ?? scannerAutoEntryConfigSnapshot?.slPct ?? 'n/a'} buyAllowed=true finalExecutable=${String(scannerAutoEntryConfigSnapshot?.finalExecutable ?? true)} submitAttempted=true submitAccepted=true blockedReason=none unicornSelectedThisCycle=n/a unicornSubmittedThisCycle=n/a maxUnicornBuysPerCycle=n/a autoBotsSubmittedThisCycle=n/a maxAutoBotsBuysPerCycle=n/a slotOwner=UnicornHunter autobotsSlotUsed=false unicornSlotUsed=true openUnicornPositions=n/a maxUnicornOpenPositions=n/a unicornTradesToday=n/a maxUnicornTradesPerDay=n/a cooldownRemainingMs=0 nextUnicornBuyAllowedAt=now invariantOk=true failureReason=none`);
+      logger.info(`UNICORN_BUY_SUBMITTED_AUDIT: symbol=${candidate.symbol} mode=${String(brain.mode).toUpperCase()} source=unicorn_hunter owner=UnicornHunter candidateSource=unicorn_hunter strategySource=unicorn_hunter executionSource=unicorn_hunter entryPrice=${entryPlan.price} qty=${entryPlan.quantity} usedCapital=${plannedNotional.toFixed(4)} tp1Pct=${risk?.tp1Pct ?? scannerAutoEntryConfigSnapshot?.tp1Pct ?? 'n/a'} tp2Pct=${risk?.tp2Pct ?? scannerAutoEntryConfigSnapshot?.tp2Pct ?? 'n/a'} slPct=${risk?.slPct ?? scannerAutoEntryConfigSnapshot?.slPct ?? 'n/a'} submitAttempted=true blockedReason=none`);
+    }
     logger.info(`ENTRY_PLAN_CONSUMED_BY_DEMO_EXECUTION: symbol=${candidate.symbol} side=${entryPlan.side} price=${entryPlan.price} quantity=${entryPlan.quantity} scanId=${planEntry.scanId ?? scannerSnapshot?.scanId ?? 'unknown'}`);
     await this.executeEntry(action, brain, decision, gateResult, candidate, scannerSnapshot, undefined, undefined, undefined, rejectedNearCandidates, { executionPath: 'scanner_auto', plannedScannerBuy: true, scannerAutoEntryConfigSnapshot });
   }
@@ -742,10 +878,14 @@ export class TradingEngine {
           const existsInClosed = closedWithSameId.length > 0;
           const violationDetected = existsInOpen && existsInClosed;
           if (violationDetected) {
-            logger.error(`POSITION_TRADE_ID_STATE_INVARIANT: tradeId=${tradeId} symbol=${pos.coin} existsInOpen=${String(existsInOpen)} existsInClosed=${String(existsInClosed)} openPositionStatus=${pos.mode ?? 'unknown'} closedReason=${closedWithSameId[0]?.status ?? 'none'} violationDetected=true`);
-            this.positionManager.removePosition(pos.coin);
-            this.journal.deleteOpenPosition(tradeId);
-            logger.warn(`POSITION_OPEN_CLOSED_CONFLICT_REPAIRED: symbol=${pos.coin} tradeId=${tradeId} action=auto_removed_from_open_positions`);
+            await this.repairClosedTradeOpenPositionConflict({
+              tradeId,
+              symbol: pos.coin,
+              openPositionStatus: pos.mode ?? 'unknown',
+              closedReason: closedWithSameId[0]?.closeSnapshot?.exitReason ?? closedWithSameId[0]?.status ?? 'none',
+              action: 'repairing_delete_stale_open_position_record',
+            });
+            continue;
           }
         }
       }
@@ -790,6 +930,9 @@ export class TradingEngine {
           logger.warn(`PRICE_TIMESTAMP_ORDER_AUDIT: symbol=${pos.coin} positionId=${pos.tradeId ?? 'none'} evaluationTimestamp=${exitEvaluationTimestamp} priceCapturedAt=${priceCapturedAt} rawPriceAgeMs=${rawPriceAgeMs} normalizedPriceAgeMs=${normalizedPriceAgeMs} action=clamp_for_audit_only source=${priceRes.source}`);
         }
         logger.info(`EXIT_EVALUATION_AUDIT: symbol=${pos.coin} positionId=${pos.tradeId ?? 'none'} strategyAtEntry=${pos.buySnapshot?.selectedStrategy ?? 'n/a'} entryPrice=${pos.avgEntryPrice} markPrice=${markPrice > 0 ? markPrice : exitPrice} markPriceSource=${markPrice > 0 ? 'feed' : priceRes.source} priceAgeMs=${normalizedPriceAgeMs} rawPriceAgeMs=${rawPriceAgeMs} qty=${pos.quantity} unrealizedPnlUsd=${((markPrice > 0 ? markPrice : exitPrice) - pos.avgEntryPrice) * pos.quantity} unrealizedPnlPct=${pnlPct.toFixed(2)} stopLossPct=${pos.stopLossPercent} stopLossSource=position stopTriggerPrice=${stopTriggerPrice.toFixed(4)} tp1Pct=${pos.tp1Percent} tp1TriggerPrice=${(pos.avgEntryPrice * (1 + pos.tp1Percent / 100)).toFixed(4)} tp2Pct=${pos.tp2Percent} trailingEnabled=${String(pos.trailFromPeakPercent > 0)} trailingActive=${String(pos.tpArmed)} trailingStopPrice=n/a shouldStopLossSell=${String(shouldStopLossSell)} shouldTakeProfitSell=${String(shouldTakeProfitSell)} shouldTrailingSell=false finalExitDecision=${shouldStopLossSell ? 'STOP_LOSS' : shouldTakeProfitSell ? 'TAKE_PROFIT' : 'HOLD'} noExitReason=${(!shouldStopLossSell && !shouldTakeProfitSell) ? (markPrice > 0 ? 'price_above_sl_and_below_tp' : 'no_live_price') : 'none'}`);
+        if (isUnicornPositionLike(pos)) {
+          logger.info(`UNICORN_EXIT_EVALUATED symbol=${pos.coin} positionId=${pos.tradeId ?? 'none'} source=unicorn_hunter entryPrice=${pos.avgEntryPrice} markPrice=${markPrice} unrealizedPnlPct=${pnlPct.toFixed(2)} tp1Pct=${pos.tp1Percent} stopLossPct=${pos.stopLossPercent} finalExitDecision=${shouldStopLossSell ? 'STOP_LOSS' : shouldTakeProfitSell ? 'TAKE_PROFIT' : 'HOLD'} noExitReason=${(!shouldStopLossSell && !shouldTakeProfitSell) ? (markPrice > 0 ? 'price_above_sl_and_below_tp' : 'no_live_price') : 'none'}`);
+        }
         if (shouldStopLossSell) {
           logger.warn(`STOP_LOSS_TRIGGER_AUDIT: symbol=${pos.coin} positionId=${pos.tradeId ?? 'none'} entryPrice=${pos.avgEntryPrice} markPrice=${markPrice} stopLossPct=${pos.stopLossPercent} stopTriggerPrice=${stopTriggerPrice.toFixed(4)} unrealizedPnlPct=${pnlPct.toFixed(2)} triggerMethod=price exitReason=STOP_LOSS_HIT adapterWillBeCalled=true`);
           const exitInput = this.buildExitInput(pos, exitPrice, priceRes, brain.config.mode);
@@ -990,6 +1133,7 @@ export class TradingEngine {
     const isManualOverride = ownershipResolution.isManualOverride;
     const autoManagedScannerEntry = isScannerAutoTrade;
     const autoBotsOn = isAutoTargetOwned;
+    const isUnicornScannerTrade = isUnicornCandidateLike(scannerCandidate) || isUnicornCandidateLike(executionContext?.scannerAutoEntryConfigSnapshot);
     const canonicalScannerContextValid = !isScannerAutoTrade || (
       ownershipResolution.executionPath === 'scanner_auto'
       && ownershipResolution.isAutoTargetOwned
@@ -1017,17 +1161,34 @@ export class TradingEngine {
     if (ownershipResolution.weakStrategySourceWouldMiss) {
       logger.warn(`AUTO_TARGET_OWNERSHIP_MISCLASSIFICATION_PREVENTED: symbol=${coin} executionPath=${ownershipResolution.executionPath} strategySource=${ownershipResolution.strategySource} ownerType=${ownershipResolution.ownerType} ownerName=${ownershipResolution.ownerName} source=${ownershipResolution.source} mode=${ownershipResolution.mode} isAutoTargetOwned=true previousDetection=manual_override resolverPath=${ownershipResolution.resolverPath}`);
     }
+    let preLockOwnershipRebuildReason: string | null = null;
     const preLockOwnership = scannerCandidate
       ? (() => {
           const existingOwnership = scannerCandidate.tradingTargetOwnership;
+          const unicornTp1OwnershipStale = isUnicornScannerTrade && !!existingOwnership && !hasCanonicalUnicornTp1Ownership(existingOwnership);
           const ownershipIsAuto = existingOwnership && (
             existingOwnership.strategySource === 'autobots' ||
+            existingOwnership.strategySource === 'unicorn_hunter' ||
             existingOwnership.tp1Source === 'AutoBots dynamic per coin'
           );
+          if (unicornTp1OwnershipStale) {
+            preLockOwnershipRebuildReason = 'stale_unicorn_tp1_ownership_rebuilt';
+            logger.warn(`UNICORN_TP1_OWNERSHIP_STALE_REBUILT: symbol=${coin} stage=pre_order_lock existingTp1Source=${existingOwnership?.tp1Source ?? 'none'} existingTp1Min=${String((existingOwnership as any)?.tp1Min ?? 'none')} existingTp1Max=${String((existingOwnership as any)?.tp1Max ?? 'none')} reason=unicorn_owned_trade_requires_unicorn_dynamic_tp1_range`);
+            return resolveTradingTargetOwnership(scannerCandidate, {
+              strategySource: 'unicorn_hunter',
+              manualTp1Pct: 0,
+              manualTp2Pct: 0,
+              stopLossPct: brain.config.stopLossPercent,
+              dynamicTrailingEnabled: Boolean((existingOwnership as any)?.dynamicTrailingEnabled ?? false),
+              trailPullbackPct: Number((existingOwnership as any)?.trailPullbackValue ?? 0.25),
+              isScannerAutoTrade: true,
+            });
+          }
           if (isScannerAutoTrade && !ownershipIsAuto) {
+            preLockOwnershipRebuildReason = 'manual_scanner_ownership_rebuilt';
             logger.warn(`AUTO_TARGET_OWNERSHIP_OVERRIDE_MANUAL: symbol=${coin} existingTp1Source=${existingOwnership?.tp1Source ?? 'none'} existingTp2Source=${existingOwnership?.tp2Source ?? 'none'} existingTp2Value=${existingOwnership?.tp2Value ?? 'none'} reason=replacing_manual_ownership_with_auto ownerType=${ownershipResolution.ownerType} ownerName=${ownershipResolution.ownerName} source=${ownershipResolution.source}`);
             return resolveTradingTargetOwnership(scannerCandidate, {
-              strategySource: 'autobots',
+              strategySource: isUnicornScannerTrade ? 'unicorn_hunter' : 'autobots',
               manualTp1Pct: 0,
               manualTp2Pct: 0,
               stopLossPct: brain.config.stopLossPercent,
@@ -1037,7 +1198,7 @@ export class TradingEngine {
             });
           }
           return existingOwnership ?? resolveTradingTargetOwnership(scannerCandidate, {
-            strategySource: isAutoTargetOwned ? 'autobots' : 'manual_override',
+            strategySource: isUnicornScannerTrade ? 'unicorn_hunter' : isAutoTargetOwned ? 'autobots' : 'manual_override',
             manualTp1Pct: brain.config.takeProfitPercent,
             manualTp2Pct: brain.config.takeProfitPercent,
             stopLossPct: brain.config.stopLossPercent,
@@ -1047,9 +1208,9 @@ export class TradingEngine {
           });
         })()
       : null;
-    if (scannerCandidate && !scannerCandidate.tradingTargetOwnership) {
+    if (scannerCandidate && (!scannerCandidate.tradingTargetOwnership || preLockOwnershipRebuildReason)) {
       scannerCandidate.tradingTargetOwnership = preLockOwnership as ScannerCandidate['tradingTargetOwnership'];
-      logger.info(`TRADING_TARGET_OWNERSHIP_FALLBACK_RESOLVED: symbol=${coin} stage=pre_order_lock autoBotsOn=${String(autoBotsOn)} isAutoTargetOwned=${String(isAutoTargetOwned)} autoManagedScannerEntry=${String(autoManagedScannerEntry)} strategySourceRawLegacy=${ownershipResolution.strategySource} resolverPath=${ownershipResolution.resolverPath} tp1Value=${String((preLockOwnership as any)?.tp1Value ?? 'n/a')} tp1Source=${String((preLockOwnership as any)?.tp1Source ?? 'n/a')} reason=missing_candidate_ownership`);
+      logger.info(`TRADING_TARGET_OWNERSHIP_FALLBACK_RESOLVED: symbol=${coin} stage=pre_order_lock autoBotsOn=${String(autoBotsOn)} isAutoTargetOwned=${String(isAutoTargetOwned)} autoManagedScannerEntry=${String(autoManagedScannerEntry)} strategySourceRawLegacy=${ownershipResolution.strategySource} resolverPath=${ownershipResolution.resolverPath} tp1Value=${String((preLockOwnership as any)?.tp1Value ?? 'n/a')} tp1Source=${String((preLockOwnership as any)?.tp1Source ?? 'n/a')} reason=${preLockOwnershipRebuildReason ?? 'missing_candidate_ownership'}`);
     }
     const preLockRisk = resolveEntryRiskParams({
       autoBotsOn,
@@ -1057,6 +1218,7 @@ export class TradingEngine {
       userStopLossPct: brain.config.stopLossPercent,
       userTrailPullbackPct: 0.25,
     });
+    logger.info(`TP1_OWNER_SOURCE_AUDIT: symbol=${coin} stage=TradingEngine.pre_order_lock ownerName=${isUnicornScannerTrade ? 'UNICORN_HUNTER' : ownershipResolution.ownerName} candidateSource=${isUnicornScannerTrade ? 'Unicorn' : 'AutoBots'} strategySource=${String((preLockOwnership as any)?.strategySource ?? 'unknown')} tp1Pct=${preLockRisk.tp1} tp1Source=${preLockRisk.sourceTp1} tp1Min=${String((preLockOwnership as any)?.tp1Min ?? 'n/a')} tp1Max=${String((preLockOwnership as any)?.tp1Max ?? 'n/a')} invariantOk=${String(isUnicornScannerTrade ? hasCanonicalUnicornTp1Ownership(preLockOwnership) : preLockRisk.sourceTp1 !== 'Unicorn dynamic per coin')}`);
     logger.info(`AUTO_TARGET_OWNERSHIP_RESOLVED: symbol=${coin} executionPath=${ownershipResolution.executionPath} ownerType=${ownershipResolution.ownerType} ownerName=${ownershipResolution.ownerName} source=${ownershipResolution.source} mode=${ownershipResolution.mode} strategySource=${ownershipResolution.strategySource} isAutoTargetOwned=${String(isAutoTargetOwned)} isScannerAutoTrade=${String(isScannerAutoTrade)} isManualTrade=${String(isManualTrade)} isManualOverride=${String(isManualOverride)} tp1Pct=${preLockRisk.tp1} tp1Source=${preLockRisk.sourceTp1} tp2Pct=${preLockRisk.tp2} slPct=${preLockRisk.sl} resolverPath=${ownershipResolution.resolverPath}`);
     if (isScannerAutoTrade && preLockRisk.sourceTp1 === 'user') {
       logger.warn(`AUTO_TARGET_OWNERSHIP_HARD_BLOCK_MANUAL_TP1: symbol=${coin} tp1=${preLockRisk.tp1} tp1Source=${preLockRisk.sourceTp1} reason=scanner_auto_requires_autobots_tp1 stage=pre_order_lock`);
@@ -1143,6 +1305,28 @@ export class TradingEngine {
         return;
       }
       const canonicalEntryConfigSnapshot = executionContext?.scannerAutoEntryConfigSnapshot ?? null;
+      const scannerExecutionSource = isUnicornScannerTrade
+        ? 'unicorn_hunter'
+        : canonicalEntryConfigSnapshot?.source
+        ?? (scannerCandidate?.mlPredictBuyDecision?.finalDecision === 'BUY_READY' || scannerCandidate?.executionSource === 'ML_PREDICT_BUY' ? 'ML_PREDICT_BUY' : 'AutoBots');
+      const ownershipForEntry = resolveCandidateExecutionOwnership({
+        candidate: scannerCandidate,
+        entryConfigSnapshot: canonicalEntryConfigSnapshot,
+        manualBuyRequest,
+        scalperCandidate,
+        selectedBy: canonicalEntryConfigSnapshot?.selectedBy,
+        executedBy: canonicalEntryConfigSnapshot?.executedBy,
+        finalExecutionStrategy: canonicalEntryConfigSnapshot?.finalExecutionStrategy ?? scannerCandidate?.finalExecutionStrategy ?? action.strategy,
+        entryRule: canonicalEntryConfigSnapshot?.entryRule ?? canonicalEntryConfigSnapshot?.finalEntryRule ?? scannerCandidate?.entryRule ?? decision?.selectedPlaybook,
+        executionPath: executionContext?.executionPath ?? 'executeEntry',
+      });
+      const scannerEntryConfigDisplaySource: ScannerAutoEntryConfigSnapshot['source'] = ownershipForEntry.isUnicorn
+        ? 'Unicorn Hunter' as any
+        : ownershipForEntry.isMlPredictBuy
+          ? 'ML_PREDICT_BUY'
+          : 'AutoBots';
+      logger.info(`CANDIDATE_OWNERSHIP_AUDIT: symbol=${coin} stage=TradingEngine.executeEntry candidateSource=${ownershipForEntry.candidateSource} ownerType=${ownershipForEntry.ownerType} ownerName=${ownershipForEntry.ownerName} scannerModule=${ownershipForEntry.scannerModule} selectedBy=${ownershipForEntry.selectedBy} executedBy=${ownershipForEntry.executedBy} finalExecutionStrategy=${ownershipForEntry.finalExecutionStrategy} entryRule=${ownershipForEntry.entryRule} invariantOk=${String(ownershipForEntry.invariantOk)} invariantReason=${ownershipForEntry.invariantReason}`);
+      logger.info(`EXECUTION_OWNER_DECISION_AUDIT: symbol=${coin} decision=OWNER_SELECTED_FOR_POSITION candidateSource=${ownershipForEntry.candidateSource} selectedBy=${ownershipForEntry.selectedBy} executedBy=${ownershipForEntry.executedBy} source=${ownershipForEntry.source} strategySource=${ownershipForEntry.strategySource} executionSource=${ownershipForEntry.executionSource}`);
       let strategyAuditSnapshot: ReturnType<typeof buildStrategyAuditSnapshotFromCandidate> | null = null;
       if (scannerCandidate) {
         strategyAuditSnapshot = canonicalEntryConfigSnapshot?.strategyAuditSnapshot
@@ -1320,10 +1504,19 @@ export class TradingEngine {
           entryGateDecision: gateResult?.decision ?? scannerCandidate.entryGateDecision?.decision ?? 'ALLOW',
           confidence: scannerCandidate.confidence,
           executionPath: 'scanner_auto',
-          ownerType: 'scanner',
-          ownerName: 'The Dipper',
-          source: 'AutoBots',
-          strategySource: String(scannerCandidate.strategySource ?? 'unknown'),
+          ownerType: ownershipForEntry.ownerType,
+          ownerName: ownershipForEntry.ownerName,
+          source: scannerEntryConfigDisplaySource,
+          candidateSource: ownershipForEntry.candidateSource,
+          scannerModule: ownershipForEntry.scannerModule,
+          selectedBy: ownershipForEntry.selectedBy,
+          executedBy: ownershipForEntry.executedBy,
+          entryRule: ownershipForEntry.entryRule,
+          mlPredictBuyDecision: scannerCandidate.mlPredictBuyDecision ?? null,
+          mlPredictBuyPrediction: scannerCandidate.mlPredictBuyPrediction ?? null,
+          modelVersionAtEntry: scannerCandidate.mlPredictBuyPrediction?.modelVersion ?? null,
+          featureSchemaVersionAtEntry: scannerCandidate.mlPredictBuyPrediction?.featureSchemaVersion ?? null,
+          strategySource: ownershipForEntry.strategySource,
           strategySourceDetail: scannerCandidate.strategySourceDetail ?? null,
           strategyReason: scannerCandidate.strategyReason ?? null,
           marketBestFit: strategyAuditSnapshot.marketRecommendedStrategy ?? scannerCandidate.marketBestFit ?? scannerCandidate.marketAnalyzerBestFit ?? scannerCandidate.groupRecommendedStrategy ?? null,
@@ -1352,6 +1545,15 @@ export class TradingEngine {
           strategyAuditSnapshot: strategyAuditSnapshot as unknown as Record<string, unknown>,
           createdAt: strategyAuditSnapshot.createdAt,
         }),
+        ownerType: ownershipForEntry.ownerType,
+        ownerName: ownershipForEntry.ownerName,
+        source: scannerEntryConfigDisplaySource,
+        candidateSource: ownershipForEntry.candidateSource,
+        scannerModule: ownershipForEntry.scannerModule,
+        selectedBy: ownershipForEntry.selectedBy,
+        executedBy: ownershipForEntry.executedBy,
+        entryRule: ownershipForEntry.entryRule,
+        strategySource: ownershipForEntry.strategySource,
         riskParams: preAdapterRiskParamsSnapshot,
         strategyAuditSnapshot,
         entryPrice: action.price,
@@ -1407,6 +1609,9 @@ export class TradingEngine {
         }
       }
 
+      if (isUnicornScannerTrade) {
+        logger.info(`UNICORN_BUY_SUBMITTED symbol=${coin} positionId=${tradeId} adapter=${this.adapter.name} mode=${brain.mode} sharedExecutionPath=TradingEngine.executePlannedScannerBuy orderSide=${req.side} orderQty=${req.quantity} orderPrice=${req.price ?? 'market'}`);
+      }
       const result = await this.adapter.submitOrder(req);
       if (result.status !== 'filled') {
         logger.info(`EXECUTION_TRANSACTION_AUDIT: symbol=${coin} scanId=${scannerSnapshot?.scanId ?? 'n/a'} phase=adapter_rejected entryConfigSnapshotComplete=true riskSnapshotComplete=true preRiskValidationPassed=true preRiskBlockReason=none adapterWillBeCalled=true adapterCalled=true adapterStatus=${result.status} brainApplyEntryCalled=false positionManagerAddAttempted=false positionManagerAddSucceeded=false journalRecordAttempted=false journalRecordSucceeded=false dailyTradeCountIncremented=false rollbackApplied=false rollbackReason=none openPositionsBefore=${openPosSymbols.length} openPositionsAfter=${this.positionManager.getOpenPositions().length} transactionValid=false`);
@@ -1504,6 +1709,12 @@ export class TradingEngine {
         manualUserConfirmed: manualBuyRequest.manualUserConfirmed,
       } : {};
 
+      const entryFeeAccounting = buildEntryFeeAccounting({
+        adapterName: this.adapter.name,
+        orderResult: result as any,
+        executionReport: this.adapter.lastExecutionResult ?? null,
+      });
+
       const buySnapshot: BuySnapshot = {
         schemaVersion: 'cryptobud-v4-buy-v1',
         tradeId,
@@ -1521,6 +1732,14 @@ export class TradingEngine {
         btcRegime: null,
         groupRegime: null,
         entryPrice: result.price,
+        feeUsdEntry: entryFeeAccounting.feeUsdEntry,
+        feeUsdExit: entryFeeAccounting.feeUsdExit,
+        feeUsdTotal: entryFeeAccounting.feeUsdTotal,
+        feeRate: entryFeeAccounting.feeRate,
+        feeSource: entryFeeAccounting.feeSource,
+        operatorName: entryFeeAccounting.operatorName,
+        grossPnlUsd: entryFeeAccounting.grossPnlUsd,
+        netPnlUsd: entryFeeAccounting.netPnlUsd,
         realMarketPriceAtBuy: price.last > 0 ? price.last : result.price,
         entryPriceSource: 'exchange',
         entryPriceAgeMs: 0,
@@ -1536,6 +1755,10 @@ export class TradingEngine {
         candidateRank: scannerCandidate?.rank ?? scalperCandidate?.rank ?? null,
         scannerSnapshotId: scannerSnapshot?.scanId,
         candidateId: scannerCandidate?.candidateId,
+        mlPredictBuyDecision: preAdapterEntryConfigSnapshot?.mlPredictBuyDecision ?? scannerCandidate?.mlPredictBuyDecision ?? null,
+        mlPredictBuyPrediction: preAdapterEntryConfigSnapshot?.mlPredictBuyPrediction ?? scannerCandidate?.mlPredictBuyPrediction ?? null,
+        modelVersionAtEntry: preAdapterEntryConfigSnapshot?.modelVersionAtEntry ?? scannerCandidate?.mlPredictBuyPrediction?.modelVersion ?? null,
+        featureSchemaVersionAtEntry: preAdapterEntryConfigSnapshot?.featureSchemaVersionAtEntry ?? scannerCandidate?.mlPredictBuyPrediction?.featureSchemaVersion ?? null,
         candidatePoolSize: poolSize,
         topCandidatesAtDecision: topCandidateSymbols,
         rejectedNearCandidates: rejectedNearCandidates ?? [],
@@ -1558,12 +1781,17 @@ export class TradingEngine {
               : null,
         ...scalperFields,
         ...manualFields,
-        ownerType: manualBuyRequest ? 'manual' : scalperCandidate ? 'micro_scalper' : 'scanner',
-        ownerName: manualBuyRequest ? 'Manual' : scalperCandidate ? 'Micro Scalping' : 'The Dipper / Scanner',
-        source: manualBuyRequest ? 'manual' : scalperCandidate ? 'micro_scalper' : (scannerCandidate?.strategySource ?? 'scanner'),
-        strategySource: scannerCandidate?.strategySource ?? (scalperCandidate ? 'micro_scalper' : manualBuyRequest ? 'manual' : 'scanner'),
-        candidateSource: scannerCandidate ? 'scanner' : scalperCandidate ? 'micro_scalper' : manualBuyRequest ? 'manual' : 'unknown',
-        executionSource: this.adapter.name,
+        ownerType: ownershipForEntry.ownerType,
+        ownerName: ownershipForEntry.ownerName,
+        source: ownershipForEntry.source,
+        strategySource: ownershipForEntry.strategySource,
+        candidateSource: ownershipForEntry.candidateSource,
+        executionSource: scannerCandidate ? ownershipForEntry.executionSource : this.adapter.name,
+        scannerModule: ownershipForEntry.scannerModule,
+        selectedBy: ownershipForEntry.selectedBy,
+        executedBy: ownershipForEntry.executedBy,
+        finalExecutionStrategy: ownershipForEntry.finalExecutionStrategy,
+        entryRule: ownershipForEntry.entryRule,
         positionManagerDecision: this.positionManager.hasOpenPosition(coin) ? 'BLOCKED_DUPLICATE' : 'ALLOW',
         orderLockId: acquiredLock.lockId,
         lockAcquiredAt: acquiredLock.createdAt,
@@ -1572,7 +1800,11 @@ export class TradingEngine {
         openPositionsCountAtEntry: this.positionManager.getOpenPositions().length,
         settingsSnapshot: {
           strategy: canonicalEntryConfigSnapshot?.selectedStrategy ?? strategyAuditSnapshot?.strategySelected ?? action.strategy,
-          strategySource: scannerCandidate?.strategySource ?? 'engine_entry',
+          strategySource: ownershipForEntry.strategySource,
+          candidateSource: ownershipForEntry.candidateSource,
+          scannerModule: ownershipForEntry.scannerModule,
+          selectedBy: ownershipForEntry.selectedBy,
+          executedBy: ownershipForEntry.executedBy,
           entryRule: (() => {
             const fromAudit = strategyAuditSnapshot?.finalEntryRule;
             const fromDecision = ((decision as any)?.ruleDecisionTrace?.unifiedSignal?.reasonCode as string | undefined) ?? (decision?.selectedPlaybook ?? undefined);
@@ -1595,6 +1827,8 @@ export class TradingEngine {
           marketRegimeAtEntry: scannerCandidate?.periodRegime ?? null,
           groupTrendAtEntry: scannerCandidate?.groupTrend ?? null,
           score: scannerCandidate?.rawScore ?? scalperCandidate?.scalpScore ?? null,
+          unicornScore: (scannerCandidate as any)?.unicornScore ?? null,
+          unicornMetrics: (scannerCandidate as any)?.unicornMetrics ?? null,
           confidence: action.mlConfidence ?? null,
           entryReason: ((decision as any)?.ruleDecisionTrace?.unifiedSignal?.reason as string | undefined) ?? decision?.reasons?.[0] ?? null,
           createdAt: new Date().toISOString(),
@@ -1627,6 +1861,7 @@ export class TradingEngine {
       (buySnapshot.settingsSnapshot as any).entryConfigSnapshot = { ...((buySnapshot.settingsSnapshot as any).entryConfigSnapshot ?? {}), riskParams: riskParamsSnapshot };
       logger.info(`POSITION_RISK_SNAPSHOT_SAVED: symbol=${coin} positionId=${tradeId} riskGroup=${scannerCandidate?.riskGroup ?? scalperCandidate?.riskGroup ?? 'unknown'} confidence=${action.mlConfidence ?? 0} strategy=${buySnapshot.selectedStrategy} entryRule=${(buySnapshot.settingsSnapshot as any)?.entryRule ?? 'unknown'} entryPrice=${riskParamsSnapshot.entryPrice} tp1Pct=${riskParamsSnapshot.tp1Pct} tp1TargetPrice=${riskParamsSnapshot.tp1TargetPrice} tp1Source=${riskParamsSnapshot.tp1Source} tp1Reason=${riskParamsSnapshot.tp1Reason} tp1Min=${riskParamsSnapshot.tp1Min ?? 'n/a'} tp1Max=${riskParamsSnapshot.tp1Max ?? 'n/a'} tp2Pct=${riskParamsSnapshot.tp2Pct} tp2Source=${riskParamsSnapshot.tp2Source} slPct=${riskParamsSnapshot.slPct} slSource=${riskParamsSnapshot.slSource} snapshotPresent=true riskSnapshotPresent=true autoBotsOnAtEntry=${String(riskParamsSnapshot.autoBotsOnAtEntry)} tradingTargetOwnership=${ownership ? 'present' : 'missing'} source=resolvedRisk`);
       logger.info(`POSITION_TP1_SNAPSHOT_SAVED: symbol=${coin} positionId=${tradeId} source=${buySnapshot.source ?? 'unknown'} engine=${this.adapter.name} mode=${brain.mode} strategy=${buySnapshot.selectedStrategy} entryRule=${(buySnapshot.settingsSnapshot as any)?.entryRule ?? 'unknown'} entryPrice=${result.price} tp1Pct=${riskParamsSnapshot.tp1Pct} tp1TargetPrice=${riskParamsSnapshot.tp1TargetPrice} tp2Pct=${riskParamsSnapshot.tp2Pct} slPct=${riskParamsSnapshot.slPct} autoBotsOnAtEntry=${String(riskParamsSnapshot.autoBotsOnAtEntry)} sourceTp1=${riskParamsSnapshot.sourceTp1} sourceTp2=${riskParamsSnapshot.sourceTp2} sourceSl=${riskParamsSnapshot.sourceSl}`);
+      logger.info(`POSITION_TP1_PERSISTENCE_AUDIT: symbol=${coin} positionId=${tradeId} ownerName=${buySnapshot.ownerName ?? 'unknown'} candidateSource=${buySnapshot.candidateSource ?? 'unknown'} source=${buySnapshot.source ?? 'unknown'} tp1Pct=${riskParamsSnapshot.tp1Pct} tp1Source=${riskParamsSnapshot.tp1Source} tp1Min=${riskParamsSnapshot.tp1Min ?? 'n/a'} tp1Max=${riskParamsSnapshot.tp1Max ?? 'n/a'} expectedTp1Source=${isUnicornScannerTrade ? 'Unicorn dynamic per coin' : 'AutoBots dynamic per coin'} expectedTp1Min=${isUnicornScannerTrade ? 5 : (riskParamsSnapshot.tp1Min ?? 'n/a')} expectedTp1Max=${isUnicornScannerTrade ? 10 : (riskParamsSnapshot.tp1Max ?? 'n/a')} invariantOk=${String(isUnicornScannerTrade ? (riskParamsSnapshot.tp1Source === 'Unicorn dynamic per coin' && riskParamsSnapshot.tp1Min === 5 && riskParamsSnapshot.tp1Max === 10 && buySnapshot.ownerName === 'UNICORN_HUNTER') : riskParamsSnapshot.tp1Source !== 'Unicorn dynamic per coin')} sourceUsed=buySnapshot.entryConfigSnapshot.riskParams`);
       logger.info(`TP_TARGET_PRICE_CALC_AUDIT: symbol=${coin} positionId=${tradeId} entryPrice=${result.price} tp1Pct=${riskParamsSnapshot.tp1Pct} tp1TargetPrice=${riskParamsSnapshot.tp1TargetPrice} formula=entryPrice*(1+tp1Pct/100)`);
 
       if (scannerCandidate) {
@@ -1805,6 +2040,10 @@ export class TradingEngine {
         unrealizedPnlPercent: 0,
         ownerType: buySnapshot.ownerType ?? 'scanner',
         adapter: this.adapter.name,
+        feeUsdEntry: entryFeeAccounting.feeUsdEntry,
+        feeRate: entryFeeAccounting.feeRate,
+        feeSource: entryFeeAccounting.feeSource,
+        operatorName: entryFeeAccounting.operatorName,
       };
       (canonicalPosition as any).entryConfigSnapshot = entryConfigSnapshot;
 
@@ -1903,10 +2142,16 @@ export class TradingEngine {
           return;
         }
       }
+      logger.info(`POSITION_OWNER_PERSISTENCE_AUDIT: symbol=${coin} positionId=${tradeId} stage=before_position_manager_add candidateSource=${buySnapshot.candidateSource ?? 'unknown'} ownerType=${buySnapshot.ownerType ?? 'unknown'} ownerName=${buySnapshot.ownerName ?? 'unknown'} scannerModule=${(buySnapshot as any).scannerModule ?? 'unknown'} selectedBy=${(buySnapshot as any).selectedBy ?? 'unknown'} executedBy=${(buySnapshot as any).executedBy ?? 'unknown'} source=${buySnapshot.source ?? 'unknown'} strategySource=${buySnapshot.strategySource ?? 'unknown'} executionSource=${buySnapshot.executionSource ?? 'unknown'} finalExecutionStrategy=${(buySnapshot as any).finalExecutionStrategy ?? 'unknown'} entryRule=${(buySnapshot as any).entryRule ?? (buySnapshot.settingsSnapshot as any)?.entryRule ?? 'unknown'} invariantOk=${String(!(ownershipForEntry.isUnicorn && buySnapshot.ownerName !== 'UNICORN_HUNTER'))}`);
       this.positionManager.addPosition(coin, canonicalPosition);
+      if (buySnapshot.source === 'unicorn_hunter') {
+        logger.info(`UNICORN_POSITION_SOURCE_AUDIT: symbol=${coin} tradeId=${tradeId} positionId=${tradeId} stage=position_manager_add score=${String((scannerCandidate as any)?.unicornScore ?? (buySnapshot.settingsSnapshot as any)?.unicornScore ?? 'n/a')} sourceOwner=${String(scannerCandidate?.runtimeSnapshot?.sourceOwner ?? '').toLowerCase().includes('unicorn') ? scannerCandidate?.runtimeSnapshot?.sourceOwner : 'UnicornHunter'} ownerType=${buySnapshot.ownerType ?? 'unicorn'} candidateSource=${buySnapshot.candidateSource ?? 'UnicornHunter'} sourceLabel=${(buySnapshot as any).sourceLabel ?? 'Unicorn Hunter'} sourcePresentation=${(buySnapshot as any).sourcePresentation ?? '🦄 Unicorn Hunter'} executionOwner=${(buySnapshot as any).executionOwner ?? 'UnicornHunter'} positionOwner=${(buySnapshot as any).positionOwner ?? 'UnicornHunter'} openPositionSource=${buySnapshot.source ?? 'unicorn_hunter'} journalSource=${buySnapshot.source ?? 'unicorn_hunter'} telegramSource=${(buySnapshot as any).sourcePresentation ?? '🦄 Unicorn Hunter'} strategy=${(buySnapshot as any).strategyAtEntry ?? (buySnapshot as any).finalExecutionStrategy ?? 'unknown'} finalExecutionStrategy=${(buySnapshot as any).finalExecutionStrategy ?? (buySnapshot as any).strategyAtEntry ?? 'unknown'} entryRule=${(buySnapshot as any).entryRule ?? (buySnapshot.settingsSnapshot as any)?.entryRule ?? 'unknown'} setupResult=${((buySnapshot as any).entryConfigSnapshot as any)?.setupResult ?? 'unknown'} buyAllowed=true finalExecutable=true submitAttempted=true blockedReason=none unicornSelectedThisCycle=n/a unicornSubmittedThisCycle=n/a maxUnicornBuysPerCycle=n/a autoBotsSubmittedThisCycle=n/a maxAutoBotsBuysPerCycle=n/a slotOwner=UnicornHunter autobotsSlotUsed=false unicornSlotUsed=true openUnicornPositions=n/a maxUnicornOpenPositions=n/a unicornTradesToday=n/a maxUnicornTradesPerDay=n/a cooldownRemainingMs=0 nextUnicornBuyAllowedAt=now invariantOk=${String(buySnapshot.ownerName === 'UNICORN_HUNTER' && buySnapshot.source === 'unicorn_hunter')} failureReason=${buySnapshot.ownerName === 'UNICORN_HUNTER' && buySnapshot.source === 'unicorn_hunter' ? 'none' : 'UNICORN_POSITION_SOURCE_MISMATCH'}`);
+        logger.info(`UNICORN_POSITION_CREATED symbol=${coin} positionId=${tradeId} source=unicorn_hunter strategy=unicorn_hunter riskGroup=ultra_high_risk unicornScore=${String((scannerCandidate as any)?.unicornScore ?? (buySnapshot.settingsSnapshot as any)?.unicornScore ?? 'n/a')} sharedExecutionPath=TradingEngine.executePlannedScannerBuy`);
+      }
       const addedPosition = this.positionManager.getPositionBySymbol(coin) as any;
       const positionManagerAddSucceeded = addedPosition?.tradeId === tradeId;
       const addedRisk = addedPosition?.entryConfigSnapshot?.riskParams ?? addedPosition?.buySnapshot?.entryConfigSnapshot?.riskParams ?? null;
+      logger.info(`POSITION_OWNER_PERSISTENCE_AUDIT: symbol=${coin} positionId=${tradeId} stage=after_position_manager_add candidateSource=${addedPosition?.buySnapshot?.candidateSource ?? 'unknown'} ownerType=${addedPosition?.buySnapshot?.ownerType ?? 'unknown'} ownerName=${addedPosition?.buySnapshot?.ownerName ?? 'unknown'} scannerModule=${(addedPosition?.buySnapshot as any)?.scannerModule ?? 'unknown'} selectedBy=${(addedPosition?.buySnapshot as any)?.selectedBy ?? 'unknown'} executedBy=${(addedPosition?.buySnapshot as any)?.executedBy ?? 'unknown'} source=${addedPosition?.buySnapshot?.source ?? 'unknown'} strategySource=${addedPosition?.buySnapshot?.strategySource ?? 'unknown'} executionSource=${addedPosition?.buySnapshot?.executionSource ?? 'unknown'} finalExecutionStrategy=${(addedPosition?.buySnapshot as any)?.finalExecutionStrategy ?? 'unknown'} entryRule=${(addedPosition?.buySnapshot as any)?.entryRule ?? (addedPosition?.buySnapshot?.settingsSnapshot as any)?.entryRule ?? 'unknown'} invariantOk=${String(positionManagerAddSucceeded && !(ownershipForEntry.isUnicorn && addedPosition?.buySnapshot?.ownerName !== 'UNICORN_HUNTER'))}`);
       logger.info(`POSITION_MANAGER_ADD_RESULT_AUDIT: symbol=${coin} positionId=${tradeId} entryPrice=${addedPosition?.avgEntryPrice ?? 'n/a'} riskSnapshotPresent=${String(!!addedRisk)} strategySnapshotPresent=${String(!!(addedPosition?.entryConfigSnapshot?.strategyAuditSnapshot ?? addedPosition?.buySnapshot?.entryConfigSnapshot?.strategyAuditSnapshot))} tp1Pct=${addedRisk?.tp1Pct ?? 'n/a'} tp1TargetPrice=${addedRisk?.tp1TargetPrice ?? 'n/a'} tp1Source=${addedRisk?.tp1Source ?? addedRisk?.sourceTp1 ?? 'n/a'} tp2Pct=${addedRisk?.tp2Pct ?? 'n/a'} slPct=${addedRisk?.slPct ?? 'n/a'} ownerDisplay=${buySnapshot.ownerName ?? buySnapshot.source ?? 'unknown'} sourceUsed=PositionManager.read_after_add`);
       logger.info(`POSITION_PRICE_INTEGRITY_AUDIT: symbol=${coin} positionId=${tradeId} adapterResultPrice=${result.price} positionAvgEntryPrice=${addedPosition?.avgEntryPrice ?? 'n/a'} priceMatch=${String(result.price === (addedPosition?.avgEntryPrice ?? -1))} entryPriceInSnapshot=${canonicalPosition.buySnapshot?.entryPrice ?? 'n/a'} refPrice=${price.last} lastPrice=${addedPosition?.lastPrice ?? 'n/a'} usedCapital=${((addedPosition?.avgEntryPrice ?? 0) * (addedPosition?.quantity ?? 0)).toFixed(8)} calculatedFromQtyAndPrice=${(addedPosition?.quantity * addedPosition?.avgEntryPrice).toFixed(8)} tp1Calculated=${(addedRisk?.tp1Pct ?? 0) > 0 ? ((addedPosition?.avgEntryPrice ?? 0) * (1 + ((addedRisk?.tp1Pct ?? 0) / 100))).toFixed(8) : 'n/a'} slTrigger=${(addedRisk?.slPct ?? 0) > 0 ? ((addedPosition?.avgEntryPrice ?? 0) * (1 - ((addedRisk?.slPct ?? 0) / 100))).toFixed(8) : 'n/a'} mode=${brain.mode}`);
       if (!positionManagerAddSucceeded) {
@@ -1972,6 +2217,14 @@ export class TradingEngine {
         adapter: this.adapter.name,
         entryPrice: result.price,
         quantity: result.quantity,
+        feeUsdEntry: entryFeeAccounting.feeUsdEntry,
+        feeUsdExit: entryFeeAccounting.feeUsdExit,
+        feeUsdTotal: entryFeeAccounting.feeUsdTotal,
+        feeRate: entryFeeAccounting.feeRate,
+        feeSource: entryFeeAccounting.feeSource,
+        operatorName: entryFeeAccounting.operatorName,
+        grossPnlUsd: entryFeeAccounting.grossPnlUsd,
+        netPnlUsd: entryFeeAccounting.netPnlUsd,
         entryTime: new Date().toISOString(),
         status: 'open',
         mlConfidence: action.mlConfidence,
@@ -2017,7 +2270,10 @@ export class TradingEngine {
           `entryPrice=${result.price} ` +
           `qty=${result.quantity} ` +
           `notionalUsd=${(result.price * result.quantity).toFixed(8)} ` +
-          `feeUsd=${String((result as any).feeUsd ?? (result as any).fee ?? 'n/a')} ` +
+          `feeUsd=${entryFeeAccounting.feeUsdEntry.toFixed(8)} ` +
+          `feeRate=${entryFeeAccounting.feeRate} ` +
+          `feeSource=${entryFeeAccounting.feeSource} ` +
+          `operatorName=${entryFeeAccounting.operatorName} ` +
           `tp1Pct=${canonicalRisk?.tp1Pct ?? 'n/a'} ` +
           `tp1TriggerPrice=${canonicalRisk?.tp1TargetPrice ?? 'n/a'} ` +
           `tp2Pct=${canonicalRisk?.tp2Pct ?? 'n/a'} ` +
@@ -2080,6 +2336,9 @@ export class TradingEngine {
 
     const pnlPct = ((exitPrice - pos.avgEntryPrice) / pos.avgEntryPrice) * 100;
     logger.throttled('INFO', `PAPER_EXIT_EVALUATED: symbol=${brain.coin} pnlPct=${pnlPct.toFixed(2)} closeSignal=${decision.shouldClosePosition} reason=${decision.exitReason ?? 'none'} priceSource=${priceRes.source}`, `paper_exit_${brain.coin}`, 15000);
+    if (isUnicornPositionLike(pos)) {
+      logger.info(`UNICORN_EXIT_EVALUATED symbol=${brain.coin} positionId=${pos.tradeId ?? 'none'} source=unicorn_hunter entryPrice=${pos.avgEntryPrice} markPrice=${exitPrice} unrealizedPnlPct=${pnlPct.toFixed(2)} tp1Pct=${pos.tp1Percent} stopLossPct=${pos.stopLossPercent} finalExitDecision=${decision.shouldClosePosition ? String(decision.exitReason ?? 'EXIT') : 'HOLD'} noExitReason=${decision.shouldClosePosition ? 'none' : 'exit_engine_hold'}`);
+    }
 
     if (decision.shouldClosePosition) {
       await this.executeExitWithSnapshot(brain, pos, decision, priceRes);
@@ -2184,6 +2443,10 @@ export class TradingEngine {
         mode: brain.mode,
       };
 
+      const unicornExit = isUnicornPositionLike(pos);
+      if (unicornExit) {
+        logger.info(`UNICORN_EXIT_SUBMITTED symbol=${coin} positionId=${pos.tradeId ?? 'none'} source=unicorn_hunter sharedExecutionPath=TradingEngine.executeExitWithSnapshot exitReason=${decision.exitReason ?? 'UNKNOWN'} orderSide=SELL orderQty=${finalSellQty} requestedExitPrice=${decision.exitPrice}`);
+      }
       const result = await this.adapter.submitOrder(req);
       if (result.status !== 'filled') {
         releaseSellLock();
@@ -2205,6 +2468,13 @@ export class TradingEngine {
       else if (!priceRes.isRealMarketPrice) executionQuality = 'FALLBACK_TRIGGER_PRICE';
 
       const bs = pos.buySnapshot;
+      const closeFeeAccounting = buildClosedFeeAccounting({
+        adapterName: this.adapter.name,
+        buySnapshot: bs ?? null,
+        closeOrderResult: result as any,
+        closeExecutionReport: this.adapter.lastExecutionResult ?? null,
+        grossPnlUsd: pnl,
+      });
 
       const snapshot: CloseSnapshot = {
         schemaVersion: 'cryptobud-v4-close-v1',
@@ -2224,7 +2494,15 @@ export class TradingEngine {
         exitPrice,
         pnlPercent: pnlPct,
         pnlUsd: pnl,
-        fees: Math.abs(pnl) * 0.001,
+        fees: closeFeeAccounting.feeUsdTotal,
+        feeUsdEntry: closeFeeAccounting.feeUsdEntry,
+        feeUsdExit: closeFeeAccounting.feeUsdExit,
+        feeUsdTotal: closeFeeAccounting.feeUsdTotal,
+        feeRate: closeFeeAccounting.feeRate,
+        feeSource: closeFeeAccounting.feeSource,
+        operatorName: closeFeeAccounting.operatorName,
+        grossPnlUsd: closeFeeAccounting.grossPnlUsd,
+        netPnlUsd: closeFeeAccounting.netPnlUsd,
         slippagePct: result.price !== exitPrice ? ((result.price - exitPrice) / exitPrice) * 100 : 0,
         durationMs,
         highestPrice: pos.highestPrice,
@@ -2263,6 +2541,7 @@ export class TradingEngine {
       (snapshot as any).tp2Source = String(riskParams.sourceTp2 ?? 'Legacy / unknown');
       (snapshot as any).slSource = String(riskParams.sourceSl ?? 'Legacy / unknown');
       (snapshot as any).riskParams = riskParams;
+      logger.info(`TRADE_FEE_ACCOUNTING_AUDIT: symbol=${coin} tradeId=${snapshot.tradeId} operatorName=${closeFeeAccounting.operatorName} feeSource=${closeFeeAccounting.feeSource} feeRate=${closeFeeAccounting.feeRate} feeUsdEntry=${closeFeeAccounting.feeUsdEntry.toFixed(8)} feeUsdExit=${closeFeeAccounting.feeUsdExit.toFixed(8)} feeUsdTotal=${closeFeeAccounting.feeUsdTotal.toFixed(8)} grossPnlUsd=${closeFeeAccounting.grossPnlUsd.toFixed(8)} netPnlUsd=${closeFeeAccounting.netPnlUsd.toFixed(8)} formula=netPnlUsd=grossPnlUsd-feeUsdTotal`);
       logger.info(`TP1_CLOSE_DECISION_AUDIT: symbol=${coin} positionId=${snapshot.tradeId} source=${snapshot.source ?? 'unknown'} engine=${this.adapter.name} mode=${brain.mode} strategy=${bs?.selectedStrategy ?? 'unknown'} entryRule=${(bs?.settingsSnapshot as any)?.entryRule ?? 'unknown'} entryPrice=${pos.avgEntryPrice} tp1Pct=${snapshot.tp1Percent} tp1TargetPrice=${String((snapshot as any).tp1TargetPrice)} currentPrice=${exitPrice} currentPriceSource=${priceRes.source} tp1Reached=${String(decision.exitReason === 'TP1_FIXED')} tp1HitPrice=${String((snapshot as any).tp1HitPrice ?? 'n/a')} tp2Pct=${snapshot.tp2Percent} slPct=${snapshot.stopLossPercent} autoBotsOnAtEntry=${String((riskParams.autoBotsOnAtEntry ?? false))} sourceTp1=${String((snapshot as any).tp1Source)} sourceTp2=${String((snapshot as any).tp2Source)} sourceSl=${String((snapshot as any).slSource)} durationSeconds=${Math.floor(durationMs / 1000)} closeReason=${decision.exitReason} closeAllowed=true pnlPct=${pnlPct.toFixed(4)} pnlUsd=${pnl.toFixed(4)} formulaUsed=(exit-entry)*qty`);
       logger.info(`CLOSED_TRADE_TP1_SNAPSHOT_AUDIT: symbol=${coin} positionId=${snapshot.tradeId} closeReason=${decision.exitReason} tp1Pct=${snapshot.tp1Percent} tp1TargetPrice=${String((snapshot as any).tp1TargetPrice)} tp1HitPrice=${String((snapshot as any).tp1HitPrice ?? 'n/a')} tp2Pct=${snapshot.tp2Percent} slPct=${snapshot.stopLossPercent}`);
 
@@ -2277,6 +2556,14 @@ export class TradingEngine {
         quantity: pos.quantity,
         pnl,
         pnlPercent: pnlPct,
+        grossPnlUsd: closeFeeAccounting.grossPnlUsd,
+        netPnlUsd: closeFeeAccounting.netPnlUsd,
+        feeUsdEntry: closeFeeAccounting.feeUsdEntry,
+        feeUsdExit: closeFeeAccounting.feeUsdExit,
+        feeUsdTotal: closeFeeAccounting.feeUsdTotal,
+        feeRate: closeFeeAccounting.feeRate,
+        feeSource: closeFeeAccounting.feeSource,
+        operatorName: closeFeeAccounting.operatorName,
         entryTime: new Date(pos.openedAt).toISOString(),
         exitTime: new Date().toISOString(),
         status: 'closed',
@@ -2294,12 +2581,23 @@ export class TradingEngine {
         mlQuality,
         trainingEligible: mlQuality.trainingEligible,
       };
+      applyFeeAccountingToTrade(fullTrade, closeFeeAccounting);
 
       await this.journal.recordTrade(fullTrade);
+      if (unicornExit) {
+        const outcomeEvent = pnlPct > 0 ? 'UNICORN_EXIT_FAST_PROFIT' : 'UNICORN_EXIT_PUMP_FAILED';
+        logger.info(`${outcomeEvent} symbol=${coin} positionId=${snapshot.tradeId} source=unicorn_hunter sharedExecutionPath=TradingEngine.executeExitWithSnapshot exitReason=${decision.exitReason ?? 'UNKNOWN'} exitPrice=${exitPrice} entryPrice=${pos.avgEntryPrice} realizedPnlPct=${pnlPct.toFixed(4)} realizedPnlUsd=${pnl.toFixed(4)} durationSeconds=${Math.floor(durationMs / 1000)} closePriceSource=${priceRes.source} positionClosed=true`);
+      }
       {
         const stillOpen = this.positionManager.getPositionBySymbol(coin);
         if (!stillOpen) {
-          logger.error(`POSITION_TRADE_ID_STATE_INVARIANT: tradeId=${snapshot.tradeId} symbol=${coin} existsInOpen=false existsInClosed=true openPositionStatus=already_removed closedReason=${decision.exitReason} violationDetected=true action=repairing_delete_stale_open_position_record`);
+          await this.repairClosedTradeOpenPositionConflict({
+            tradeId: snapshot.tradeId,
+            symbol: coin,
+            openPositionStatus: 'already_removed',
+            closedReason: decision.exitReason ?? 'unknown',
+            action: 'repairing_delete_stale_open_position_record',
+          });
         } else {
           try {
             await this.eventCallbacks.onTradeClosed?.(fullTrade);
@@ -2309,7 +2607,7 @@ export class TradingEngine {
           this.positionManager.closePosition(coin, snapshot);
           brain.applyExit();
         }
-        this.journal.deleteOpenPosition(snapshot.tradeId);
+        await this.journal.deleteOpenPosition(snapshot.tradeId);
       }
       releaseSellLock();
       emitVisualExecutionEvent({

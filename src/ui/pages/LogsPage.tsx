@@ -22,8 +22,9 @@ function countByLevel(logs: LogEntry[]): Record<string, number> {
 }
 
 function OvernightStatusBadge({ snapshot }: { snapshot: OvernightStabilitySnapshot }) {
-  const lastCleanup = snapshot.lastAirScannerCleanupAt
-    ? formatSystemLocalTime(new Date(snapshot.lastAirScannerCleanupAt).toISOString())
+  const lastCleanupAt = snapshot.lastRuntimeCleanupAt ?? snapshot.lastAirScannerCleanupAt;
+  const lastCleanup = lastCleanupAt
+    ? formatSystemLocalTime(new Date(lastCleanupAt).toISOString())
     : 'n/a';
   const memoryColor = snapshot.memoryStatus === 'Pressure'
     ? '#f85149'

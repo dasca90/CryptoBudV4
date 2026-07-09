@@ -205,6 +205,7 @@ export function evaluateModelBasic(model: MLBrainModel, row: ImportedMLRow): MLP
       confidenceAdjustment: 0,
       suggestedAction: 'ALLOW',
       reasons: ['ML brain not trained yet'],
+      rowsUsed: model.trainingRowCount,
     };
   }
 
@@ -236,6 +237,7 @@ export function evaluateModelBasic(model: MLBrainModel, row: ImportedMLRow): MLP
       confidenceAdjustment: -0.05,
       suggestedAction: 'ALLOW',
       reasons: ['No applicable rules, using fallback'],
+      rowsUsed: model.trainingRowCount,
     };
   }
 
@@ -276,6 +278,7 @@ export function evaluateModelBasic(model: MLBrainModel, row: ImportedMLRow): MLP
     confidenceAdjustment: Math.round(confidenceAdjustment * 10000) / 10000,
     suggestedAction,
     reasons,
+    rowsUsed: model.trainingRowCount,
   };
 }
 
@@ -300,6 +303,7 @@ export function evaluateModelOnFeatures(
       confidenceAdjustment: 0,
       suggestedAction: 'ALLOW',
       reasons: ['ML brain not trained yet'],
+      rowsUsed: model.trainingRowCount,
     };
   }
 
@@ -351,5 +355,6 @@ export function evaluateModelOnFeatures(
     confidenceAdjustment: Math.round(confidenceAdjustment * 10000) / 10000,
     suggestedAction,
     reasons,
+    rowsUsed: model.trainingRowCount,
   };
 }

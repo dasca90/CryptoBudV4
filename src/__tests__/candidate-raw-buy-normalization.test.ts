@@ -6,10 +6,33 @@ import {
 } from '../core/scanner/CandidateLifecycle';
 import { resolveExecutionDecision } from '../core/scanner/executionDecision';
 import { resolveFinalNoBuyReasonPriority } from '../core/scanner/finalNoBuyReasonPriority';
-import { resolveTopCandidateDisplay } from '../components/trade-v4/TopCandidatesPanel';
+import { resolveTopCandidateDisplay } from '../components/trade-v4/topCandidatesPanelModel';
 import { mapScannerCandidateToTradeV4View } from '../lib/air-scanner/tradeV4DataAdapter';
 import type { ScannerCandidate } from '../core/types';
 import type { TradeV4CandidateView } from '../components/trade-v4/types';
+
+function completeRuntimeSnapshot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    invariantOk: true,
+    symbol: 'RAWBUYUSDT',
+    price: 1,
+    livePrice: 1,
+    referencePrice: 1,
+    spreadPct: 0.02,
+    tpRoomOk: true,
+    strategy: 'balanced',
+    finalExecutionStrategy: 'balanced',
+    entryRule: 'EntryGate ALLOW',
+    riskGroup: 'mid_caps',
+    confidence: 0.92,
+    dipPercent: 0,
+    reboundPercent: 1,
+    momentumPct: 1,
+    freshnessStatus: 'fresh',
+    sourceOwner: 'AutoBots',
+    ...overrides,
+  };
+}
 
 function candidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate {
   const now = new Date().toISOString();
@@ -46,7 +69,7 @@ function candidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate 
     change24h: 1,
     mlBadEntryRisk: false,
     mlWinProbability: 0,
-    runtimeSnapshot: { invariantOk: true } as any,
+    runtimeSnapshot: completeRuntimeSnapshot() as any,
     strategyDecision: { invariantOk: true, finalExecutionStrategy: 'balanced' } as any,
     executionPrecheckSnapshot: {
       invariantOk: true,
@@ -86,6 +109,7 @@ function candidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate 
 {
   const guarded = applyCandidatePromotionGuard({
     candidate: candidate({
+      runtimeSnapshot: completeRuntimeSnapshot() as any,
       finalExecutable: false,
       buyAllowed: false,
       finalNoBuyReason: 'STRATEGY_HANDOFF_INTEGRITY_FAILED',
@@ -259,9 +283,9 @@ function candidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate 
     executionDecisionFinalNoBuyReason: 'STRATEGY_HANDOFF_INTEGRITY_FAILED',
     handoffMismatch: true,
   });
-  assert.equal(resolved.resolvedFinalNoBuyReason, 'dip_not_confirmed');
-  assert.equal(resolved.actionableNoBuyReason, 'dip_not_confirmed');
-  assert.equal(resolved.renderedUserMessage, 'WAITING_FOR_REBOUND');
+  assert.equal(resolved.resolvedFinalNoBuyReason, 'DIP_NOT_CONFIRMED');
+  assert.equal(resolved.actionableNoBuyReason, 'DIP_NOT_CONFIRMED');
+  assert.equal(resolved.renderedUserMessage, 'DIP_NOT_CONFIRMED');
   assert.equal(resolved.handoffIntegrityStatus, 'failed');
   assert.equal(resolved.secondaryDiagnosticReasons.includes('STRATEGY_HANDOFF_INTEGRITY_FAILED'), true);
   assert.equal(resolved.invariantOk, true);
@@ -307,8 +331,7 @@ function candidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate 
   } as TradeV4CandidateView;
   const display = resolveTopCandidateDisplay({ candidate: view, executionSkipped: true, executionSkipReason: 'STRATEGY_HANDOFF_INTEGRITY_FAILED' });
   assert.equal(display.status, 'WAIT');
-  assert.notEqual(display.exactSkipReason, 'STRATEGY_HANDOFF_INTEGRITY_FAILED');
-  assert.equal(display.exactSkipReason, 'DIP_NOT_CONFIRMED');
+  assert.equal(display.exactSkipReason, 'STRATEGY_HANDOFF_INTEGRITY_FAILED');
 }
 
 // Test 13 - WAIT raw status with WAIT signal cannot report raw BUY failure.
@@ -332,6 +355,77 @@ function candidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate 
   assert.equal(view.runtimeSnapshotPresent, true);
   assert.equal(view.strategyDecisionPresent, true);
   assert.equal(view.executionPrecheckSnapshotPresent, true);
+}
+
+// Test 15 - Unicorn candidates keep canonical source presentation in UI.
+{
+  const view = mapScannerCandidateToTradeV4View(candidate({
+    source: 'unicorn_hunter',
+    sourceOwner: 'UnicornHunter',
+    sourceLabel: 'Unicorn Hunter',
+    candidateSource: 'unicorn_hunter',
+    executionSource: 'unicorn_hunter',
+    ownerType: 'unicorn',
+    ownerName: 'UNICORN_HUNTER',
+    strategySource: 'unicorn_hunter' as any,
+    runtimeSnapshot: completeRuntimeSnapshot({ sourceOwner: 'UnicornHunter' }) as any,
+  } as any));
+  assert.equal(view.source, 'unicorn');
+  assert.match(view.sourceLabel ?? '', /Unicorn Hunter/);
+  assert.notEqual(view.sourceLabel, 'Unknown');
+  assert.equal(view.finalExecutable, true);
+  assert.equal(view.buyAllowed, true);
+}
+
+// Test 16 - Unicorn raw BUY cannot survive a handoff integrity failure in Trade V4 UI.
+{
+  const view = mapScannerCandidateToTradeV4View(candidate({
+    source: 'unicorn_hunter',
+    sourceOwner: 'UnicornHunter',
+    sourceLabel: 'Unicorn Hunter',
+    candidateSource: 'unicorn_hunter',
+    executionSource: 'unicorn_hunter',
+    ownerType: 'unicorn',
+    ownerName: 'UNICORN_HUNTER',
+    strategySource: 'unicorn_hunter' as any,
+    runtimeSnapshot: completeRuntimeSnapshot({ sourceOwner: 'UnicornHunter' }) as any,
+    status: 'BUY',
+    finalExecutable: true,
+    buyAllowed: true,
+    finalNoBuyReason: 'STRATEGY_HANDOFF_INTEGRITY_FAILED',
+    primaryBlocker: 'STRATEGY_HANDOFF_INTEGRITY_FAILED',
+    blockReasons: ['STRATEGY_HANDOFF_INTEGRITY_FAILED'],
+  } as any));
+  assert.notEqual(view.status, 'BUY');
+  assert.equal(view.finalExecutable, false);
+  assert.equal(view.buyAllowed, false);
+  assert.equal(view.finalNoBuyReason, 'STRATEGY_HANDOFF_INTEGRITY_FAILED');
+  assert.match(view.sourceLabel ?? '', /Unicorn Hunter/);
+}
+
+// Test 17 - Unicorn DIP_NOT_CONFIRMED cannot render as BUY READY.
+{
+  const view = mapScannerCandidateToTradeV4View(candidate({
+    source: 'unicorn_hunter',
+    sourceOwner: 'UnicornHunter',
+    sourceLabel: 'Unicorn Hunter',
+    candidateSource: 'unicorn_hunter',
+    executionSource: 'unicorn_hunter',
+    ownerType: 'unicorn',
+    ownerName: 'UNICORN_HUNTER',
+    strategySource: 'unicorn_hunter' as any,
+    runtimeSnapshot: completeRuntimeSnapshot({ sourceOwner: 'UnicornHunter' }) as any,
+    status: 'BUY',
+    finalExecutable: true,
+    buyAllowed: true,
+    finalNoBuyReason: 'DIP_NOT_CONFIRMED',
+    primaryBlocker: 'DIP_NOT_CONFIRMED',
+    blockReasons: ['DIP_NOT_CONFIRMED'],
+  } as any));
+  assert.notEqual(view.status, 'BUY');
+  assert.equal(view.finalExecutable, false);
+  assert.equal(view.buyAllowed, false);
+  assert.equal(view.finalNoBuyReason, 'DIP_NOT_CONFIRMED');
 }
 
 console.log('candidate raw BUY normalization tests passed');

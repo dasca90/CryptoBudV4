@@ -142,6 +142,7 @@ export type AutoBotsResolvedStrategySource =
   | 'AUTOBOTS_GROUP_FALLBACK'
   | 'AUTOBOTS_MARKET_FALLBACK'
   | 'AUTOBOTS_WAIT'
+  | 'UNICORN_HUNTER'
   | 'MANUAL'
   | 'SCANNER_ADVISORY'
   | 'DISABLED';

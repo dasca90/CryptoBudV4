@@ -26,6 +26,7 @@ export interface OvernightStabilitySnapshot {
   isStartupGracePeriodActive: boolean;
   lastMemoryBufferTrimAt: number | null;
   lastStartupRecoveryAt: number | null;
+  lastRuntimeCleanupAt: number | null;
   lastAirScannerCleanupAt: number | null;
   memoryStatus: OvernightMemoryStatus;
   updatedAt: number;
@@ -54,6 +55,7 @@ let latestSnapshot: OvernightStabilitySnapshot = {
   isStartupGracePeriodActive: true,
   lastMemoryBufferTrimAt: null,
   lastStartupRecoveryAt: null,
+  lastRuntimeCleanupAt: null,
   lastAirScannerCleanupAt: null,
   memoryStatus: 'Stable',
   updatedAt: bootedAt,
@@ -106,5 +108,5 @@ export function getOvernightStabilitySnapshot(): OvernightStabilitySnapshot {
 }
 
 export function formatOvernightStabilityAudit(snapshot: OvernightStabilitySnapshot): string {
-  return `OVERNIGHT_STABILITY_AUDIT: uptimeHours=${snapshot.uptimeHours.toFixed(2)} activeTab=${snapshot.activeTab} scannerRunning=${String(snapshot.scannerRunning)} autoBotsEnabled=${String(snapshot.autoBotsEnabled)} openPositionsCount=${snapshot.openPositionsCount} closedPositionsCount=${snapshot.closedPositionsCount} jsHeapUsed=${snapshot.jsHeapUsed ?? 'n/a'} visibleLogCount=${snapshot.visibleLogCount} internalAuditCount=${snapshot.internalAuditCount} airScannerMounted=${String(snapshot.airScannerMounted)} activeIntervalsCount=${snapshot.activeIntervalsCount} activeSubscriptionsCount=${snapshot.activeSubscriptionsCount} memoryPressureActive=${String(snapshot.memoryPressureActive)} memoryStatus=${snapshot.memoryStatus} pressureReason=${snapshot.pressureReason} memoryGrowthReason=${snapshot.memoryGrowthReason} memoryGrowthWarmupActive=${String(snapshot.memoryGrowthWarmupActive)} isStartupGracePeriodActive=${String(snapshot.isStartupGracePeriodActive)} lastMemoryBufferTrimAt=${snapshot.lastMemoryBufferTrimAt ?? 'never'} lastStartupRecoveryAt=${snapshot.lastStartupRecoveryAt ?? 'never'}`;
+  return `OVERNIGHT_STABILITY_AUDIT: uptimeHours=${snapshot.uptimeHours.toFixed(2)} activeTab=${snapshot.activeTab} scannerRunning=${String(snapshot.scannerRunning)} autoBotsEnabled=${String(snapshot.autoBotsEnabled)} openPositionsCount=${snapshot.openPositionsCount} closedPositionsCount=${snapshot.closedPositionsCount} jsHeapUsed=${snapshot.jsHeapUsed ?? 'n/a'} visibleLogCount=${snapshot.visibleLogCount} internalAuditCount=${snapshot.internalAuditCount} airScannerMounted=${String(snapshot.airScannerMounted)} activeIntervalsCount=${snapshot.activeIntervalsCount} activeSubscriptionsCount=${snapshot.activeSubscriptionsCount} memoryPressureActive=${String(snapshot.memoryPressureActive)} memoryStatus=${snapshot.memoryStatus} pressureReason=${snapshot.pressureReason} memoryGrowthReason=${snapshot.memoryGrowthReason} memoryGrowthWarmupActive=${String(snapshot.memoryGrowthWarmupActive)} isStartupGracePeriodActive=${String(snapshot.isStartupGracePeriodActive)} lastMemoryBufferTrimAt=${snapshot.lastMemoryBufferTrimAt ?? 'never'} lastStartupRecoveryAt=${snapshot.lastStartupRecoveryAt ?? 'never'} lastRuntimeCleanupAt=${snapshot.lastRuntimeCleanupAt ?? 'never'} lastAirScannerCleanupAt=${snapshot.lastAirScannerCleanupAt ?? 'never'}`;
 }

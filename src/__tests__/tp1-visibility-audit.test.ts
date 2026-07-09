@@ -165,14 +165,14 @@ async function main() {
     buySnapshot: makeOpen().buySnapshot,
     closeSnapshot: { exitReason: 'TP1_FIXED', tp1Percent: 0.17, tp1TargetPrice: 7.162155, tp1HitPrice: 7.162, closePriceSource: 'book_ticker', durationMs: 10000 },
   } as any);
-  ok(sell.includes('TP1 used') && sell.includes('TP1 target') && sell.includes('Hit price'), '7 telegram sell includes tp1 used/target/hit');
+  ok(sell.includes('Original plan') && sell.includes('TP1: 0.17%') && !sell.includes('TP1 target') && !sell.includes('Hit price'), '7 telegram sell is compact and omits tp1 audit details');
 
   const openPanelSrc = readFileSync('src/components/trade-v4/OpenPositionsPanel.tsx', 'utf8');
   const closedPanelSrc = readFileSync('src/components/trade-v4/ClosedPositionsPanel.tsx', 'utf8');
   const engineSrc = readFileSync('src/core/trading/TradingEngine.ts', 'utf8');
   ok(openPanelSrc.includes('TP1 Target') && openPanelSrc.includes('TP/SL Source'), '8 open panel has tp1 target/source columns');
   ok(closedPanelSrc.includes('TP1 Used') && closedPanelSrc.includes('TP1 Target') && closedPanelSrc.includes('TP1 Hit'), '9 closed panel has tp1 columns');
-  ok(engineSrc.includes('POSITION_RISK_SNAPSHOT_SAVED') && engineSrc.includes('tp1Pct: tp1PctAtEntry') && engineSrc.includes('Number(resolvedRisk.tp1)'), '10 engine saves canonical risk snapshot from resolvedRisk');
+  ok(engineSrc.includes('POSITION_RISK_SNAPSHOT_SAVED') && engineSrc.includes('source=resolvedRisk') && engineSrc.includes('Number(resolvedRisk.tp1)'), '10 engine saves canonical risk snapshot from resolvedRisk');
 
   console.log(`tp1-visibility-audit: ${p} passed, ${f} failed`);
   if (f > 0) process.exit(1);

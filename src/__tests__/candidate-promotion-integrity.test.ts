@@ -28,11 +28,10 @@ const runtime = resolveAutoBotsRuntimeState({
   marketScannerPaperAutoEnabled: true,
   paperAutoBuyFnPresent: true,
 });
-const runtimeSnapshot = buildCandidateRuntimeSnapshot({ scanId: 'scan_promotion', runtimeState: runtime });
 
 function base(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate {
   const now = new Date().toISOString();
-  return {
+  const candidate = {
     candidateId: 'cand_PROMOUSDT',
     symbol: 'PROMOUSDT',
     createdAt: now,
@@ -66,11 +65,22 @@ function base(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate {
     change24h: 0,
     mlBadEntryRisk: false,
     mlWinProbability: 0.8,
-    runtimeSnapshot,
+    runtimeSnapshot: undefined,
     autoBotsRuntimeState: runtime,
     professionalGateMode: 'advisory',
     professionalAnalysis: { professionalScore: 50, professionalVerdict: 'WAIT', professionalReasons: [], professionalBlockers: [] } as any,
     ...overrides,
+  } as ScannerCandidate;
+  if (Object.prototype.hasOwnProperty.call(overrides, 'runtimeSnapshot')) {
+    return candidate;
+  }
+  return {
+    ...candidate,
+    runtimeSnapshot: buildCandidateRuntimeSnapshot({
+      scanId: 'scan_promotion',
+      runtimeState: runtime,
+      candidate,
+    }),
   } as ScannerCandidate;
 }
 
@@ -160,13 +170,14 @@ function withPrecheck(candidate: ScannerCandidate, overrides: Partial<Parameters
   assert.equal(guarded.promotionAudit?.canPromoteToBuy, false);
 }
 
-// Test 5 - missing risk group cannot remain BUY.
+// Test 5 - missing risk group cannot remain BUY and invalidates runtime snapshot.
 {
   const c = withPrecheck(withDecision(base({ riskGroup: undefined })), { riskGroupResolved: false });
   const guarded = applyCandidatePromotionGuard({ candidate: c, scanId: 'scan_promotion', requestedNextStatus: 'BUY' });
-  assert.equal(guarded.status, 'WAIT_RISK_GROUP');
-  assert.equal(guarded.lifecycleStatus, 'WAIT_RISK_GROUP');
-  assert.equal(guarded.finalNoBuyReason, 'MISSING_RISK_GROUP');
+  assert.equal(guarded.status, 'WAIT_RUNTIME_STATE');
+  assert.equal(guarded.lifecycleStatus, 'WAIT_RUNTIME_STATE');
+  assert.equal(guarded.finalNoBuyReason, 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING');
+  assert.equal(guarded.primaryBlocker, 'CANDIDATE_RUNTIME_SNAPSHOT_MISSING');
 }
 
 // Test 6 - missing runtime snapshot cannot reach BUY.

@@ -11,7 +11,7 @@ const engineSrc = readFileSync(path.resolve(process.cwd(), 'src/core/trading/Tra
 ok(engineSrc.includes('RISK_GROUP_POSITION_LIMIT_AUDIT'), 'TradingEngine emits risk group position limit audit');
 
 // 2. Audit fields
-ok(engineSrc.includes('currentOpenPositionsInGroup=${groupExposuresSnapshot?.currentPositions'), 'audit exposes currentOpenPositionsInGroup');
+ok(engineSrc.includes('currentOpenPositionsInGroup='), 'audit exposes currentOpenPositionsInGroup');
 ok(engineSrc.includes('maxOpenPositionsInGroup=${maxGroupPos}'), 'audit exposes maxOpenPositionsInGroup');
 ok(engineSrc.includes('wouldExceedGroupLimit='), 'audit exposes wouldExceedGroupLimit');
 ok(engineSrc.includes('blockReason=${preAdapterRiskDecision.blockReasons'), 'audit exposes blockReason');

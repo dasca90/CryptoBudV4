@@ -5,8 +5,17 @@ import { evaluateTradeMLQuality } from '../ml/ml-data-quality';
 import { tauriDb, InMemoryStore, detectRuntime, checkDatabaseHealth, logFallbackOnce } from './TauriBridge';
 import type { DbStatus } from './TauriBridge';
 import { logger } from '../../utils/logger';
-
-type OpenPositionPersistenceRow = { trade_id: string; symbol: string; position_json: string; buy_snapshot_json: string | null };
+import {
+  buildOpenPositionPersistenceRows,
+  emergencyOpenPositionRows,
+  formatPersistenceStorageSizeAudit,
+  getCryptoBudStorageSizeAudit,
+  isQuotaExceededError,
+  OPEN_POSITIONS_MAX_PAYLOAD_BYTES,
+  pruneNonCriticalLocalStorageForQuota,
+  sanitizeOpenPositionRow,
+  type OpenPositionPersistenceRow,
+} from './localStorageMaintenance';
 
 export interface OpenPositionStoreReconciliationAudit {
   positionManagerOpenCount: number;
@@ -38,6 +47,7 @@ export class Journal {
   private closedTradesHydrated = false;
   private closingTradeIds = new Set<string>();
   private readonly resetMarkerKey = 'cryptobud_v4:reset_meta_v1';
+  private lastOpenPositionWriteOk = true;
 
   private readResetMarker(): { resetScope: string; resetAt: string; resetVersion: number } | null {
     try {
@@ -114,7 +124,87 @@ export class Journal {
     return [];
   }
 
-  private writeOpenPosFallback(rows: OpenPositionPersistenceRow[]): void {
+  private markPersistenceWriteFailed(message: string): void {
+    this.lastOpenPositionWriteOk = false;
+    this.persistenceStatus = 'ERROR';
+    this.saveError = message;
+  }
+
+  private markPersistenceWriteOk(): void {
+    this.lastOpenPositionWriteOk = true;
+    if (this.persistenceStatus === 'ERROR' && this.saveError?.includes('localStorage')) {
+      this.persistenceStatus = this.useTauri && this.tauriReady ? 'OK' : 'FALLBACK';
+      this.saveError = null;
+    }
+  }
+
+  private writeOpenPositionPayload(payload: string, targetKeyForAudit: string, rows: OpenPositionPersistenceRow[], reason: string): boolean {
+    const writeStartMs = Date.now();
+    const writeSizeBytes = new Blob([payload]).size;
+    const tradeIds = rows.map(r => r.trade_id).join('|') || 'none';
+    const symbols = rows.map(r => r.symbol).join('|') || 'none';
+    logger.info(formatPersistenceStorageSizeAudit({
+      reason,
+      targetKey: targetKeyForAudit,
+      payloadBytes: writeSizeBytes,
+    }));
+
+    const logWriteFailure = (failedKey: string, err: unknown): void => {
+      logger.error(formatPersistenceStorageSizeAudit({
+        reason: `${reason}_failed`,
+        targetKey: targetKeyForAudit,
+        payloadBytes: writeSizeBytes,
+        failedKey,
+        storageAudit: getCryptoBudStorageSizeAudit(),
+      }));
+      logger.error(`POSITION_PERSISTENCE_WRITE_AUDIT: reason=write_failed storageTarget=localStorage storageKey=${failedKey} writeSuccess=false error=${err instanceof Error ? err.message : String(err)} timestamp=${new Date().toISOString()}`);
+      this.markPersistenceWriteFailed(`localStorage open position write failed: ${err instanceof Error ? err.message : String(err)}`);
+    };
+
+    try {
+      localStorage.setItem(this.openPosBackupKey, payload);
+    } catch (err) {
+      logWriteFailure(this.openPosBackupKey, err);
+      throw err;
+    }
+
+    let backupVerified = false;
+    try {
+      const backupVerify = localStorage.getItem(this.openPosBackupKey);
+      backupVerified = backupVerify === payload;
+      if (!backupVerified) {
+        logger.error(`POSITION_PERSISTENCE_WRITE_AUDIT: reason=write_failed storageTarget=localStorage storageKey=${this.openPosBackupKey} writeSuccess=false backupVerified=false symbols=${symbols} tradeIds=${tradeIds} openCount=${rows.length} attempt=backup_write`);
+        this.markPersistenceWriteFailed('localStorage open position backup verification failed');
+        return false;
+      }
+
+      localStorage.setItem(this.openPosKey, payload);
+    } catch (err) {
+      logWriteFailure(this.openPosKey, err);
+      throw err;
+    }
+
+    try {
+      const primaryVerify = localStorage.getItem(this.openPosKey);
+      const primaryVerified = primaryVerify === payload;
+      const atomicVerified = backupVerified && primaryVerified;
+      const writeDurationMs = Date.now() - writeStartMs;
+      if (!primaryVerified) {
+        logger.error(`POSITION_PERSISTENCE_WRITE_AUDIT: reason=write_failed storageTarget=localStorage storageKey=${this.openPosKey} writeSuccess=false primaryVerified=false symbols=${symbols} tradeIds=${tradeIds} openCount=${rows.length} attempt=primary_write`);
+        this.markPersistenceWriteFailed('localStorage open position primary verification failed');
+        return false;
+      }
+      this.markPersistenceWriteOk();
+      logger.info(`POSITION_PERSISTENCE_WRITE_AUDIT: reason=${rows.length > 0 ? 'position_update' : 'empty_write_allowed'} openCount=${rows.length} symbols=${symbols} tradeIds=${tradeIds} writeSuccess=true writeSizeBytes=${writeSizeBytes} hydrationComplete=${String(this.openPositionsHydrated)} targetStorage=localStorage atomicVerified=${String(atomicVerified)} writeDurationMs=${writeDurationMs} timestamp=${new Date().toISOString()}`);
+      logger.info(`PERSISTENCE_PERFORMANCE_AUDIT: reason=open_positions_write writeDurationMs=${writeDurationMs} payloadSizeBytes=${writeSizeBytes} atomicVerified=${String(atomicVerified)} uiThreadBlocked=false`);
+      return true;
+    } catch (err) {
+      logWriteFailure(this.openPosKey, err);
+      throw err;
+    }
+  }
+
+  private writeOpenPosFallback(rows: OpenPositionPersistenceRow[]): boolean {
     try {
       if (!this.openPositionsHydrated && rows.length === 0) {
         const existingPrimary = localStorage.getItem(this.openPosKey);
@@ -123,32 +213,59 @@ export class Journal {
         const backupCount = existingBackup ? (JSON.parse(existingBackup) as any[]).length : 0;
         if (primaryCount > 0 || backupCount > 0) {
           logger.error(`POSITION_EMPTY_OVERWRITE_BLOCKED: mode=demo storageKey=${this.openPosKey} attemptedOpenCount=0 existingPrimaryOpenCount=${primaryCount} existingBackupOpenCount=${backupCount} hydrationComplete=${String(this.openPositionsHydrated)} reason=empty_overwrite_blocked_before_hydration`);
-          return;
+          return false;
         }
       }
-      const writeStartMs = Date.now();
-      const payload = JSON.stringify(rows);
-      const writeSizeBytes = new Blob([payload]).size;
+      const sanitizedRows = rows.map((row) => sanitizeOpenPositionRow(row));
+      const originalPayload = JSON.stringify(rows);
+      const originalSizeBytes = new Blob([originalPayload]).size;
+      let payload = JSON.stringify(sanitizedRows);
+      let writeRows = sanitizedRows;
+      let writeSizeBytes = new Blob([payload]).size;
       const tradeIds = rows.map(r => r.trade_id).join('|') || 'none';
       const symbols = rows.map(r => r.symbol).join('|') || 'none';
+      if (originalSizeBytes !== writeSizeBytes) {
+        logger.warn(`OPEN_POSITION_PERSISTENCE_NORMALIZED_AUDIT: openCount=${rows.length} symbols=${symbols} tradeIds=${tradeIds} originalPayloadBytes=${originalSizeBytes} normalizedPayloadBytes=${writeSizeBytes} strippedBytes=${Math.max(0, originalSizeBytes - writeSizeBytes)} canonicalDefaultsAddedBytes=${Math.max(0, writeSizeBytes - originalSizeBytes)} strippedHeavyFields=scannerSnapshots|logs|candleHistory|mlTrainingRows|auditTrails|uiOnlyState|closedTrades`);
+      }
+      if (writeSizeBytes > OPEN_POSITIONS_MAX_PAYLOAD_BYTES) {
+        logger.error(`OPEN_POSITION_PERSISTENCE_PAYLOAD_TOO_LARGE: openCount=${rows.length} symbols=${symbols} tradeIds=${tradeIds} payloadSizeBytes=${writeSizeBytes} maxPayloadSizeBytes=${OPEN_POSITIONS_MAX_PAYLOAD_BYTES} action=strip_non_critical_fields rootCause=position_records_contain_heavy_or_duplicated_state`);
+        writeRows = emergencyOpenPositionRows(sanitizedRows);
+        payload = JSON.stringify(writeRows);
+        writeSizeBytes = new Blob([payload]).size;
+      }
 
-      // Atomic write: backup first, verify, then primary
-      localStorage.setItem(this.openPosBackupKey, payload);
-      const backupVerify = localStorage.getItem(this.openPosBackupKey);
-      const backupVerified = backupVerify === payload;
-      if (backupVerified) {
-        localStorage.setItem(this.openPosKey, payload);
-        const primaryVerify = localStorage.getItem(this.openPosKey);
-        const primaryVerified = primaryVerify === payload;
-        const atomicVerified = backupVerified && primaryVerified;
-        const writeDurationMs = Date.now() - writeStartMs;
-        logger.info(`POSITION_PERSISTENCE_WRITE_AUDIT: reason=${rows.length > 0 ? 'position_update' : 'empty_write_allowed'} openCount=${rows.length} symbols=${symbols} tradeIds=${tradeIds} writeSuccess=true writeSizeBytes=${writeSizeBytes} hydrationComplete=${String(this.openPositionsHydrated)} targetStorage=localStorage atomicVerified=${String(atomicVerified)} writeDurationMs=${writeDurationMs} timestamp=${new Date().toISOString()}`);
-        logger.info(`PERSISTENCE_PERFORMANCE_AUDIT: reason=open_positions_write writeDurationMs=${writeDurationMs} payloadSizeBytes=${writeSizeBytes} atomicVerified=${String(atomicVerified)} uiThreadBlocked=false`);
-      } else {
-        logger.error(`POSITION_PERSISTENCE_WRITE_AUDIT: reason=write_failed storageTarget=localStorage storageKey=${this.openPosBackupKey} writeSuccess=false backupVerified=false symbols=${symbols} tradeIds=${tradeIds} openCount=${rows.length} attempt=backup_write`);
+      try {
+        return this.writeOpenPositionPayload(payload, this.openPosBackupKey, writeRows, 'open_positions_critical_write');
+      } catch (err) {
+        if (!isQuotaExceededError(err)) return false;
+        const prune = pruneNonCriticalLocalStorageForQuota('open_positions_critical_write_quota_exceeded');
+        logger.warn(`PERSISTENCE_QUOTA_RECOVERY_AUDIT: reason=open_positions_critical_write_quota_exceeded phase=retry_after_prune storageKey=${this.openPosBackupKey} openCount=${writeRows.length} symbols=${symbols} tradeIds=${tradeIds} prunedKeys=${prune.removedKeys.join('|') || 'none'} trimmedKeys=${prune.trimmedKeys.join('|') || 'none'}`);
+        try {
+          const retryOk = this.writeOpenPositionPayload(payload, this.openPosBackupKey, writeRows, 'open_positions_retry_after_quota_prune');
+          if (retryOk) {
+            logger.warn(`PERSISTENCE_QUOTA_RECOVERY_AUDIT: reason=open_positions_critical_write_quota_exceeded phase=recovered_after_prune writeSuccess=true storageKey=${this.openPosBackupKey} openCount=${writeRows.length}`);
+            return true;
+          }
+        } catch (retryErr) {
+          if (!isQuotaExceededError(retryErr)) return false;
+        }
+
+        const emergencyRows = emergencyOpenPositionRows(writeRows);
+        const emergencyPayload = JSON.stringify(emergencyRows);
+        try {
+          const emergencyOk = this.writeOpenPositionPayload(emergencyPayload, this.openPosBackupKey, emergencyRows, 'open_positions_emergency_snapshot_after_quota');
+          logger.warn(`PERSISTENCE_QUOTA_RECOVERY_AUDIT: reason=open_positions_critical_write_quota_exceeded phase=emergency_snapshot writeSuccess=${String(emergencyOk)} emergencyPayloadBytes=${new Blob([emergencyPayload]).size} storageKey=${this.openPosBackupKey} openCount=${emergencyRows.length}`);
+          return emergencyOk;
+        } catch (emergencyErr) {
+          logger.error(`PERSISTENCE_QUOTA_RECOVERY_AUDIT: reason=open_positions_critical_write_quota_exceeded phase=failed_after_emergency_snapshot writeSuccess=false storageKey=${this.openPosBackupKey} error=${emergencyErr instanceof Error ? emergencyErr.message : String(emergencyErr)} appHealth=degraded`);
+          this.markPersistenceWriteFailed(`localStorage emergency open position snapshot failed: ${emergencyErr instanceof Error ? emergencyErr.message : String(emergencyErr)}`);
+          return false;
+        }
       }
     } catch (err) {
       logger.error(`POSITION_PERSISTENCE_WRITE_AUDIT: reason=write_failed storageTarget=localStorage storageKey=${this.openPosKey} writeSuccess=false error=${err instanceof Error ? err.message : String(err)} timestamp=${new Date().toISOString()}`);
+      this.markPersistenceWriteFailed(`localStorage open position write failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
     }
   }
 
@@ -435,15 +552,7 @@ export class Journal {
   }
 
   async reconcileOpenPositionsToPositionManager(positions: Position[], reconciliationSource: string): Promise<OpenPositionStoreReconciliationAudit> {
-    const canonicalRows: OpenPositionPersistenceRow[] = positions.map((p) => {
-      const tradeId = p.tradeId ?? p.buySnapshot?.tradeId ?? `${p.coin}-${p.openedAt}`;
-      return {
-        trade_id: tradeId,
-        symbol: p.coin,
-        position_json: JSON.stringify({ ...p, tradeId }),
-        buy_snapshot_json: p.buySnapshot ? JSON.stringify(p.buySnapshot) : null,
-      };
-    });
+    const canonicalRows: OpenPositionPersistenceRow[] = buildOpenPositionPersistenceRows(positions);
     const canonicalIds = new Set(canonicalRows.map(r => r.trade_id));
     const canonicalSymbols = new Set(canonicalRows.map(r => r.symbol));
     const existingRows = this.filterClosedFromOpen(await this.loadOpenPositions());
@@ -574,47 +683,60 @@ export class Journal {
     return { openPrimaryCount, openBackupCount, closedPrimaryCount, closedBackupCount, tauriOpenCount, tauriTradeCount };
   }
 
-  async saveOpenPosition(tradeId: string, symbol: string, positionJson: string, buySnapshotJson?: string): Promise<void> {
+  async saveOpenPosition(tradeId: string, symbol: string, positionJson: string, buySnapshotJson?: string): Promise<boolean> {
     if (!this.openPositionsHydrated) {
       logger.warn(`POSITION_PERSISTENCE_WRITE_BLOCKED_BEFORE_HYDRATION: mode=demo storageKey=${this.openPosKey} backupKey=${this.openPosBackupKey} attemptedWrite=open_position_save symbol=${symbol} hydrationComplete=false reason=boot_not_hydrated`);
-      return;
+      return false;
     }
     const existing = await this.loadOpenPositions();
     const next = [...existing.filter(p => p.trade_id !== tradeId), { trade_id: tradeId, symbol, position_json: positionJson, buy_snapshot_json: buySnapshotJson ?? null }];
-    this.writeOpenPosFallback(next);
-    if (!this.useTauri || !this.tauriReady) return;
+    const fallbackOk = this.writeOpenPosFallback(next);
+    if (!this.useTauri || !this.tauriReady) return fallbackOk;
     try {
-      await tauriDb.saveOpenPosition(tradeId, symbol, positionJson, buySnapshotJson);
+      const sanitized = sanitizeOpenPositionRow({ trade_id: tradeId, symbol, position_json: positionJson, buy_snapshot_json: buySnapshotJson ?? null });
+      await tauriDb.saveOpenPosition(tradeId, symbol, sanitized.position_json, sanitized.buy_snapshot_json ?? undefined);
+      return fallbackOk;
     } catch (err) {
       logger.warn(`PERSISTENCE_SAVE_OPEN_POSITION_FAILED: ${symbol} - ${err instanceof Error ? err.message : String(err)}`);
+      return false;
     }
   }
 
-  async deleteOpenPosition(tradeId: string): Promise<void> {
+  async deleteOpenPosition(tradeId: string): Promise<boolean> {
     if (!this.openPositionsHydrated) {
       logger.warn(`POSITION_PERSISTENCE_WRITE_BLOCKED_BEFORE_HYDRATION: mode=demo storageKey=${this.openPosKey} backupKey=${this.openPosBackupKey} attemptedWrite=open_position_delete tradeId=${tradeId} hydrationComplete=false reason=boot_not_hydrated`);
-      return;
+      return false;
     }
     const existing = await this.loadOpenPositions();
     const deleted = existing.find(p => p.trade_id === tradeId);
-    this.writeOpenPosFallback(existing.filter(p => p.trade_id !== tradeId));
+    const fallbackOk = this.writeOpenPosFallback(existing.filter(p => p.trade_id !== tradeId));
     const closedRecord = this.getClosedTrades().find(t => t.tradeId === tradeId);
     const removalAllowed = !!closedRecord && closedRecord.status === 'closed';
     const reason = removalAllowed ? 'sell_confirmed_closed_record_exists' : 'no_closed_record';
-    logger.info(`OPEN_POSITION_REMOVAL_INVARIANT: symbol=${deleted?.symbol ?? 'n/a'} positionId=${tradeId} removalReason=${reason} sellConfirmed=${String(!!closedRecord)} closedRecordCreated=${String(!!closedRecord && closedRecord.status === 'closed')} persistenceConfirmed=true allowed=${String(removalAllowed)}`);
+    logger.info(`OPEN_POSITION_REMOVAL_INVARIANT: symbol=${deleted?.symbol ?? 'n/a'} positionId=${tradeId} removalReason=${reason} sellConfirmed=${String(!!closedRecord)} closedRecordCreated=${String(!!closedRecord && closedRecord.status === 'closed')} persistenceConfirmed=${String(fallbackOk)} allowed=${String(removalAllowed)}`);
     if (!removalAllowed) {
       logger.warn(`OPEN_POSITION_REMOVAL_WITHOUT_CLOSED_RECORD: tradeId=${tradeId} symbol=${deleted?.symbol ?? 'n/a'} action=removed_anyway_pending_closed_record investigationNeeded=${String(!closedRecord)}`);
     }
-    if (!this.useTauri || !this.tauriReady) return;
+    if (!this.useTauri || !this.tauriReady) return fallbackOk;
     try {
       await tauriDb.deleteOpenPosition(tradeId);
+      return fallbackOk;
     } catch (err) {
       logger.warn(`PERSISTENCE_DELETE_OPEN_POSITION_FAILED: ${tradeId} - ${err instanceof Error ? err.message : String(err)}`);
+      return false;
     }
   }
 
   async loadOpenPositions(): Promise<OpenPositionPersistenceRow[]> {
-    if (!this.useTauri || !this.tauriReady) return this.readOpenPosFallback();
+    if (!this.useTauri || !this.tauriReady) {
+      const fallback = this.filterClosedFromOpen(this.readOpenPosFallback());
+      const sanitized = fallback.map((row) => sanitizeOpenPositionRow(row));
+      const changed = JSON.stringify(fallback) !== JSON.stringify(sanitized);
+      if (changed && (this.openPositionsHydrated || sanitized.length > 0)) {
+        this.writeOpenPosFallback(sanitized);
+      }
+      return sanitized;
+    }
     try {
       const rows = await tauriDb.getOpenPositions();
       if (rows.length === 0) {
@@ -622,23 +744,40 @@ export class Journal {
         if (fallback.length > 0) {
           logger.warn(`POSITION_PERSISTENCE_MISMATCH: mode=demo storageKey=${this.openPosKey} backupKey=${this.openPosBackupKey} persistedOpenCount=0 backupOpenCount=${fallback.length} hydrationComplete=${String(this.openPositionsHydrated)} reason=primary_empty_backup_nonempty`);
         }
-        return this.filterClosedFromOpen(fallback);
+        const filtered = this.filterClosedFromOpen(fallback);
+        return filtered.map((row) => sanitizeOpenPositionRow(row));
       }
-      this.writeOpenPosFallback(rows);
-      return this.filterClosedFromOpen(rows);
+      const filtered = this.filterClosedFromOpen(rows, false);
+      if (filtered.length < rows.length) {
+        const keptIds = new Set(filtered.map((row) => row.trade_id));
+        const removedRows = rows.filter((row) => !keptIds.has(row.trade_id));
+        for (const removed of removedRows) {
+          try {
+            await tauriDb.deleteOpenPosition(removed.trade_id);
+          } catch (deleteErr) {
+            logger.error(`POSITION_OPEN_CLOSED_CONFLICT_DB_DELETE_FAILED: tradeId=${removed.trade_id} symbol=${removed.symbol} error=${deleteErr instanceof Error ? deleteErr.message : String(deleteErr)} source=tauri_sqlite`);
+          }
+        }
+        logger.warn(`POSITION_OPEN_CLOSED_CONFLICT_PERSISTED_REPAIR: openCountBefore=${rows.length} openCountAfter=${filtered.length} removedTradeIds=${removedRows.map(r => r.trade_id).join('|') || 'none'} removedSymbols=${removedRows.map(r => r.symbol).join('|') || 'none'} storageTarget=tauri_sqlite action=deleted_closed_rows_from_open_positions`);
+      }
+      this.writeOpenPosFallback(filtered);
+      return filtered.map((row) => sanitizeOpenPositionRow(row));
     } catch (err) {
       logger.warn(`PERSISTENCE_LOAD_OPEN_POSITIONS_FAILED: storageKey=${this.openPosKey} backupKey=${this.openPosBackupKey} error=${err instanceof Error ? err.message : String(err)}`);
       return this.filterClosedFromOpen(this.readOpenPosFallback());
     }
   }
 
-  private filterClosedFromOpen(rows: OpenPositionPersistenceRow[]): OpenPositionPersistenceRow[] {
+  private filterClosedFromOpen(rows: OpenPositionPersistenceRow[], persistFallbackRepair = true): OpenPositionPersistenceRow[] {
     if (rows.length === 0) return rows;
     const closedTradeIds = new Set(this.getClosedTrades().map(t => t.tradeId).filter(Boolean));
     const filtered = rows.filter(r => !closedTradeIds.has(r.trade_id));
     if (filtered.length < rows.length) {
       const removed = rows.filter(r => closedTradeIds.has(r.trade_id));
       logger.warn(`POSITION_OPEN_CLOSED_CONFLICT_REPAIRED: openCountBefore=${rows.length} openCountAfter=${filtered.length} removedTradeIds=${removed.map(r => r.trade_id).join('|')} removedSymbols=${removed.map(r => r.symbol).join('|')} action=filtered_closed_from_open_persistence`);
+      if (persistFallbackRepair && (this.openPositionsHydrated || filtered.length > 0)) {
+        this.writeOpenPosFallback(filtered);
+      }
     }
     return filtered;
   }
@@ -676,6 +815,10 @@ export class Journal {
     return this.closedTradesHydrated;
   }
 
+  wasLastOpenPositionWriteSuccessful(): boolean {
+    return this.lastOpenPositionWriteOk;
+  }
+
   async exportJson(): Promise<string> {
     return JSON.stringify({
       exportedAt: new Date().toISOString(),
@@ -688,6 +831,14 @@ export class Journal {
         adapter: t.adapter,
         entryPrice: t.entryPrice, exitPrice: t.exitPrice,
         quantity: t.quantity, pnl: t.pnl, pnlPercent: t.pnlPercent,
+        grossPnlUsd: t.grossPnlUsd ?? t.closeSnapshot?.grossPnlUsd ?? t.pnl ?? null,
+        netPnlUsd: t.netPnlUsd ?? t.closeSnapshot?.netPnlUsd ?? (typeof t.pnl === 'number' ? t.pnl - (t.closeSnapshot?.fees ?? 0) : null),
+        feeUsdEntry: t.feeUsdEntry ?? t.closeSnapshot?.feeUsdEntry ?? (t.buySnapshot as any)?.feeUsdEntry ?? null,
+        feeUsdExit: t.feeUsdExit ?? t.closeSnapshot?.feeUsdExit ?? null,
+        feeUsdTotal: t.feeUsdTotal ?? t.closeSnapshot?.feeUsdTotal ?? t.closeSnapshot?.fees ?? null,
+        feeRate: t.feeRate ?? t.closeSnapshot?.feeRate ?? (t.buySnapshot as any)?.feeRate ?? null,
+        feeSource: t.feeSource ?? t.closeSnapshot?.feeSource ?? (t.buySnapshot as any)?.feeSource ?? null,
+        operatorName: t.operatorName ?? t.closeSnapshot?.operatorName ?? (t.buySnapshot as any)?.operatorName ?? null,
         entryTime: t.entryTime, exitTime: t.exitTime,
         status: t.status,
         strategy: t.strategy,

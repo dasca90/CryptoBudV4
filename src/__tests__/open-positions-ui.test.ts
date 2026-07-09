@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { PositionManager } from '../core/positions/PositionManager';
-import { buildTradeV4PageModel } from '../lib/air-scanner/tradeV4DataAdapter';
+import { buildTradeV4PageModel, mapTradeRecordToClosedPositionView } from '../lib/air-scanner/tradeV4DataAdapter';
 import type { Position, TradeRecord } from '../core/types';
 import { logger } from '../utils/logger';
-import { V3_OPEN_POSITION_COLUMNS } from '../components/trade-v4/OpenPositionsPanel';
+import { OPEN_POSITION_COLUMNS, OPEN_POSITION_DETAILED_COLUMNS } from '../components/trade-v4/openPositionsPanelModel';
 
 let passed = 0;
 let failed = 0;
@@ -137,6 +137,14 @@ function makeClosedTrade(symbol = 'OLDUSDT'): TradeRecord {
   } as TradeRecord;
 }
 
+function makeLegacyClosedTrade(symbol = 'LEGOLDUSDT'): TradeRecord {
+  const trade = makeClosedTrade(symbol);
+  trade.entryTime = '2025-05-01T00:00:00.000Z';
+  trade.exitTime = '2025-05-01T00:10:00.000Z';
+  delete (trade as any).buySnapshot;
+  return trade;
+}
+
 function main() {
   logger.clear();
   const pm = new PositionManager();
@@ -183,6 +191,7 @@ function main() {
   (legacyNoSnapshot as any).buySnapshot = undefined;
 
   const missingSetupNew = makeBaseOpenPosition('MISSUSDT', 'balanced');
+  (missingSetupNew.buySnapshot as any).createdAt = new Date().toISOString();
   ((missingSetupNew.buySnapshot as any).entryConfigSnapshot.strategyAuditSnapshot.setupMetrics as any[]) = [];
   (missingSetupNew.buySnapshot as any).traderBrainDecision.ruleDecisionTrace = {};
 
@@ -224,6 +233,7 @@ function main() {
   const dr = bySymbol('DRUSDT');
   const mom = bySymbol('MOMUSDT');
   const legacy = bySymbol('LEGACYUSDT');
+  const missingSetup = bySymbol('MISSUSDT');
   const bugRisk = bySymbol('BUGRISKUSDT');
   const badTp1 = bySymbol('BADTP1USDT');
 
@@ -244,15 +254,17 @@ function main() {
 
   const panelPath = path.resolve(process.cwd(), 'src/components/trade-v4/OpenPositionsPanel.tsx');
   const panelSource = readFileSync(panelPath, 'utf8');
-  ok(JSON.stringify(V3_OPEN_POSITION_COLUMNS) === JSON.stringify(['Symbol','State','Strategy','Trend','Qty','Entry Value','Dip','Rebound','PnL%','Unrealized','Risk','TP1 (%)','TP2 (%)','Stop (%)','Entry','Ref','Last','Stop Trigger','Decision','Owner','Opened At','Hold']), '15 V3 open default column order exactly');
-  ok(panelSource.includes('V4_OPEN_DETAILED_COLUMNS') && panelSource.includes('"Setup Result"') && panelSource.includes('"Why"') && panelSource.includes('"Rebound/Req"'), '15a setup/debug columns exist only in detailed column group');
-  const defaultColumnBlock = panelSource.slice(panelSource.indexOf('export const V3_OPEN_POSITION_COLUMNS'), panelSource.indexOf('const V4_OPEN_DETAILED_COLUMNS'));
-  ok(!defaultColumnBlock.includes('Setup Result') && !defaultColumnBlock.includes('Why') && !defaultColumnBlock.includes('Rebound/Req') && !defaultColumnBlock.includes('Mom'), '15b default V3 open columns do not include debug/setup junk');
+  ok(JSON.stringify(OPEN_POSITION_COLUMNS) === JSON.stringify(['Symbol','State','Strategy','Trend','Qty','Entry Value','Entry Fee $','Est. Exit Fee $','Dip','Rebound','PnL%','Unrealized','Risk','TP1 (%)','TP2 (%)','Stop (%)','Entry','Ref','Last','Stop Trigger','Decision','Owner','Opened At','Hold']), '15 V4 open default column order exactly');
+  ok(OPEN_POSITION_DETAILED_COLUMNS.includes('Setup Result') && OPEN_POSITION_DETAILED_COLUMNS.includes('Why') && OPEN_POSITION_DETAILED_COLUMNS.includes('Rebound/Req'), '15a setup/debug columns exist only in detailed column group');
+  const modelSource = readFileSync(path.resolve(process.cwd(), 'src/components/trade-v4/openPositionsPanelModel.ts'), 'utf8');
+  const defaultColumnBlock = modelSource.slice(modelSource.indexOf('export const OPEN_POSITION_COLUMNS'), modelSource.indexOf('export const OPEN_POSITION_DETAILED_COLUMNS'));
+  ok(!defaultColumnBlock.includes('Setup Result') && !defaultColumnBlock.includes('Why') && !defaultColumnBlock.includes('Rebound/Req') && !defaultColumnBlock.includes('Mom'), '15b default V4 open columns do not include debug/setup junk');
   ok(panelSource.includes('v3-positions-window') && panelSource.includes('v3-scrollbar-strip') && panelSource.includes('Open Positions'), '15c open panel uses V3 visual shell/title/scroll strip');
   ok(panelSource.includes('OPEN_POSITION_UI_CELL_AUDIT') && panelSource.includes('BUG: TP1 INVALID'), '15d OpenPositionsPanel audits TP1 cell and never silently displays invalid TP1 as 0.00');
 
   const exported = logger.export();
-  ok(exported.includes('POSITION_STRATEGY_SETUP_MISSING_BUG') && exported.includes('MISSUSDT'), '16 missing setup metrics for new position logs bug');
+  ok(missingSetup.snapshotStatus === 'VALID_SNAPSHOT' && String(missingSetup.strategySetupSource ?? '').includes('entryConfigSnapshot'), '16 valid canonical snapshot without setupMetrics binds setup from entryConfigSnapshot');
+  ok(!exported.includes('POSITION_STRATEGY_SETUP_MISSING_BUG: symbol=MISSUSDT'), '16a valid snapshot does not emit POSITION_STRATEGY_SETUP_MISSING_BUG');
   ok((legacy.strategySetupSummary ?? '').includes('N/A') && legacy.strategy.includes('LEGACY') && legacy.snapshotStatus === 'LEGACY_MISSING_SNAPSHOT', '17 legacy position shows missing strategy setup, not fake values');
 
   ok(panelSource.includes('setDiagRow(p)') && panelSource.includes('{diagRow && ('), '18 inspect drawer opens from open row');
@@ -291,6 +303,13 @@ function main() {
   ok(badTp1.riskSnapshotStatus === 'BUG_TP1_INVALID' && badTp1.tp1Pct === null && badTp1.tp1TargetPrice === null, '51 new AutoBots invalid TP1 snapshot is marked BUG_TP1_INVALID and does not display 0.00');
   ok(exported.includes('OPEN_POSITION_RENDER_ROW_AUDIT') && exported.includes('BADTP1USDT') && exported.includes('rawSnapshotTp1Pct=0') && exported.includes('displayedTp1Pct=BUG_TP1_INVALID_OR_MISSING'), '52 render row audit exposes raw TP1=0 vs safe displayed bug state');
   ok(exported.includes('UI_TP1_BINDING_BUG') && exported.includes('BADTP1USDT'), '53 invalid runtime TP1 emits UI_TP1_BINDING_BUG');
+
+  const legacyClosed = mapTradeRecordToClosedPositionView(makeLegacyClosedTrade());
+  mapTradeRecordToClosedPositionView(makeLegacyClosedTrade());
+  const afterLegacyClosedExport = logger.export();
+  ok(legacyClosed.snapshotStatus === 'LEGACY_MISSING_SNAPSHOT' && legacyClosed.riskSnapshotStatus === 'LEGACY_PRE_FIX', '54 legacy closed missing snapshot is classified as legacy pre-schema');
+  ok(afterLegacyClosedExport.includes('legacySnapshotStatus=LEGACY_INCOMPLETE_PRE_SNAPSHOT_SCHEMA'), '55 legacy closed missing snapshot emits legacy classification instead of new-position bug');
+  ok(!afterLegacyClosedExport.includes('tradeId=closed_LEGOLDUSDT note=SNAPSHOT_MISSING legacySnapshotStatus=BUG_MISSING_SNAPSHOT_NEW_POSITION'), '56 legacy closed trade does not pollute runtime health as new missing snapshot');
 
   const adapterSrc = readFileSync(path.resolve(process.cwd(), 'src/lib/air-scanner/tradeV4DataAdapter.ts'), 'utf8');
   const tradePageSrc = readFileSync(path.resolve(process.cwd(), 'src/ui/pages/TradePage.tsx'), 'utf8');

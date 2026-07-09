@@ -1,16 +1,152 @@
 ﻿import type { CloseSnapshot, Position, ScannerCandidate, ScannerSnapshot, TradeRecord } from "../../core/types";
 import type { TradeV4CandidateView, TradeV4ClosedPositionView, TradeV4OpenPositionView, TradeV4PageModel } from "../../components/trade-v4/types";
 import { logger } from "../../utils/logger";
-import { resolveTradeSourceLabel } from "../../core/notifications/trade-source";
+import { getTradeSourcePresentation, resolveTradeSourceLabel } from "../../core/notifications/trade-source";
 import { computeAutoTp } from "../../core/scanner/AutoTpCalculator";
+import { normalizeCandidateDisplayStatus } from "../../core/scanner/CandidateLifecycle";
 import { buildStrategyAuditSnapshotFromCandidate } from "../../core/strategy-audit/strategy-audit-builder";
 import { logStrategyAudit } from "../../core/strategy-audit/strategy-audit-logger";
 import { getExecutionAdapterDisplay, getExecutionModeDisplay } from "../execution/executionDisplay";
 import { getStalePriceAgeMs } from "../../core/market-data/market-data-quality";
+import { buildClosedFeeAccounting, buildOpenFeeEstimate } from "../../core/accounting/feeAccounting";
 
 function toDataQuality(v?: string): "GOOD" | "MEDIUM" | "BAD" | "UNKNOWN" {
   if (v === "GOOD" || v === "MEDIUM" || v === "BAD") return v;
   return "UNKNOWN";
+}
+
+function isUnicornCandidateMeta(candidate: ScannerCandidate): boolean {
+  const c = candidate as any;
+  return [
+    c.source,
+    c.sourceOwner,
+    c.sourceLabel,
+    c.ownerName,
+    c.ownerType,
+    c.candidateSource,
+    c.executionSource,
+    c.executionOwner,
+    c.positionOwner,
+    candidate.strategySource,
+    candidate.runtimeSnapshot?.sourceOwner,
+    c.scannerAutoEntryConfigSnapshot?.source,
+    c.scannerAutoEntryConfigSnapshot?.ownerName,
+    c.scannerAutoEntryConfigSnapshot?.strategySource,
+  ].some((value) => String(value ?? '').toLowerCase().includes('unicorn'));
+}
+
+function includesSourceToken(values: unknown[], token: string): boolean {
+  const expected = token.toLowerCase();
+  return values.some((value) => String(value ?? '').toLowerCase().includes(expected));
+}
+
+function buildCandidateSourceMeta(candidate: ScannerCandidate): Record<string, unknown> {
+  const c = candidate as any;
+  const runtimeSourceOwner = candidate.runtimeSnapshot?.sourceOwner ?? c.sourceOwner;
+  const strategySource = candidate.strategySource
+    ?? c.autoStrategyDecision?.strategySource
+    ?? candidate.runtimeSnapshot?.strategySourceResolved
+    ?? c.scannerAutoEntryConfigSnapshot?.strategySource;
+  const sourceHints = [
+    c.source,
+    c.candidateSource,
+    c.executionSource,
+    c.executionOwner,
+    c.positionOwner,
+    c.ownerName,
+    c.ownerType,
+    c.sourceOwner,
+    runtimeSourceOwner,
+    strategySource,
+    candidate.strategySource,
+    c.strategySourceDetail,
+    c.autoStrategyDecision?.strategySource,
+    c.scannerAutoEntryConfigSnapshot?.source,
+    c.scannerAutoEntryConfigSnapshot?.ownerName,
+    c.scannerAutoEntryConfigSnapshot?.strategySource,
+  ];
+  const isUnicorn = isUnicornCandidateMeta(candidate);
+  const isMl = includesSourceToken(sourceHints, 'ml_predict') || includesSourceToken(sourceHints, 'ml predict');
+  const isMicro = includesSourceToken(sourceHints, 'micro') || includesSourceToken(sourceHints, 'scalp');
+  const isManual = includesSourceToken(sourceHints, 'manual');
+  const isScannerAuto = !isUnicorn
+    && !isMl
+    && !isMicro
+    && !isManual
+    && (
+      includesSourceToken(sourceHints, 'autobots')
+      || includesSourceToken(sourceHints, 'scanner')
+      || includesSourceToken(sourceHints, 'dipper')
+      || String(runtimeSourceOwner ?? '').toLowerCase() === 'autobots'
+      || String(c.candidateBirthSource ?? '').toLowerCase().includes('scanner')
+    );
+  const canonicalSource = isUnicorn
+    ? 'unicorn_hunter'
+    : isMl
+      ? 'ML_PREDICT_BUY'
+      : isMicro
+        ? 'micro_scalper'
+        : isManual
+          ? 'manual'
+          : isScannerAuto
+            ? 'autobots'
+            : c.source ?? c.candidateSource ?? strategySource;
+  const canonicalOwnerName = isUnicorn
+    ? 'UNICORN_HUNTER'
+    : isMl
+      ? 'ML Predict Buy'
+      : isMicro
+        ? 'Micro Scalping'
+        : isManual
+          ? 'Manual'
+          : isScannerAuto
+            ? 'AutoBots'
+            : c.ownerName;
+  const canonicalOwnerType = isUnicorn
+    ? 'unicorn'
+    : isManual
+      ? 'manual'
+      : isMicro
+        ? 'micro_scalper'
+        : 'scanner';
+  const canonicalCandidateSource = isUnicorn
+    ? 'unicorn_hunter'
+    : isMl
+      ? 'ML_PREDICT_BUY'
+      : isMicro
+        ? 'micro_scalper'
+        : isScannerAuto
+          ? 'scanner'
+          : c.candidateSource;
+  const canonicalStrategySource = isUnicorn ? 'unicorn_hunter' : canonicalSource ?? strategySource;
+  return {
+    source: canonicalSource,
+    sourceOwner: runtimeSourceOwner,
+    runtimeSnapshot: candidate.runtimeSnapshot,
+    autoStrategyDecision: c.autoStrategyDecision,
+    candidateSource: canonicalCandidateSource,
+    ownerName: canonicalOwnerName,
+    ownerType: canonicalOwnerType,
+    strategySource: canonicalStrategySource,
+    executionSource: c.executionSource ?? canonicalSource,
+    scannerAutoEntryConfigSnapshot: c.scannerAutoEntryConfigSnapshot,
+    buySnapshot: {
+      source: canonicalSource,
+      sourceOwner: runtimeSourceOwner,
+      ownerName: canonicalOwnerName,
+      ownerType: canonicalOwnerType,
+      candidateSource: canonicalCandidateSource,
+      strategySource: canonicalStrategySource,
+      executionSource: c.executionSource ?? canonicalSource,
+      entryConfigSnapshot: {
+        source: c.scannerAutoEntryConfigSnapshot?.source ?? canonicalSource,
+        strategySource: c.scannerAutoEntryConfigSnapshot?.strategySource ?? canonicalStrategySource,
+      },
+      settingsSnapshot: {
+        strategySource: canonicalStrategySource,
+      },
+    },
+  };
 }
 
 let _lastLoggedScanId: string | undefined;
@@ -25,6 +161,7 @@ let _lastTopCandidatesAuditAt = 0;
 let _lastTrendBySymbol = new Map<string, string>();
 let _lastDipperCardAuditSig = '';
 let _lastDipperCardAuditAt = 0;
+const _legacyClosedSnapshotClassified = new Set<string>();
 const SNAPSHOT_SCHEMA_CUTOFF_MS = Date.parse('2026-06-01T00:00:00.000Z');
 type MetricRole = 'required' | 'optional' | 'advisory' | 'blocker' | 'unused';
 type SetupMetricView = {
@@ -43,6 +180,12 @@ function toMetricPrimitive(v: unknown): string | number | boolean | null {
 
 function toPctLabel(v: unknown): string {
   return typeof v === 'number' && Number.isFinite(v) ? `${v.toFixed(2)}%` : 'N/A';
+}
+function firstFiniteNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return null;
 }
 function passIcon(passed: boolean | undefined): string {
   return passed ? '✅' : '❌';
@@ -67,6 +210,7 @@ function strategySetupFromPosition(position: Position, bs: any): {
   rawSnapshot: Record<string, unknown> | null;
 } {
   const entryConfig = (position as any)?.entryConfigSnapshot ?? (bs?.entryConfigSnapshot as any) ?? null;
+  const riskParams = entryConfig?.riskParams ?? null;
   const directAudit = entryConfig?.strategyAuditSnapshot ?? (bs as any)?.strategyAuditSnapshot ?? null;
   const manualSetupSnap = entryConfig?.manualDipperSetupSnapshot ?? null;
   const directMetrics = directAudit?.setupMetrics;
@@ -121,6 +265,29 @@ function strategySetupFromPosition(position: Position, bs: any): {
     setMetric('actualReboundPct', { actualValue: toMetricPrimitive(fallbackSignal.reboundPct), requiredValue: toMetricPrimitive(fallbackSignal.requiredReboundPct), passed: !!fallbackSignal.reboundPassed, usedByStrategy: true, role: 'required', sourceLayer: 'trader-brain' });
     setMetric('momentumConfirmed', { actualValue: toMetricPrimitive(fallbackSignal.momentumConfirmed), requiredValue: true, passed: !!fallbackSignal.momentumConfirmed, usedByStrategy: true, role: 'required', sourceLayer: 'trader-brain' });
   }
+  if (Object.keys(metrics).length === 0 && entryConfig) {
+    const setupSource = (entryConfig.unicornMetrics ?? entryConfig.setupMetrics ?? entryConfig) as Record<string, unknown>;
+    const dipActual = firstFiniteNumber(setupSource.pullbackPct, setupSource.actualDipPct, setupSource.dipDepthPct, setupSource.dipPercent, (bs as any)?.unicornMetrics?.pullbackPct);
+    const reboundActual = firstFiniteNumber(setupSource.reboundPct, setupSource.actualReboundPct, setupSource.reboundPercent, (bs as any)?.unicornMetrics?.reboundPct);
+    const requiredDip = firstFiniteNumber(setupSource.requiredDipPct, setupSource.minPullbackPct, (bs as any)?.settingsSnapshot?.requiredDipPctAtEntry);
+    const requiredRebound = firstFiniteNumber(setupSource.requiredReboundPct, setupSource.minReboundPct, (bs as any)?.settingsSnapshot?.requiredReboundPctAtEntry);
+    const entryConfirmed = entryConfig.entryConfirmedAtEntry === true || entryConfig.buyAllowed === true || entryConfig.finalExecutable === true || directAudit?.finalExecutable === true || directAudit?.buyAllowed === true;
+    sourceUsed = 'entryConfigSnapshot.canonicalSetup';
+    if (dipActual != null || requiredDip != null) {
+      setMetric('actualDipPct', { actualValue: dipActual, requiredValue: requiredDip, passed: dipActual != null && requiredDip != null ? dipActual >= requiredDip : entryConfirmed, usedByStrategy: true, role: 'advisory', sourceLayer: 'entry-gate' });
+      if (requiredDip != null) setMetric('requiredDipPct', { actualValue: requiredDip, requiredValue: requiredDip, passed: true, usedByStrategy: true, role: 'advisory', sourceLayer: 'entry-gate' });
+    }
+    if (reboundActual != null || requiredRebound != null) {
+      setMetric('actualReboundPct', { actualValue: reboundActual, requiredValue: requiredRebound, passed: reboundActual != null && requiredRebound != null ? reboundActual >= requiredRebound : entryConfirmed, usedByStrategy: true, role: 'advisory', sourceLayer: 'entry-gate' });
+      if (requiredRebound != null) setMetric('requiredReboundPct', { actualValue: requiredRebound, requiredValue: requiredRebound, passed: true, usedByStrategy: true, role: 'advisory', sourceLayer: 'entry-gate' });
+    }
+    if (entryConfirmed || entryConfig.selectedStrategy || entryConfig.finalExecutionStrategy || entryConfig.finalEntryRule || directAudit?.finalEntryRule) {
+      setMetric('momentumConfirmed', { actualValue: entryConfirmed, requiredValue: true, passed: entryConfirmed, usedByStrategy: true, role: 'advisory', sourceLayer: 'entry-gate' });
+    }
+    if (riskParams && Object.keys(metrics).length === 0) {
+      setMetric('riskSnapshotBound', { actualValue: true, requiredValue: true, passed: true, usedByStrategy: false, role: 'advisory', sourceLayer: 'entry-gate' });
+    }
+  }
   const dipRaw = metrics.actualDipPct?.actualValue ?? metrics.dipDepthPct?.actualValue ?? metrics.dipPercent?.actualValue ?? null;
   const dip = typeof dipRaw === 'number' && Number.isFinite(dipRaw) ? Math.abs(dipRaw) : dipRaw;
   const dipReq = metrics.requiredDipPct?.requiredValue ?? metrics.requiredDipPct?.actualValue ?? null;
@@ -133,7 +300,8 @@ function strategySetupFromPosition(position: Position, bs: any): {
   const setupSummary = `Dip ${toPctLabel(dip)} | Rebound ${toPctLabel(rebound)} | mom ${momentumLabel}`;
   const dipPassed = metrics.actualDipPct?.passed ?? metrics.dipPercent?.passed;
   const reboundPassed = metrics.actualReboundPct?.passed ?? metrics.reboundPct?.passed;
-  const missingFields = Object.keys(metrics).length === 0 ? ['setupMetrics'] : [];
+  const canonicalSetupPresent = !!entryConfig && !!riskParams && !!(entryConfig.selectedStrategy ?? entryConfig.finalExecutionStrategy ?? entryConfig.finalEntryRule ?? directAudit?.finalEntryRule ?? directAudit?.setupResult);
+  const missingFields = Object.keys(metrics).length === 0 && !canonicalSetupPresent ? ['setupMetrics'] : [];
   if (Object.keys(metrics).length === 0 && manualSetupSnap) {
     const md = manualSetupSnap as any;
     const dipReq = typeof md?.dipRequired === 'number' ? md.dipRequired : null;
@@ -384,8 +552,19 @@ function resolveTopCandidateTrend(candidate: ScannerCandidate): { displayedTrend
 }
 
 export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, orderLockActive = false, auditDetail: 'summary' | 'full' = 'full', decisionsBySymbol?: ReadonlyMap<string, import('../../core/scanner/executionDecision').ExecutionDecision>): TradeV4CandidateView {
+  candidate = normalizeCandidateDisplayStatus(candidate);
   const strategyAudit = buildStrategyAuditSnapshotFromCandidate(candidate);
   logStrategyAudit(strategyAudit, { detailLevel: auditDetail });
+  const candidateSourceMeta = buildCandidateSourceMeta(candidate);
+  const sourcePresentation = getTradeSourcePresentation(candidateSourceMeta);
+  logger.info(`TOP_CANDIDATE_SOURCE_PRESENTATION_AUDIT: symbol=${candidate.symbol} sourceLabel=${sourcePresentation.canonicalLabel} badgeVariant=${sourcePresentation.badgeVariant} source=${String(candidateSourceMeta.source ?? 'missing')} sourceOwner=${String(candidateSourceMeta.sourceOwner ?? 'missing')} ownerType=${String(candidateSourceMeta.ownerType ?? 'missing')} ownerName=${String(candidateSourceMeta.ownerName ?? 'missing')} candidateSource=${String(candidateSourceMeta.candidateSource ?? 'missing')} strategySource=${String(candidateSourceMeta.strategySource ?? 'missing')} runtimeSourceOwner=${String(candidate.runtimeSnapshot?.sourceOwner ?? 'missing')} invariantOk=${String(sourcePresentation.badgeVariant !== 'unknown' || !candidate.runtimeSnapshot || String(candidate.runtimeSnapshot.sourceOwner ?? '').toLowerCase() === 'unknown')} failureReason=${sourcePresentation.badgeVariant === 'unknown' && candidate.runtimeSnapshot && String(candidate.runtimeSnapshot.sourceOwner ?? '').toLowerCase() !== 'unknown' ? 'SOURCE_PRESENTATION_RUNTIME_OWNER_UNMAPPED' : 'none'}`);
+  const candidateUiSource = sourcePresentation.badgeVariant === 'unicorn'
+    ? 'unicorn'
+    : sourcePresentation.badgeVariant === 'micro'
+      ? 'scalper'
+      : sourcePresentation.badgeVariant === 'ml'
+        ? 'ml'
+        : 'dipper';
   const visualState: TradeV4CandidateView["engineState"] =
     candidate.status === "BUY" ? (orderLockActive ? "capturing" : "detected")
       : candidate.status === "BLOCK" ? "rejected"
@@ -397,6 +576,12 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
   const scoreVal = candidate.rawScore != null && candidate.rawScore > 0 ? candidate.rawScore : null;
 
   const trendResolved = resolveTopCandidateTrend(candidate);
+  const auditBuyReady = strategyAudit.finalExecutable === true && strategyAudit.buyAllowed === true;
+  const canonicalBuyReady = candidate.status === 'BUY'
+    && candidate.finalExecutable === true
+    && candidate.buyAllowed === true
+    && auditBuyReady
+    && candidate.canonicalDisplayStatus?.canPromoteToBuy !== false;
   logger.info(`TOP_CANDIDATE_TREND_SOURCE_AUDIT: symbol=${candidate.symbol} displayedTrend=${trendResolved.displayedTrend} sourceUsed=${trendResolved.sourceUsed} rawSymbolTrend=${String((candidate as any).symbolTrend ?? (candidate as any).coinTrend ?? (candidate as any).periodTrendDirection ?? 'n/a')} rawGroupTrend=${String(candidate.autoStrategyDecision?.groupTrend ?? candidate.groupTrend ?? 'n/a')} rawMarketTrend=${String((candidate as any).marketTrendAtScan ?? candidate.periodTrend ?? 'n/a')} rawMarketRegime=${String((candidate as any).marketRegimeAtScan ?? candidate.periodRegime ?? 'n/a')} fallbackUsed=${String(trendResolved.fallbackUsed)} fallbackReason=${trendResolved.fallbackReason} updatedAt=${new Date().toISOString()} scannerCycleId=${String((candidate as any).scanId ?? 'unknown')}`);
   return {
     candidateId: candidate.candidateId,
@@ -405,10 +590,20 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
     rank: candidate.rank != null ? candidate.rank : null,
     score: scoreVal,
     confidenceSource: hasRealConfidence ? 'scanner_score_normalized' : 'missing',
-    source: 'dipper',
+    source: candidateUiSource,
+    sourceLabel: sourcePresentation.fullLabel,
+    sourcePresentation,
     riskGroup: candidate.riskGroup ?? "unknown",
     strategy: candidate.selectedStrategy,
     status: candidate.status,
+    lifecycleStatus: candidate.lifecycleStatus ?? null,
+    canonicalDisplayStatus: candidate.canonicalDisplayStatus
+      ? {
+        canonicalStatus: candidate.canonicalDisplayStatus.canonicalStatus,
+        statusSource: candidate.canonicalDisplayStatus.statusSource,
+        normalizedBy: candidate.canonicalDisplayStatus.normalizedBy,
+      }
+      : null,
     runtimeSnapshotPresent: Boolean(candidate.runtimeSnapshot) && candidate.runtimeSnapshot?.invariantOk !== false,
     strategyDecisionPresent: Boolean(candidate.strategyDecision) && candidate.strategyDecision?.invariantOk !== false,
     executionPrecheckSnapshotPresent: Boolean(candidate.executionPrecheckSnapshot) && candidate.executionPrecheckSnapshot?.invariantOk !== false,
@@ -449,19 +644,21 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
       dataQuality: candidate.dataQuality,
     }),
     strategyAudit,
-    finalExecutable: strategyAudit.finalExecutable,
-    buyAllowed: strategyAudit.buyAllowed,
-    primaryBlocker: strategyAudit.dynamicSetupContext?.primaryBlocker
+    finalExecutable: canonicalBuyReady,
+    buyAllowed: canonicalBuyReady && strategyAudit.buyAllowed,
+    primaryBlocker: candidate.primaryBlocker
+      ?? strategyAudit.dynamicSetupContext?.primaryBlocker
       ?? strategyAudit.blockReasons[0]
       ?? (strategyAudit.finalExecutable ? null : 'finalExecutable_false'),
-    finalNoBuyReason: strategyAudit.finalExecutable === true && strategyAudit.buyAllowed === true
+    finalNoBuyReason: canonicalBuyReady
       ? null
-      : strategyAudit.finalNoBuyReason ?? candidate.finalNoBuyReason ?? null,
+      : candidate.finalNoBuyReason ?? strategyAudit.finalNoBuyReason ?? null,
     actionableNoBuyReason: strategyAudit.actionableNoBuyReason ?? candidate.actionableNoBuyReason ?? null,
     technicalNoBuyReason: strategyAudit.technicalNoBuyReason ?? candidate.technicalNoBuyReason ?? null,
     secondaryDiagnosticReasons: strategyAudit.secondaryDiagnosticReasons ?? candidate.secondaryDiagnosticReasons ?? [],
     handoffIntegrityStatus: strategyAudit.handoffIntegrityStatus ?? candidate.handoffIntegrityStatus,
     renderedUserMessage: strategyAudit.renderedUserMessage ?? null,
+    unicornDp: (candidate as any).unicornDp ?? null,
     gateAudit: candidate.gateAudit,
     professionalScore: (candidate as any).professionalAnalysis?.professionalScore,
     professionalVerdict: (candidate as any).professionalAnalysis?.professionalVerdict,
@@ -480,10 +677,12 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
       if (!d) return undefined;
       return {
         scanId: d.scanId,
-        candidateRank: d.candidateRank,
-        selectedForExecution: d.selectedForExecution,
-        finalNoBuyReason: d.finalNoBuyReason,
-        actionableNoBuyReason: d.actionableNoBuyReason,
+          candidateRank: d.candidateRank,
+          selectedForExecution: d.selectedForExecution,
+          finalNoBuyReason: d.finalNoBuyReason,
+          finalNoBuyReasonCode: d.finalNoBuyReasonCode,
+          finalNoBuyReasonLabel: d.finalNoBuyReasonLabel,
+          actionableNoBuyReason: d.actionableNoBuyReason,
         technicalNoBuyReason: d.technicalNoBuyReason,
         secondaryDiagnosticReasons: d.secondaryDiagnosticReasons,
         renderedUserMessage: d.renderedUserMessage,
@@ -535,6 +734,7 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
   const entryConfig = (position as any)?.entryConfigSnapshot ?? (bs as any)?.entryConfigSnapshot ?? null;
   const riskParams = entryConfig?.riskParams ?? null;
   const sourceResolved = resolveTradeSourceLabel(position);
+  const sourcePresentation = getTradeSourcePresentation(sourceResolved);
   const snapshotAudit = classifySnapshotStatus(position);
   const settings = (bs?.settingsSnapshot ?? {}) as Record<string, unknown>;
   const unifiedSignal = ((bs?.traderBrainDecision as any)?.ruleDecisionTrace?.unifiedSignal ?? {}) as Record<string, unknown>;
@@ -568,8 +768,9 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
   const usedCapital = position.quantity * position.avgEntryPrice;
   const grossPnlUsd = (liveState.livePrice > 0 ? (liveState.livePrice - position.avgEntryPrice) * position.quantity : 0);
   const grossPnlPct = position.avgEntryPrice > 0 && liveState.livePrice > 0 ? ((liveState.livePrice - position.avgEntryPrice) / position.avgEntryPrice) * 100 : 0;
-  const feesEstimated = Math.abs(grossPnlUsd) * 0.001;
-  const netPnlUsd = grossPnlUsd - feesEstimated;
+  const feeEstimate = buildOpenFeeEstimate(position, liveState.livePrice, grossPnlUsd);
+  const feesEstimated = feeEstimate.feeUsdTotalEstimated;
+  const netPnlUsd = feeEstimate.netPnlUsd;
   const netPnlPct = usedCapital > 0 ? (netPnlUsd / usedCapital) * 100 : 0;
   const priceAgeMs = Number.isFinite(liveState.priceAgeMs) ? liveState.priceAgeMs : Number.MAX_SAFE_INTEGER;
   const formulaUsed = 'PnL $ = (Live Price - Entry Price) × Qty; PnL % = ((Live Price - Entry Price) / Entry Price) × 100';
@@ -579,7 +780,7 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
   if (!liveState.isFresh && liveState.livePrice > 0) {
     logger.warn(`STALE_OPEN_POSITION_PRICE_WARNING: symbol=${position.coin} livePriceSource=${liveState.livePriceSource} priceAgeMs=${priceAgeMs} staleThresholdMs=${liveState.staleThresholdMs} cacheSource=${liveState.cacheSource} reason=${liveState.reason}`);
   }
-  logger.info(`OPEN_POSITION_PNL_CALC_AUDIT: symbol=${position.coin} positionId=${position.tradeId ?? `${position.coin}-${position.openedAt}`} entryPrice=${position.avgEntryPrice} livePrice=${liveState.livePrice} livePriceSource=${liveState.livePriceSource} qty=${position.quantity} usedCapital=${usedCapital.toFixed(6)} grossPnlUsd=${grossPnlUsd.toFixed(6)} grossPnlPct=${grossPnlPct.toFixed(6)} feesEstimated=${feesEstimated.toFixed(6)} netPnlUsd=${netPnlUsd.toFixed(6)} netPnlPct=${netPnlPct.toFixed(6)} formulaUsed=pnlUsd=(livePrice-entryPrice)*qty;pnlPct=((livePrice-entryPrice)/entryPrice)*100 priceAgeMs=${priceAgeMs} fallbackUsed=${String(fallbackUsed)} reasonIfPriceUnavailable=${reasonIfPriceUnavailable}`);
+  logger.info(`OPEN_POSITION_PNL_CALC_AUDIT: symbol=${position.coin} positionId=${position.tradeId ?? `${position.coin}-${position.openedAt}`} entryPrice=${position.avgEntryPrice} livePrice=${liveState.livePrice} livePriceSource=${liveState.livePriceSource} qty=${position.quantity} usedCapital=${usedCapital.toFixed(6)} grossPnlUsd=${grossPnlUsd.toFixed(6)} grossPnlPct=${grossPnlPct.toFixed(6)} feeUsdEntry=${feeEstimate.feeUsdEntry.toFixed(6)} feeUsdExitEstimated=${feeEstimate.feeUsdExitEstimated.toFixed(6)} feesEstimated=${feesEstimated.toFixed(6)} feeRate=${feeEstimate.feeRate} operatorName=${feeEstimate.operatorName} netPnlUsd=${netPnlUsd.toFixed(6)} netPnlPct=${netPnlPct.toFixed(6)} formulaUsed=netPnlUsd=grossPnlUsd-feeUsdEntry-feeUsdExitEstimated priceAgeMs=${priceAgeMs} fallbackUsed=${String(fallbackUsed)} reasonIfPriceUnavailable=${reasonIfPriceUnavailable}`);
 
   const marketRegimeAtEntry = bs?.marketRegime ?? null;
   const marketTrendAtEntry = bs?.groupTrend ?? bs?.groupRegime ?? null;
@@ -728,7 +929,7 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
     }
   }
   logger.info(`POSITION_STRATEGY_SETUP_DISPLAY_AUDIT: symbol=${position.coin} strategy=${strategy} hasStrategyAuditSnapshot=${String(!!setup.rawSnapshot)} hasSetupMetrics=${String(Object.keys(setup.metrics).length > 0)} dipActual=${String(setup.metrics.actualDipPct?.actualValue ?? 'n/a')} dipRequired=${String(setup.metrics.requiredDipPct?.requiredValue ?? 'n/a')} reboundActual=${String(setup.metrics.actualReboundPct?.actualValue ?? 'n/a')} reboundRequired=${String(setup.metrics.requiredReboundPct?.requiredValue ?? 'n/a')} momentumConfirmed=${String(setup.metrics.momentumConfirmed?.actualValue ?? 'n/a')} setupResult=${setup.setupResult} finalExecutableAtEntry=${String((setup.rawSnapshot as any)?.finalExecutableAtEntry ?? (setup.rawSnapshot as any)?.finalExecutable ?? entryConfig?.finalExecutableAtEntry ?? 'n/a')} missingFields=${setup.missingFields.join('|') || 'none'} sourceUsed=${setup.sourceUsed}`);
-  if (snapshotAudit.snapshotStatus !== 'LEGACY_MISSING_SNAPSHOT' && Object.keys(setup.metrics).length === 0) {
+  if (snapshotAudit.snapshotStatus !== 'LEGACY_MISSING_SNAPSHOT' && Object.keys(setup.metrics).length === 0 && setup.missingFields.includes('setupMetrics')) {
     logger.warn(`POSITION_STRATEGY_SETUP_MISSING_BUG: symbol=${position.coin} strategy=${strategy} snapshotStatus=${snapshotAudit.snapshotStatus}`);
   }
 
@@ -774,6 +975,7 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
     priceQuality: liveState.priceQuality,
     ownerType: position.ownerType ?? 'unknown',
     sourceLabel: sourceResolved.label,
+    sourcePresentation,
     mode: bs?.mode ?? position.mode ?? 'unknown',
     executionMode: executionDisplay.executionMode,
     executionAdapter: executionDisplay.executionAdapter,
@@ -794,6 +996,13 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
     spreadPct: Number.isFinite(bs?.spreadPct) ? bs?.spreadPct : null,
     quantity: position.quantity,
     usedCapitalUsd: position.quantity * position.avgEntryPrice,
+    feeUsdEntry: feeEstimate.feeUsdEntry,
+    feeUsdExitEstimated: feeEstimate.feeUsdExitEstimated,
+    feeUsdTotalEstimated: feeEstimate.feeUsdTotalEstimated,
+    feeUsdTotalSoFar: feeEstimate.feeUsdTotalSoFar,
+    feeRate: feeEstimate.feeRate,
+    feeSource: feeEstimate.feeSource,
+    operatorName: feeEstimate.operatorName,
     confidence: bs && Number.isFinite(bs.confidence) ? Math.round(bs.confidence * 100) : null,
     score: bs && Number.isFinite(bs.candidateRank) ? bs.candidateRank ?? null : null,
     scannerPeriod: bs?.referencePeriod ?? null,
@@ -839,6 +1048,13 @@ export function mapPositionToOpenPositionView(position: Position): TradeV4OpenPo
       grossPnlUsd,
       grossPnlPct,
       feesEstimated,
+      feeUsdEntry: feeEstimate.feeUsdEntry,
+      feeUsdExitEstimated: feeEstimate.feeUsdExitEstimated,
+      feeUsdTotalEstimated: feeEstimate.feeUsdTotalEstimated,
+      feeUsdTotalSoFar: feeEstimate.feeUsdTotalSoFar,
+      feeRate: feeEstimate.feeRate,
+      feeSource: feeEstimate.feeSource,
+      operatorName: feeEstimate.operatorName,
       netPnlUsd,
       netPnlPct,
       formulaUsed,
@@ -926,6 +1142,7 @@ export function buildExitReasonDisplay(input: {
 
 export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4ClosedPositionView {
   const sourceResolved = resolveTradeSourceLabel(trade);
+  const sourcePresentation = getTradeSourcePresentation(sourceResolved);
   const quality = trade.mlQuality?.dataQuality ?? "UNKNOWN";
   const eligibility = trade.mlQuality?.trainingEligible
     ? "eligible"
@@ -970,8 +1187,14 @@ export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4C
   const usedCapital = qty * entryPrice;
   const grossPnlUsd = (exitPrice - entryPrice) * qty;
   const grossPnlPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 : 0;
-  const fees = Number.isFinite(cs?.fees) ? (cs?.fees as number) : 0;
-  const netPnlUsd = grossPnlUsd - fees;
+  const closedFeeAccounting = buildClosedFeeAccounting({
+    adapterName: trade.adapter,
+    buySnapshot: bs ?? null,
+    closeSnapshot: cs ?? null,
+    grossPnlUsd,
+  });
+  const fees = closedFeeAccounting.feeUsdTotal;
+  const netPnlUsd = closedFeeAccounting.netPnlUsd;
   const netPnlPct = usedCapital > 0 ? (netPnlUsd / usedCapital) * 100 : 0;
   const formulaUsed = 'Closed PnL $ = (Exit Price - Entry Price) × Qty; Closed PnL % = ((Exit Price - Entry Price) / Entry Price) × 100';
   logger.info(`CLOSED_TRADE_PNL_CALC_AUDIT: symbol=${trade.coin} tradeId=${trade.tradeId} entryPrice=${entryPrice} exitPrice=${exitPrice} realMarketPriceAtClose=${cs?.realMarketPriceAtClose ?? 0} closePriceSource=${cs?.closePriceSource ?? 'unavailable'} qty=${qty} usedCapital=${usedCapital.toFixed(6)} grossPnlUsd=${grossPnlUsd.toFixed(6)} grossPnlPct=${grossPnlPct.toFixed(6)} fees=${fees.toFixed(6)} netPnlUsd=${netPnlUsd.toFixed(6)} netPnlPct=${netPnlPct.toFixed(6)} closeReason=${cs?.exitReason ?? trade.status} formulaUsed=long_spot_gross((exit-entry)*qty)_net(gross-fee) priceQuality=${cs?.executionQuality ?? 'unknown'}`);
@@ -1017,7 +1240,17 @@ export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4C
   const trendAtEntry = bs?.groupTrend ?? bs?.groupRegime ?? marketTrendAtEntry ?? marketRegimeAtEntry ?? null;
   logger.info(`CLOSED_POSITION_ENTRY_SNAPSHOT_AUDIT: symbol=${trade.coin} tradeId=${trade.tradeId} sourceUsed=${bs ? 'buySnapshot.entryConfigSnapshot' : 'none'} rowSource=Journal/closedTrades snapshotPresent=${String(!!bs)} riskSnapshotPresent=${String(!!riskParams)} strategySnapshotPresent=${String(!!strategyAuditSnapshot)} entryPrice=${entryPrice} refPrice=${refPriceAtEntry ?? 'n/a'} lastPrice=${exitPrice} dipAtEntry=${dipAtEntry ?? 'n/a'} trendAtEntry=${trendAtEntry ?? 'n/a'} tp1Pct=${riskTp1Pct ?? 'n/a'} tp1TargetPrice=${riskTp1TargetPrice ?? 'n/a'} calculatedTp1Target=${riskTp1Pct != null ? entryPrice * (1 + riskTp1Pct / 100) : 'n/a'} displayedTp1Target=${riskTp1TargetPrice ?? 'n/a'} tp1Source=${riskTp1Source ?? riskSnapshotStatus} tp2Pct=${riskTp2Pct ?? 'n/a'} slPct=${riskSlPct ?? 'n/a'} owner=${sourceResolved.label} openedAt=${trade.entryTime ?? 'n/a'} hold=${durationLabel} rowUsesCandidateState=false rowUsesLegacyFallback=${String(!riskParams)} targetMatchesSnapshot=${String(riskTp1Pct != null && riskTp1TargetPrice != null ? Math.abs(riskTp1TargetPrice - (entryPrice * (1 + riskTp1Pct / 100))) <= Math.max(1e-10, Math.abs(riskTp1TargetPrice) * 1e-8) : false)}`);
   logger.info(`CLOSED_POSITION_RISK_SNAPSHOT_AUDIT: symbol=${trade.coin} tradeId=${trade.tradeId} riskGroup=${bs?.riskGroup ?? 'unknown'} confidence=${bs?.confidence ?? 'n/a'} strategy=${strategy} entryRule=${((bs?.traderBrainDecision as any)?.ruleDecisionTrace?.unifiedSignal?.reasonCode as string | undefined) ?? ((bs?.traderBrainDecision as any)?.selectedPlaybook as string | undefined) ?? (bs?.selectedPlaybook as string | undefined) ?? 'UNKNOWN_RULE'} entryPrice=${entryPrice} tp1Pct=${riskTp1Pct ?? 'n/a'} tp1TargetPrice=${riskTp1TargetPrice ?? 'n/a'} tp1Source=${riskTp1Source ?? riskSnapshotStatus} tp1Reason=${riskTp1Reason} tp1Min=${riskTp1Min ?? 'n/a'} tp1Max=${riskTp1Max ?? 'n/a'} tp2Pct=${riskTp2Pct ?? 'n/a'} slPct=${riskSlPct ?? 'n/a'} snapshotPresent=${String(!!bs)} riskSnapshotPresent=${String(!!riskParams)}`);
-  if (!riskParams) logger.warn(`LEGACY_TP1_SNAPSHOT_MISSING: symbol=${trade.coin} tradeId=${trade.tradeId} note=${riskSnapshotStatus} / TP1 SNAPSHOT MISSING`);
+  if (!riskParams) {
+    const legacyClosedSnapshot = closedSnapshotStatus === 'LEGACY_MISSING_SNAPSHOT' || riskSnapshotStatus === 'LEGACY_PRE_FIX';
+    const legacyKey = `${trade.tradeId ?? trade.coin}:${trade.entryTime ?? 'unknown'}`;
+    if (legacyClosedSnapshot) {
+      const firstClassification = !_legacyClosedSnapshotClassified.has(legacyKey);
+      _legacyClosedSnapshotClassified.add(legacyKey);
+      logger.info(`LEGACY_TP1_SNAPSHOT_MISSING: symbol=${trade.coin} tradeId=${trade.tradeId} note=${riskSnapshotStatus} legacySnapshotStatus=LEGACY_INCOMPLETE_PRE_SNAPSHOT_SCHEMA firstClassification=${String(firstClassification)} / TP1 SNAPSHOT MISSING`);
+    } else {
+      logger.warn(`LEGACY_TP1_SNAPSHOT_MISSING: symbol=${trade.coin} tradeId=${trade.tradeId} note=${riskSnapshotStatus} legacySnapshotStatus=BUG_MISSING_SNAPSHOT_NEW_POSITION / TP1 SNAPSHOT MISSING`);
+    }
+  }
   return {
     id: trade.tradeId,
     symbol: trade.coin,
@@ -1037,6 +1270,7 @@ export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4C
     trainingEligible: trade.trainingEligible ?? false,
     ownerType: cs?.ownerType ?? 'unknown',
     sourceLabel: sourceResolved.label,
+    sourcePresentation,
     modeLabel: bs?.mode ?? trade.mode ?? 'unknown',
     executionMode: executionDisplay.executionMode,
     executionAdapter: executionDisplay.executionAdapter,
@@ -1045,8 +1279,15 @@ export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4C
       ?? (bs?.selectedPlaybook as string | undefined)
       ?? 'UNKNOWN_RULE',
     riskGroup: bs?.riskGroup ?? null,
-    fees: Number.isFinite(cs?.fees) ? cs?.fees : null,
-    netPnlUsd: Number.isFinite(trade.pnl) && Number.isFinite(cs?.fees) ? (trade.pnl as number) - (cs?.fees as number) : trade.pnl ?? null,
+    fees,
+    feeUsdEntry: closedFeeAccounting.feeUsdEntry,
+    feeUsdExit: closedFeeAccounting.feeUsdExit,
+    feeUsdTotal: closedFeeAccounting.feeUsdTotal,
+    feeRate: closedFeeAccounting.feeRate,
+    feeSource: closedFeeAccounting.feeSource,
+    operatorName: closedFeeAccounting.operatorName,
+    grossPnlUsd: closedFeeAccounting.grossPnlUsd,
+    netPnlUsd,
     closePriceSource: cs?.closePriceSource ?? null,
     closePriceAgeMs: Number.isFinite(cs?.closePriceAgeMs) ? cs?.closePriceAgeMs : null,
     realMarketPriceAtClose: Number.isFinite(cs?.realMarketPriceAtClose) ? cs?.realMarketPriceAtClose : null,
@@ -1082,6 +1323,12 @@ export function mapTradeRecordToClosedPositionView(trade: TradeRecord): TradeV4C
       grossPnlUsd,
       grossPnlPct,
       fees,
+      feeUsdEntry: closedFeeAccounting.feeUsdEntry,
+      feeUsdExit: closedFeeAccounting.feeUsdExit,
+      feeUsdTotal: closedFeeAccounting.feeUsdTotal,
+      feeRate: closedFeeAccounting.feeRate,
+      feeSource: closedFeeAccounting.feeSource,
+      operatorName: closedFeeAccounting.operatorName,
       netPnlUsd,
       netPnlPct,
       closeReason: cs?.exitReason ?? trade.status,
@@ -1115,6 +1362,7 @@ export function buildTradeV4PageModel(input: {
   openPanelRowsCount?: number;
   activeMode?: string;
   restoringOpenPositions?: boolean;
+  unicornHunterRuntime?: TradeV4PageModel['unicornHunterRuntime'];
 }): TradeV4PageModel {
   const rawCandidates = input.scannerSnapshot?.candidates ?? [];
   const planDecisions = input.scannerSnapshot?.executionPlan?.decisions;
@@ -1204,12 +1452,12 @@ export function buildTradeV4PageModel(input: {
   if (openPositions.length > 0) {
     const sample = openPositions[0] as Record<string, unknown>;
     const missingOpen = openMappedFields.filter((f) => sample[f] == null && !['dip','rebound'].includes(f));
-    logger.info(`OPEN_POSITIONS_V3_MAPPING_AUDIT: availableFields=${Object.keys(sample).join('|')} missingFields=${missingOpen.join('|') || 'none'} mappedFields=${openMappedFields.join('|')} legacyFallbackCount=${openPositions.filter((p) => p.snapshotStatus === 'LEGACY_MISSING_SNAPSHOT').length}`);
+    logger.info(`OPEN_POSITIONS_V4_MAPPING_AUDIT: availableFields=${Object.keys(sample).join('|')} missingFields=${missingOpen.join('|') || 'none'} mappedFields=${openMappedFields.join('|')} legacyFallbackCount=${openPositions.filter((p) => p.snapshotStatus === 'LEGACY_MISSING_SNAPSHOT').length}`);
   }
   if (closedPositions.length > 0) {
     const sample = closedPositions[0] as Record<string, unknown>;
     const missingClosed = closedMappedFields.filter((f) => sample[f] == null);
-    logger.info(`CLOSED_POSITIONS_V3_MAPPING_AUDIT: availableFields=${Object.keys(sample).join('|')} missingFields=${missingClosed.join('|') || 'none'} mappedFields=${closedMappedFields.join('|')} legacyFallbackCount=${closedPositions.filter((p) => p.snapshotStatus === 'LEGACY_MISSING_SNAPSHOT').length}`);
+    logger.info(`CLOSED_POSITIONS_V4_MAPPING_AUDIT: availableFields=${Object.keys(sample).join('|')} missingFields=${missingClosed.join('|') || 'none'} mappedFields=${closedMappedFields.join('|')} legacyFallbackCount=${closedPositions.filter((p) => p.snapshotStatus === 'LEGACY_MISSING_SNAPSHOT').length}`);
   }
   for (const o of openPositions) {
     const closed = closedPositions.find((c) => c.symbol === o.symbol);
@@ -1349,6 +1597,9 @@ export function buildTradeV4PageModel(input: {
     emptyUniverseReason: snap?.emptyUniverseReason,
     paperAutoEnabled: input.paperAutoEnabled ?? snap?.paperAutoEnabled,
     paperAutoResult: snap?.paperAutoResult,
+    unicornRadar: snap?.unicornRadar ?? [],
+    unicornWatchlistSummary: snap?.unicornWatchlistSummary,
+    unicornHunterRuntime: input.unicornHunterRuntime,
     autoStrategySummary: snap?.autoStrategySummary,
     executionPlan: snap?.executionPlan,
     btcAnchorEnabled: input.btcAnchorEnabled,
@@ -1374,6 +1625,34 @@ export function buildTradeV4PageModel(input: {
       topHighRiskMomentum: snap.noBuySummary.topHighRiskMomentum,
       topVeryHighRiskMomentum: snap.noBuySummary.topVeryHighRiskMomentum,
       buyReadyCount: snap.noBuySummary.buyReadyCount,
+      buyCandidateCount: snap.noBuySummary.buyCandidateCount,
+      actionableBuyCountNow: snap.noBuySummary.actionableBuyCountNow,
+      blockedByPacingCount: snap.noBuySummary.blockedByPacingCount,
+      blockedByCooldownCount: snap.noBuySummary.blockedByCooldownCount,
+      blockedByBudgetCount: snap.noBuySummary.blockedByBudgetCount,
+      blockedByDuplicateCount: snap.noBuySummary.blockedByDuplicateCount,
+      blockedByRiskCount: snap.noBuySummary.blockedByRiskCount,
+      blockedByOpenPositionLimitCount: snap.noBuySummary.blockedByOpenPositionLimitCount,
+      maxExecutionQueuePerScan: snap.noBuySummary.maxExecutionQueuePerScan,
+      executionQueueAcceptedCount: snap.noBuySummary.executionQueueAcceptedCount,
+      deferredByQueueLimitCount: snap.noBuySummary.deferredByQueueLimitCount,
+      queueRejectedCount: snap.noBuySummary.queueRejectedCount,
+      queueAcceptedSymbols: snap.noBuySummary.queueAcceptedSymbols,
+      deferredByQueueLimitSymbols: snap.noBuySummary.deferredByQueueLimitSymbols,
+      queueRejectedReasons: snap.noBuySummary.queueRejectedReasons,
+      nextQueueRetry: snap.noBuySummary.nextQueueRetry,
+      selectedButNotSubmittedCount: snap.noBuySummary.selectedButNotSubmittedCount,
+      submitAttemptedCount: snap.noBuySummary.submitAttemptedCount,
+      selectedButNotSubmittedReasons: snap.noBuySummary.selectedButNotSubmittedReasons,
+      lastBuyAt: snap.noBuySummary.lastBuyAt,
+      minBuyIntervalMs: snap.noBuySummary.minBuyIntervalMs,
+      cooldownUntil: snap.noBuySummary.cooldownUntil,
+      nextBuyAllowedAt: snap.noBuySummary.nextBuyAllowedAt,
+      msUntilNextBuyAllowed: snap.noBuySummary.msUntilNextBuyAllowed,
+      buyPacingActive: snap.noBuySummary.buyPacingActive,
+      buyCooldownActive: snap.noBuySummary.buyCooldownActive,
+      buyPacingReason: snap.noBuySummary.buyPacingReason,
+      countSourceUsed: snap.noBuySummary.countSourceUsed,
       blockedCount: snap.noBuySummary.blockedCount,
       blockedBySpread: snap.noBuySummary.blockedBySpread,
       blockedBySlippage: snap.noBuySummary.blockedBySlippage,

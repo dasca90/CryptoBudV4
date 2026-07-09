@@ -1,8 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { getVisibleTopCandidates } from '../components/trade-v4/TopCandidatesPanel';
-import { getVisibleOpenPositions } from '../components/trade-v4/OpenPositionsPanel';
+import { getVisibleTopCandidates } from '../components/trade-v4/topCandidatesPanelModel';
+import { getVisibleOpenPositions } from '../components/trade-v4/openPositionsPanelModel';
 import type { TradeV4CandidateView, TradeV4OpenPositionView } from '../components/trade-v4/types';
 
 const root = process.cwd();

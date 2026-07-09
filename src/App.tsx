@@ -14,6 +14,7 @@ import { PerformanceGuard } from './core/diagnostics/PerformanceGuard';
 import { runLiveSafetyCheck } from './core/live/LiveSafetyCheck';
 import { canTransitionTo, INITIAL_SAFETY_STATE } from './core/live/LiveSafetyState';
 import { appStatePersistence } from './core/persistence/AppStatePersistence';
+import { buildOpenPositionPersistenceRows, repairOpenPositionRiskSnapshot, runRuntimeStorageCleanup } from './core/persistence/localStorageMaintenance';
 import { backupService } from './core/persistence/BackupService';
 import { refreshSystemTimeContext } from './utils/timeFormatter';
 import { AppShell } from './components/layout/AppShell';
@@ -24,10 +25,10 @@ import { MLLabPage } from './ui/pages/MLLabPage';
 import { LogsPage } from './ui/pages/LogsPage';
 import { SettingsPage } from './ui/pages/SettingsPage';
 import { createUIStore } from './state/ui-store';
-  import { loadMLBrain, saveMLBrain } from './core/ml/ml-brain-store';
+import { loadMLBrain, loadMLPredictBuySettings, saveMLBrain, saveMLPredictBuySettings } from './core/ml/ml-brain-store';
 import { mlRuntimeGuard } from './core/ml/ml-runtime-guard';
 import { mlRuntimeEvents } from './core/ml/ml-runtime-events';
-import type { TraderBrainConfig, LiveSafetyState, LiveSafetyCheckResult, UniverseMode, MLBrainModel, ImportedMLRow, ScannerCandidate, Position, PlannedCandidate, BuySnapshot, MlRuntimeMode, MlRuntimeGuardState, MlRuntimeEvent } from './core/types';
+import type { TraderBrainConfig, LiveSafetyState, LiveSafetyCheckResult, UniverseMode, MLBrainModel, ImportedMLRow, ScannerCandidate, Position, PlannedCandidate, BuySnapshot, MlRuntimeMode, MlRuntimeGuardState, MlRuntimeEvent, MLPredictBuySettings } from './core/types';
 import type { RefMode } from './core/scanner/ReferencePriceCalculator';
 import { SettingsPersistence } from './core/persistence/SettingsPersistence';
 import { TelegramNotifier } from './core/notifications/TelegramNotifier';
@@ -107,6 +108,7 @@ export default function App() {
   const lastPositionRenderAuditRef = useRef(0);
   const lastPositionUpdateRenderAtRef = useRef(0);
   const lastStartupRecoveryAtRef = useRef<number | null>(null);
+  const lastRuntimeCleanupAtRef = useRef<number | null>(null);
   const lastOvernightStabilityAuditAtRef = useRef(0);
   const lastMemoryGrowthSampleRef = useRef<{ heap: number | null; at: number } | null>(null);
   useEffect(() => {
@@ -138,6 +140,7 @@ export default function App() {
   const [, forceUpdate] = useState(0);
 
   const [brain, setBrain] = useState<MLBrainModel | null>(null);
+  const [mlPredictBuySettings, setMlPredictBuySettings] = useState<MLPredictBuySettings>(() => loadMLPredictBuySettings());
   const [importedRows, setImportedRows] = useState<ImportedMLRow[]>([]);
   const [guardState, setGuardState] = useState<MlRuntimeGuardState>(() => mlRuntimeGuard.getGuardState(false, false));
   const [mlEvents, setMlEvents] = useState<MlRuntimeEvent[]>(() => mlRuntimeEvents.getRecentEvents(25));
@@ -273,6 +276,7 @@ export default function App() {
             if (!pos.buySnapshot) {
               logger.warn(`POSITION_ENTRY_SNAPSHOT_MISSING_LEGACY_FALLBACK_USED: symbol=${sp.symbol} positionId=${pos.tradeId ?? `${sp.symbol}-${pos.openedAt ?? 0}`} availableFields=coin,quantity,avgEntryPrice,currentPrice,pnl,pnlPercent,mode,openedAt missingFields=buySnapshot`);
             }
+            repairOpenPositionRiskSnapshot(pos, 'app_boot_restore');
             let brain = engine.brains.get(sp.symbol);
             if (!brain) {
               const config: TraderBrainConfig = {
@@ -438,6 +442,7 @@ export default function App() {
       scanner.setExecutionContextProviders({
         getUsedCapital: () => engine.getPositionManager().getOpenPositions().reduce((s, p) => s + (p.avgEntryPrice * p.quantity), 0),
         getOpenSymbols: () => engine.getPositionManager().getOpenPositions().map(p => p.coin),
+        getOpenPositionSources: () => engine.getPositionManager().getOpenPositions().map(p => ({ symbol: p.coin, tradeId: p.tradeId, source: p.buySnapshot?.source, ownerName: p.buySnapshot?.ownerName })),
         getPendingSymbols: () => engine.getOrderLockManager().getActiveLocks().filter(l => l.side === 'BUY').map(l => l.symbol),
       });
       scanner.setPaperAutoBuyFn(async (plannedCandidate: PlannedCandidate, candidate: ScannerCandidate) => {
@@ -628,13 +633,7 @@ export default function App() {
       }
       if (openPositions.length > 0) {
         try {
-          const rows = openPositions.map(p => ({
-            trade_id: p.tradeId ?? `${p.coin}-${p.openedAt}`,
-            symbol: p.coin,
-            position_json: JSON.stringify(p),
-            buy_snapshot_json: p.buySnapshot ? JSON.stringify(p.buySnapshot) : null,
-            saved_at: new Date().toISOString(),
-          }));
+          const rows = buildOpenPositionPersistenceRows(openPositions);
           localStorage.setItem('cryptobud_v4:open_positions_primary', JSON.stringify(rows));
           localStorage.setItem('cryptobud_v4:open_positions_critical', JSON.stringify(rows));
           logger.info(`APP_CLOSE_POSITION_FLUSH_AUDIT: openCount=${openPositions.length} symbols=${openPositions.map(p => p.coin).join('|') || 'none'} flushStarted=${flushStarted} flushCompleted=${Date.now()} primaryWriteOk=true backupWriteOk=true durationMs=${Date.now() - flushStarted} error=none`);
@@ -733,6 +732,26 @@ export default function App() {
       });
     }, 30000);
     return () => clearInterval(interval);
+  }, [engine]);
+
+  useEffect(() => {
+    const runCleanup = () => {
+      const now = Date.now();
+      const logStatsBefore = logger.getStats();
+      const scannerBefore = engine.getAutoRuntime().getScanner().getRuntimeMemoryStats();
+      const runtimeCleanup = engine.runRuntimeMemoryCleanup(now);
+      const storageCleanup = runRuntimeStorageCleanup(now);
+      const logStatsAfter = logger.getStats();
+      const scannerAfter = engine.getAutoRuntime().getScanner().getRuntimeMemoryStats();
+      lastRuntimeCleanupAtRef.current = now;
+      logger.info(`MEMORY_CLEANUP_RUN_AUDIT: timestamp=${new Date(now).toISOString()} beforeVisibleLogs=${logStatsBefore.currentLogCount} afterVisibleLogs=${logStatsAfter.currentLogCount} beforeInternalAudits=${logStatsBefore.currentInternalAuditCount} afterInternalAudits=${logStatsAfter.currentInternalAuditCount} logsTrimmed=${Math.max(0, logStatsAfter.trimCount - logStatsBefore.trimCount)} scannerSnapshotsBefore=${runtimeCleanup.scannerSnapshotsBefore} scannerSnapshotsAfter=${runtimeCleanup.scannerSnapshotsAfter} scannerSnapshotsTrimmed=${runtimeCleanup.scannerSnapshotsTrimmed} scannerEventsBefore=${scannerBefore.candidateStatusHistoryCount} scannerEventsAfter=${scannerAfter.candidateStatusHistoryCount} scannerEventsTrimmed=${runtimeCleanup.scannerEventsTrimmed} staleTempBrainsRemoved=${runtimeCleanup.staleTempBrainsRemoved} staleRecentlyClosedSymbolsRemoved=${runtimeCleanup.staleRecentlyClosedSymbolsRemoved} periodCacheBefore=${runtimeCleanup.periodCacheBefore} periodCacheAfter=${runtimeCleanup.periodCacheAfter} periodCacheTrimmed=${runtimeCleanup.periodCacheTrimmed} localStorageKeysPruned=${storageCleanup.removedKeys.length} localStorageKeysTrimmed=${storageCleanup.trimmedKeys.length} localStorageBytesBefore=${storageCleanup.bytesBefore} localStorageBytesAfter=${storageCleanup.bytesAfter} localStorageFreedBytes=${storageCleanup.freedBytes} prunedKeys=${storageCleanup.removedKeys.join('|') || 'none'} trimmedKeys=${storageCleanup.trimmedKeys.join('|') || 'none'}`);
+    };
+    const first = window.setTimeout(runCleanup, 60_000);
+    const interval = window.setInterval(runCleanup, 15 * 60 * 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(interval);
+    };
   }, [engine]);
 
   useEffect(() => {
@@ -952,6 +971,7 @@ export default function App() {
         isStartupGracePeriodActive,
         lastMemoryBufferTrimAt: logStats.lastMemoryBufferTrimAt,
         lastStartupRecoveryAt: lastStartupRecoveryAtRef.current,
+        lastRuntimeCleanupAt: lastRuntimeCleanupAtRef.current,
         lastAirScannerCleanupAt: cleanupStats.lastAirScannerCleanupAt,
       });
       if (Date.now() - lastOvernightStabilityAuditAtRef.current >= 30 * 60 * 1000) {
@@ -1101,6 +1121,7 @@ export default function App() {
         scannerBanlist: settings.scannerBanlist ?? settings.manualScannerBanlist ?? [],
       });
       autoRuntime.getScanner().setScannerDiagnosticsLevel?.((settings as any).scannerDiagnosticsLevel ?? 'normal');
+      autoRuntime.getScanner().setUnicornHunterSettings?.((settings as any).unicornHunter);
       autoRuntime.getScanner().setManualStrategy(!effectiveAutoBots && effectiveStrategySource === 'manual_override'
         ? (settings.riskStyle === 'aggressive' ? 'momentum' : settings.riskStyle === 'conservative' ? 'conservative' : 'balanced')
         : null);
@@ -1134,6 +1155,7 @@ export default function App() {
       autoRuntime.getScanner().setExecutionContextProviders({
         getUsedCapital: () => engine.getPositionManager().getOpenPositions().reduce((s, p) => s + (p.avgEntryPrice * p.quantity), 0),
         getOpenSymbols: () => engine.getPositionManager().getOpenPositions().map(p => p.coin),
+        getOpenPositionSources: () => engine.getPositionManager().getOpenPositions().map(p => ({ symbol: p.coin, tradeId: p.tradeId, source: p.buySnapshot?.source, ownerName: p.buySnapshot?.ownerName })),
         getPendingSymbols: () => engine.getOrderLockManager().getActiveLocks().filter(l => l.side === 'BUY').map(l => l.symbol),
       });
       if (!Object.values(riskGroups).some(Boolean)) {
@@ -1166,18 +1188,39 @@ export default function App() {
         onCandidatesReady: (snapshot) => {
           const prevCandidates = store.state.scannerSnapshot?.candidates?.length ?? 0;
           const newCandidates = snapshot.candidates.length;
+          const publishBlockedReason = snapshot.emptyUniverseReason
+            ? `snapshot_${snapshot.emptyUniverseReason}`
+            : snapshot.scannedCount <= 0
+              ? 'snapshot_total_scanned_zero'
+              : snapshot.status === 'IDLE' && snapshot.candidateCount === 0
+                ? 'snapshot_idle_empty'
+                : 'none';
+          const preserveLastValidSnapshot = prevCandidates > 0 && publishBlockedReason !== 'none';
+          const realCompletedEmptyScan = !snapshot.emptyUniverseReason && snapshot.scannedCount > 0 && snapshot.universeSize > 0 && snapshot.candidateCount === 0;
+          const publishAllowed = newCandidates > 0 || prevCandidates === 0 || realCompletedEmptyScan || !preserveLastValidSnapshot;
+          logger.info(`TOP_CANDIDATE_SNAPSHOT_PUBLISH_AUDIT: scanId=${snapshot.scanId} totalScanned=${snapshot.scannedCount} totalCandidates=${snapshot.candidateCount} previousCandidateCount=${prevCandidates} publishedCandidateCount=${publishAllowed ? newCandidates : prevCandidates} publishAllowed=${String(publishAllowed)} publishBlockedReason=${publishAllowed ? 'none' : publishBlockedReason} preservedLastValidSnapshot=${String(!publishAllowed && preserveLastValidSnapshot)} reason=${publishAllowed ? 'publish_snapshot' : 'preserve_last_valid_candidate_pool'}`);
           if (snapshot.emptyUniverseReason && ['WATCHLIST_EMPTY', 'ALL_RISK_GROUPS_DISABLED', 'ALL_SYMBOLS_FILTERED', 'UNKNOWN_EMPTY_UNIVERSE'].includes(snapshot.emptyUniverseReason)) {
             store.setScannerRunning(false);
             if (prevCandidates > 0) {
               logger.throttled('INFO', `SCANNER_DATA_STALE: previous scan has ${prevCandidates} candidates — preserving until universe available`, 'scanner_stale', 60000);
             }
           }
-          if (newCandidates > 0 || prevCandidates === 0) {
+          if (publishAllowed) {
             store.setScannerSnapshot(snapshot);
           } else {
             const mergedSnapshot = {
               ...snapshot,
               candidates: store.state.scannerSnapshot?.candidates ?? [],
+              candidateCount: store.state.scannerSnapshot?.candidateCount ?? prevCandidates,
+              buyCount: store.state.scannerSnapshot?.buyCount ?? snapshot.buyCount,
+              waitCount: store.state.scannerSnapshot?.waitCount ?? snapshot.waitCount,
+              blockCount: store.state.scannerSnapshot?.blockCount ?? snapshot.blockCount,
+              avoidCount: store.state.scannerSnapshot?.avoidCount ?? snapshot.avoidCount,
+              summary: publishBlockedReason === 'snapshot_total_scanned_zero'
+                ? 'Scan skipped: already running'
+                : snapshot.status === 'COOLDOWN'
+                  ? 'Waiting for next scan'
+                  : 'Refreshing',
             };
             store.setScannerSnapshot(mergedSnapshot);
             logger.throttled('INFO', `SCANNER_DATA_STALE_METADATA_UPDATED: ${prevCandidates} previous candidates preserved — ${snapshot.candidates.length} new candidates discarded, market/metadata updated`, 'scanner_stale_preserve', 30000);
@@ -1333,6 +1376,12 @@ export default function App() {
     setGuardState(mlRuntimeGuard.getGuardState(brain !== null, brain?.enabled ?? false));
   }, [brain]);
 
+  const handleMlPredictBuySettingsChange = useCallback((nextSettings: MLPredictBuySettings) => {
+    setMlPredictBuySettings(nextSettings);
+    saveMLPredictBuySettings(nextSettings);
+    logger.info(`ML_PREDICT_BUY_UI_SETTINGS_CHANGED mode=${nextSettings.mlPredictBuyMode} enabled=${String(nextSettings.mlPredictBuyEnabled)} minRowsAutoBuy=${nextSettings.minTrainingRowsForAutoBuy}`);
+  }, []);
+
   const handleImportedRowsUpdate = useCallback((rows: import('./core/types').ImportedMLRow[]) => {
     setImportedRows(rows);
   }, []);
@@ -1390,6 +1439,10 @@ export default function App() {
             events={mlEvents}
             onRuntimeModeChange={handleRuntimeModeChange}
             onMlExitsEnabledChange={handleMlExitsEnabledChange}
+            mlPredictBuySettings={mlPredictBuySettings}
+            onMlPredictBuySettingsChange={handleMlPredictBuySettingsChange}
+            activeExecutionMode={engine.getAdapter().isLive ? 'Live' : 'Demo'}
+            activeExecutionAdapter={engine.getAdapter().isLive ? 'binance_live' : 'demo_simulated'}
           />
         );
       case 'logs':

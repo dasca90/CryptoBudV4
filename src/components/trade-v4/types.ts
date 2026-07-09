@@ -21,6 +21,8 @@ export type TradeV4CandidateView = {
   score: number | null;
   confidenceSource: string;
   source: string;
+  sourceLabel?: string;
+  sourcePresentation?: import('../../core/notifications/trade-source').TradeSourcePresentation;
   riskGroup: string;
   strategy: string;
   status:
@@ -42,7 +44,8 @@ export type TradeV4CandidateView = {
     | "WAIT_ENTRY_CONTRACT"
     | "WAIT_RISK_GROUP"
     | "WAIT_PROFESSIONAL_GATE"
-    | "INVALID_RUNTIME_STATE";
+    | "INVALID_RUNTIME_STATE"
+    | "FILTERED_ALREADY_OPEN_POSITION";
   lifecycleStatus?: string | null;
   canonicalDisplayStatus?: {
     canonicalStatus?: string;
@@ -103,8 +106,13 @@ export type TradeV4CandidateView = {
   actionableNoBuyReason?: string | null;
   technicalNoBuyReason?: string | null;
   secondaryDiagnosticReasons?: string[];
+  filteredReason?: string | null;
+  filteredBy?: string | null;
+  removedFromTopCandidates?: boolean;
+  removedFromExecutionPool?: boolean;
   handoffIntegrityStatus?: 'ok' | 'failed' | 'not_applicable' | string;
   renderedUserMessage?: string | null;
+  unicornDp?: import('../../core/unicorn/UnicornHunterTypes').UnicornDpConfirmation | null;
   gateAudit?: {
     spreadPct: number;
     maxSpreadSettingFromUI: number;
@@ -139,6 +147,8 @@ export type TradeV4CandidateView = {
     candidateRank?: number;
     selectedForExecution: boolean;
     finalNoBuyReason: string;
+    finalNoBuyReasonCode?: string;
+    finalNoBuyReasonLabel?: string;
     actionableNoBuyReason?: string;
     technicalNoBuyReason?: string;
     secondaryDiagnosticReasons?: string[];
@@ -222,6 +232,7 @@ export type TradeV4OpenPositionView = {
   priceQuality: "fresh" | "stale" | "fallback" | "pending" | "unavailable";
   ownerType?: string;
   sourceLabel?: string;
+  sourcePresentation?: import('../../core/notifications/trade-source').TradeSourcePresentation;
   mode?: string;
   executionMode?: string;
   executionAdapter?: string;
@@ -242,6 +253,13 @@ export type TradeV4OpenPositionView = {
   spreadPct?: number | null;
   quantity?: number;
   usedCapitalUsd?: number;
+  feeUsdEntry?: number;
+  feeUsdExitEstimated?: number;
+  feeUsdTotalEstimated?: number;
+  feeUsdTotalSoFar?: number;
+  feeRate?: number;
+  feeSource?: string;
+  operatorName?: string;
   confidence?: number | null;
   score?: number | null;
   scannerPeriod?: string | null;
@@ -294,6 +312,13 @@ export type TradeV4OpenPositionView = {
     grossPnlUsd: number;
     grossPnlPct: number;
     feesEstimated: number;
+    feeUsdEntry: number;
+    feeUsdExitEstimated: number;
+    feeUsdTotalEstimated: number;
+    feeUsdTotalSoFar: number;
+    feeRate: number;
+    feeSource: string;
+    operatorName: string;
     netPnlUsd: number;
     netPnlPct: number;
     formulaUsed: string;
@@ -343,12 +368,20 @@ export type TradeV4ClosedPositionView = {
   trainingEligible: boolean;
   ownerType?: string;
   sourceLabel?: string;
+  sourcePresentation?: import('../../core/notifications/trade-source').TradeSourcePresentation;
   modeLabel?: string;
   executionMode?: string;
   executionAdapter?: string;
   entryRule?: string | null;
   riskGroup?: string | null;
   fees?: number | null;
+  feeUsdEntry?: number | null;
+  feeUsdExit?: number | null;
+  feeUsdTotal?: number | null;
+  feeRate?: number | null;
+  feeSource?: string | null;
+  operatorName?: string | null;
+  grossPnlUsd?: number | null;
   netPnlUsd?: number | null;
   closePriceSource?: string | null;
   closePriceAgeMs?: number | null;
@@ -385,6 +418,12 @@ export type TradeV4ClosedPositionView = {
     grossPnlUsd: number;
     grossPnlPct: number;
     fees: number;
+    feeUsdEntry: number;
+    feeUsdExit: number;
+    feeUsdTotal: number;
+    feeRate: number;
+    feeSource: string;
+    operatorName: string;
     netPnlUsd: number;
     netPnlPct: number;
     closeReason: string;
@@ -444,6 +483,7 @@ export type TradingParametersView = {
   cooldownAfterBuyMs: number;
   cooldownAfterLossMs: number;
   paperAutoEnabled: boolean;
+  unicornHunter: import('../../core/unicorn/UnicornHunterTypes').UnicornHunterSettings;
   autoTradingCapital: number;
   capitalPerCoin: number;
   reinvestProfit: boolean;
@@ -517,6 +557,34 @@ export interface TradeV4NoBuyDisplay {
   topHighRiskMomentum?: Array<{ symbol: string; momentum: number; riskGroup: string; status?: string; blocker?: string | null }>;
   topVeryHighRiskMomentum?: Array<{ symbol: string; momentum: number; riskGroup: string; status?: string; blocker?: string | null }>;
   buyReadyCount?: number;
+  buyCandidateCount?: number;
+  actionableBuyCountNow?: number;
+  blockedByPacingCount?: number;
+  blockedByCooldownCount?: number;
+  blockedByBudgetCount?: number;
+  blockedByDuplicateCount?: number;
+  blockedByRiskCount?: number;
+  blockedByOpenPositionLimitCount?: number;
+  maxExecutionQueuePerScan?: number;
+  executionQueueAcceptedCount?: number;
+  deferredByQueueLimitCount?: number;
+  queueRejectedCount?: number;
+  queueAcceptedSymbols?: string[];
+  deferredByQueueLimitSymbols?: string[];
+  queueRejectedReasons?: string[];
+  nextQueueRetry?: string;
+  selectedButNotSubmittedCount?: number;
+  submitAttemptedCount?: number;
+  selectedButNotSubmittedReasons?: string[];
+  lastBuyAt?: number | null;
+  minBuyIntervalMs?: number | null;
+  cooldownUntil?: number | null;
+  nextBuyAllowedAt?: number | null;
+  msUntilNextBuyAllowed?: number | null;
+  buyPacingActive?: boolean;
+  buyCooldownActive?: boolean;
+  buyPacingReason?: string;
+  countSourceUsed?: string;
   blockedCount?: number;
   blockedBySpread?: number;
   blockedBySlippage?: number;
@@ -528,6 +596,32 @@ export interface TradeV4NoBuyDisplay {
   blockedByFinalExecutableFalse?: number;
   selectedForExecutionCount?: number;
   finalNoBuyReason?: string;
+}
+
+export type TradeV4UnicornHunterRuntimeStatusValue = 'OFF' | 'ON' | 'SCANNING' | 'BLOCKED' | 'ERROR';
+export interface TradeV4UnicornHunterRuntimeStatus {
+  enabled: boolean;
+  mode: import('../../core/unicorn/UnicornHunterTypes').UnicornHunterSettings['mode'];
+  status: TradeV4UnicornHunterRuntimeStatusValue;
+  scannerRunning: boolean;
+  lastScanCycleId: string | null;
+  lastCycleStartedAt: number | null;
+  lastCycleCompletedAt: number | null;
+  lastCycleDurationMs: number | null;
+  lastSymbolsSeen: number;
+  lastSymbolsEvaluated: number;
+  lastCandidatesProduced: number;
+  lastBuyAllowed: boolean;
+  reasonIfSkipped: string;
+  lastUnicornCandidateSymbol: string | null;
+  lastUnicornStage: string;
+  lastUnicornBlockReason: string;
+  lastUnicornConfirmationReason: string;
+  lastUnicornExecutionDecision: string;
+  lastUnicornSubmitAttempted: boolean;
+  lastUnicornAdapterCalled: boolean;
+  lastCalledAt: number | null;
+  notWiredDetected: boolean;
 }
 
 export interface TradeV4PageModel {
@@ -602,6 +696,9 @@ export interface TradeV4PageModel {
     openPositionsBefore?: number;
     openPositionsAfter?: number;
   };
+  unicornRadar?: import('../../core/unicorn/UnicornHunterTypes').UnicornRadarRow[];
+  unicornWatchlistSummary?: import('../../core/unicorn/UnicornHunterTypes').UnicornWatchlistSummary;
+  unicornHunterRuntime?: TradeV4UnicornHunterRuntimeStatus;
   autoStrategySummary?: {
     totalCandidates: number;
     conservative: number;
@@ -644,10 +741,28 @@ export interface TradeV4PageModel {
     nearMissPoolSize: number;
     maxEntriesPerCycle: number;
     maxSelectedPerScan?: number;
+    maxExecutionQueuePerScan?: number;
+    queueAcceptedCount?: number;
+    deferredByQueueLimitCount?: number;
+    queueRejectedCount?: number;
+    queueAcceptedSymbols?: string[];
+    deferredByQueueLimitSymbols?: string[];
+    queueRejectedReasons?: string[];
     availableSlots: number;
     capitalAvailable: number;
     decisionMode: string;
     executionAdapter: string;
+    autobotsSubmitAttemptedThisCycle?: number;
+    unicornSubmitAttemptedThisCycle?: number;
+    maxUnicornBuysPerCycle?: number;
+    maxAutoBotsBuysPerCycle?: number;
+    unicornSelectedThisCycle?: number;
+    autoBotsSelectedThisCycle?: number;
+    globalSubmitAttemptedThisCycle?: number;
+    unicornSelectedExecutableCount?: number;
+    unicornSelectedButNotSubmittedReason?: string;
+    unicornAdapterCalledThisCycle?: boolean;
+    autobotsConsumedGlobalSlot?: boolean;
   };
   scalperState?: {
     enabled: boolean;
