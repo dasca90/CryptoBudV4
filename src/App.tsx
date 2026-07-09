@@ -38,6 +38,10 @@ import { formatOvernightStabilityAudit, getOvernightStabilityBootedAt, OVERNIGHT
 import { getAirScannerCleanupStats } from './features/air-scanner-lab/utils/airScannerMemoryAudit';
 import type { MainTab } from './state/ui-store';
 import packageJson from '../package.json';
+import { V5_APP_BUILD, APP_VARIANT_LABEL } from './core/ai/v5Config';
+import { AiTakeoverCard } from './components/ai/AiTakeoverCard';
+import { AiTakeoverTrader } from './core/ai/AiTakeoverTrader';
+import type { AiTakeoverMode } from './core/ai/AiTakeoverTypes';
 
 const RENDERER_BUILD_TIME = new Date().toISOString();
 const RENDERER_BUILD_ID = `runtime-${Date.now().toString(36)}`;
@@ -144,6 +148,18 @@ export default function App() {
   const [importedRows, setImportedRows] = useState<ImportedMLRow[]>([]);
   const [guardState, setGuardState] = useState<MlRuntimeGuardState>(() => mlRuntimeGuard.getGuardState(false, false));
   const [mlEvents, setMlEvents] = useState<MlRuntimeEvent[]>(() => mlRuntimeEvents.getRecentEvents(25));
+  const [aiTrader] = useState(() => new AiTakeoverTrader());
+  const [aiTakeoverMode, setAiTakeoverMode] = useState<AiTakeoverMode>('OFF');
+  useEffect(() => {
+    aiTrader.init().then(() => {
+      setAiTakeoverMode(aiTrader.getMode());
+      forceUpdate(n => n + 1);
+    });
+  }, [aiTrader]);
+  const handleAiTakeoverModeChange = useCallback((mode: AiTakeoverMode) => {
+    aiTrader.setMode(mode);
+    setAiTakeoverMode(mode);
+  }, [aiTrader]);
   const [publicDataReady, setPublicDataReady] = useState(false);
   const [publicDataRefreshing, setPublicDataRefreshing] = useState(false);
   const [exchangeInfoLoaded, setExchangeInfoLoaded] = useState(false);
@@ -1480,6 +1496,7 @@ export default function App() {
       totalEquity={totalEquity}
       openPositionCount={openPositionCount}
       persistenceStatus={journal.getPersistenceStatus()}
+      variantLabel={V5_APP_BUILD ? APP_VARIANT_LABEL : undefined}
       onStart={handleStart}
       onStop={handleStop}
       onEmergencyStop={handleEmergencyStop}
@@ -1488,6 +1505,14 @@ export default function App() {
       onExportML={handleExportML}
       onExportTraining={handleExportTraining}
     >
+      {V5_APP_BUILD && (
+        <AiTakeoverCard
+          mode={aiTakeoverMode}
+          onModeChange={handleAiTakeoverModeChange}
+          providerConfigured={aiTrader.getConfig().apiKey.length > 0}
+          activePositionCount={aiTrader.getPositions().length}
+        />
+      )}
       {renderPage()}
     </AppShell>
   );

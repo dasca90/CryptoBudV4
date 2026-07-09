@@ -1569,3 +1569,74 @@ select option {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(88, 166, 255, 0.4);
 }
+
+/* ── V5 AI Takeover Card ────────────────────────────── */
+.v5-ai-takeover-card {
+  background: linear-gradient(135deg, rgba(88, 166, 255, 0.06), rgba(121, 40, 202, 0.08));
+  border: 1px solid rgba(88, 166, 255, 0.2);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.v5-ai-takeover-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.v5-ai-takeover-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #58a6ff;
+}
+
+.v5-ai-takeover-badge {
+  font-size: 8px;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(121, 40, 202, 0.2);
+  color: #bc8cff;
+  border: 1px solid rgba(121, 40, 202, 0.3);
+}
+
+.v5-ai-takeover-modes {
+  display: flex;
+  gap: 3px;
+}
+
+.v5-ai-mode-btn {
+  font-size: 9px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.v5-ai-mode-btn:hover {
+  border-color: var(--text-primary);
+  color: var(--text-primary);
+}
+
+.v5-ai-mode-btn--active {
+  font-weight: 600;
+}
+
+.v5-ai-takeover-info {
+  display: flex;
+  gap: 10px;
+  font-size: 9px;
+  color: var(--text-secondary);
+  margin-left: auto;
+}

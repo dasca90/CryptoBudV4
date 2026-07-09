@@ -23,6 +23,7 @@ interface Props {
   onExportTrades: () => void;
   onExportML: () => void;
   onExportTraining: () => void;
+  variantLabel?: string;
 }
 
 export function AppShell({
@@ -31,6 +32,7 @@ export function AppShell({
   persistenceStatus,
   onStart, onStop, onEmergencyStop, onRunLiveCheck,
   onExportTrades, onExportML, onExportTraining,
+  variantLabel,
 }: Props) {
   return (
     <div className="app-shell">
@@ -42,6 +44,7 @@ export function AppShell({
         openPositionCount={openPositionCount}
         adapterName={engine.getAdapter().name}
         persistenceStatus={persistenceStatus}
+        variantLabel={variantLabel}
         onStart={onStart}
         onStop={onStop}
         onEmergencyStop={onEmergencyStop}

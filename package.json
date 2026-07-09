@@ -5,7 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:v4": "vite",
+    "dev:v5-ai": "vite --mode v5-ai",
     "build": "tsc && vite build",
+    "build:v4": "tsc && vite build",
+    "build:v5-ai": "tsc && vite build --mode v5-ai",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "tsc --noEmit",

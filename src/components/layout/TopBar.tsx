@@ -17,6 +17,7 @@ interface Props {
   onExportTrades: () => void;
   onExportML: () => void;
   onExportTraining: () => void;
+  variantLabel?: string;
 }
 
 function liveBadgeVariant(state: LiveSafetyState) {
@@ -53,11 +54,12 @@ export function TopBar({
   liveState, isRunning, totalEquity, openPositionCount, adapterName, persistenceStatus,
   onStart, onStop, onEmergencyStop, onRunLiveCheck,
   onExportTrades, onExportML, onExportTraining,
+  variantLabel,
 }: Props) {
   return (
     <header className="topbar">
       <div className="topbar-left">
-        <h1 className="topbar-title">⟠ CryptoBud V4</h1>
+        <h1 className="topbar-title">{variantLabel ?? '⟠ CryptoBud V4'}</h1>
         <StatusBadge variant={liveBadgeVariant(liveState)} />
         <PersistenceBadge status={persistenceStatus} />
         <span className="topbar-stat">
