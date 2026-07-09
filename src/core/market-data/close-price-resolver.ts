@@ -1,6 +1,8 @@
 import type { ClosePriceResolution, ClosePriceSourceDiagnostic } from '../types';
 import { MarketDataFeed } from '../../utils/MarketDataFeed';
 import { getStalePriceAgeMs } from './market-data-quality';
+import { logger } from '../../utils/logger';
+import { BinancePublicClient, getBinancePublicCircuitSnapshot } from './BinancePublicClient';
 
 export interface ResolveClosePriceOptions {
   lastKnownPrice?: number;
@@ -86,6 +88,12 @@ export async function resolveClosePrice(coin: string, side: 'BUY' | 'SELL', opti
   const capturedAt = Date.now();
   const staleThresholdMs = options.staleThresholdMs ?? getStalePriceAgeMs();
 
+  function auditRecovery(res: ClosePriceResolution): ClosePriceResolution {
+    const circuit = getBinancePublicCircuitSnapshot();
+    logger.info(`EXIT_PRICE_SOURCE_RECOVERY_AUDIT: symbol=${coin} positionId=none attemptedSources=${res.attemptedSources.join('|') || 'none'} selectedSource=${res.source} fresh=${String(res.isFresh)} price=${res.price} ageMs=${res.ageMs} circuitBreakerState=${circuit.circuitBreakerState} retryScheduled=${String(!res.isFresh)} exitTickSkipped=${String(!res.isFresh)} blockedReason=${res.unavailableReason ?? (res.isFresh ? 'none' : 'no_fresh_close_price')} invariantOk=${String(res.isRealMarketPrice || !res.isFresh)}`);
+    return res;
+  }
+
   async function tryBookTicker(): Promise<ClosePriceResolution | null> {
     attemptedSources.push('book_ticker');
     try {
@@ -116,9 +124,17 @@ export async function resolveClosePrice(coin: string, side: 'BUY' | 'SELL', opti
   async function tryRestTicker(): Promise<ClosePriceResolution | null> {
     attemptedSources.push('rest_ticker');
     try {
+      const circuit = getBinancePublicCircuitSnapshot();
+      if (circuit.circuitBreakerState !== 'CLOSED') {
+        const reason = circuit.circuitBreakerState === 'RATE_LIMITED'
+          ? 'skipped_request_budget_exceeded'
+          : 'skipped_public_api_offline';
+        errors.push(`rest_ticker_${reason}`);
+        sourceDiagnostics.push(diagnostic('rest_ticker', 0, null, staleThresholdMs, reason));
+        return null;
+      }
       const symbol = coin.replace('USDT', '') + 'USDT';
-      const resp = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
-      const data = await resp.json() as { symbol?: string; price?: string };
+      const data = await new BinancePublicClient().getTickerPrice(symbol) as { symbol?: string; price?: string };
       const p = Number.parseFloat(String(data.price ?? '0'));
       const valid = Number.isFinite(p) && p > 0;
       sourceDiagnostics.push(diagnostic('rest_ticker', valid ? p : 0, 0, staleThresholdMs));
@@ -164,6 +180,12 @@ export async function resolveClosePrice(coin: string, side: 'BUY' | 'SELL', opti
     const ageMs = ageFrom(options.lastKnownPriceAt, Date.now());
     const diag = diagnostic('position.lastKnownPrice', p, ageMs, staleThresholdMs);
     sourceDiagnostics.push(diag);
+    logger.info(
+      `EXIT_LAST_KNOWN_PRICE_FRESHNESS_AUDIT: symbol=${coin} ` +
+      `available=${String(diag.available)} fresh=${String(diag.fresh)} ` +
+      `price=${p} ageMs=${ageMs ?? 'n/a'} staleThresholdMs=${staleThresholdMs} ` +
+      `selected=${String(diag.fresh && p > 0)} failureReason=${diag.fresh && p > 0 ? 'none' : (diag.available ? 'position_last_known_stale' : 'position_last_known_empty')}`
+    );
     if (diag.fresh && p > 0) {
       return withDiagnostics({
         symbol: coin, price: p, bidPrice: p, askPrice: p, lastPrice: p,
@@ -194,17 +216,17 @@ export async function resolveClosePrice(coin: string, side: 'BUY' | 'SELL', opti
   }
 
   const bookResult = await tryBookTicker();
-  if (bookResult) return bookResult;
-
-  const restResult = await tryRestTicker();
-  if (restResult) return restResult;
+  if (bookResult) return auditRecovery(bookResult);
 
   const cacheResult = tryLiveCache();
-  if (cacheResult) return cacheResult;
+  if (cacheResult) return auditRecovery(cacheResult);
+
+  const restResult = await tryRestTicker();
+  if (restResult) return auditRecovery(restResult);
 
   const positionResult = tryPositionLastKnown();
-  if (positionResult) return positionResult;
+  if (positionResult) return auditRecovery(positionResult);
 
   recordEntrySnapshotFallback();
-  return unavailable();
+  return auditRecovery(unavailable());
 }

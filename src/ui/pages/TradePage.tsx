@@ -103,6 +103,8 @@ export function TradePage({
   const [paperAutoEnabled, setPaperAutoEnabled] = useState(paperSettings.paperAutoExecutionEnabled);
   const [autoBotsClickCounter, setAutoBotsClickCounter] = useState(0);
   const autoBotsLastToggleRef = useRef(0);
+  const tradeScrollRef = useRef<HTMLDivElement | null>(null);
+  const tradeScrollAuditLastRef = useRef(0);
   const handleTogglePaperAuto = () => {
     const clickId = autoBotsClickCounter + 1;
     setAutoBotsClickCounter(clickId);
@@ -710,9 +712,97 @@ export function TradePage({
     },
   };
 
+  const emitTradeScrollContainerAudit = useCallback((reason: string) => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const el = tradeScrollRef.current;
+    if (!el) return;
+    const now = Date.now();
+    if (reason === 'scroll' && now - tradeScrollAuditLastRef.current < 1000) return;
+    tradeScrollAuditLastRef.current = now;
+
+    const style = window.getComputedStyle(el);
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const appHeaderHeight = document.querySelector('.topbar')?.getBoundingClientRect().height ?? 0;
+    const tabNavHeight = document.querySelector('.main-tabs')?.getBoundingClientRect().height ?? 0;
+    const aiCommandCenterHeight = document.querySelector('.v5-ai-command-center')?.getBoundingClientRect().height ?? 0;
+    const availableTradeHeight = el.getBoundingClientRect().height;
+    const tradeScrollContainerClientHeight = el.clientHeight;
+    const tradeScrollContainerScrollHeight = el.scrollHeight;
+    const maxScrollTop = Math.max(0, tradeScrollContainerScrollHeight - tradeScrollContainerClientHeight);
+    const bottomPaddingPx = Number.parseFloat(style.paddingBottom) || 0;
+    const overflowAllowsScroll = style.overflowY === 'auto' || style.overflowY === 'scroll';
+    const canScrollVertically = overflowAllowsScroll && maxScrollTop > 0;
+    const compactMode = el.classList.contains('compact') || document.body.classList.contains('compact-mode');
+    const aiCommandCenterExpanded = aiCommandCenterHeight > 0;
+    const invariantOk = overflowAllowsScroll
+      && bottomPaddingPx >= 120
+      && (maxScrollTop === 0 || canScrollVertically);
+    const failureReason = !overflowAllowsScroll
+      ? 'TRADE_TAB_OVERFLOW_Y_NOT_SCROLLABLE'
+      : bottomPaddingPx < 120
+        ? 'TRADE_TAB_BOTTOM_PADDING_TOO_SMALL'
+        : maxScrollTop > 0 && !canScrollVertically
+          ? 'TRADE_TAB_SCROLL_RANGE_UNREACHABLE'
+          : 'none';
+
+    logger.info(`TRADE_TAB_SCROLL_CONTAINER_AUDIT: reason=${reason} viewportHeight=${Math.round(viewportHeight)} appHeaderHeight=${Math.round(appHeaderHeight)} tabNavHeight=${Math.round(tabNavHeight)} aiCommandCenterHeight=${Math.round(aiCommandCenterHeight)} availableTradeHeight=${Math.round(availableTradeHeight)} tradeScrollContainerClientHeight=${tradeScrollContainerClientHeight} tradeScrollContainerScrollHeight=${tradeScrollContainerScrollHeight} canScrollVertically=${String(canScrollVertically)} currentScrollTop=${Math.round(el.scrollTop)} maxScrollTop=${Math.round(maxScrollTop)} bottomPaddingPx=${Math.round(bottomPaddingPx)} activeTab=TRADE compactMode=${String(compactMode)} aiCommandCenterExpanded=${String(aiCommandCenterExpanded)} invariantOk=${String(invariantOk)} failureReason=${failureReason}`);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const el = tradeScrollRef.current;
+    if (!el) return;
+
+    let raf = window.requestAnimationFrame(() => emitTradeScrollContainerAudit('mount'));
+    const scheduleAudit = (reason: string) => {
+      window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(() => emitTradeScrollContainerAudit(reason));
+    };
+    const onResize = () => scheduleAudit('resize');
+    const onScroll = () => scheduleAudit('scroll');
+
+    window.addEventListener('resize', onResize);
+    el.addEventListener('scroll', onScroll, { passive: true });
+
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(() => scheduleAudit('content_resize'));
+    resizeObserver?.observe(el);
+    const aiCard = document.querySelector('.v5-ai-takeover-card');
+    if (aiCard) resizeObserver?.observe(aiCard);
+
+    const mutationObserver = typeof MutationObserver === 'undefined'
+      ? null
+      : new MutationObserver(() => scheduleAudit('ai_command_center_update'));
+    if (aiCard) {
+      mutationObserver?.observe(aiCard, { childList: true, subtree: true, attributes: true });
+    }
+
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener('resize', onResize);
+      el.removeEventListener('scroll', onScroll);
+      resizeObserver?.disconnect();
+      mutationObserver?.disconnect();
+    };
+  }, [emitTradeScrollContainerAudit]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const raf = window.requestAnimationFrame(() => emitTradeScrollContainerAudit('trade_model_update'));
+    return () => window.cancelAnimationFrame(raf);
+  }, [
+    emitTradeScrollContainerAudit,
+    airModel.candidates.length,
+    airModel.openPositions.length,
+    airModel.closedPositions.length,
+    airModel.scannerRunning,
+  ]);
+
   // 3D Air Scanner is the only master UI (Classic removed from runtime)
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div className="trade-tab-root" data-testid="trade-tab-scroll-container" ref={tradeScrollRef}>
+      <div className="trade-tab-layout" data-testid="trade-tab-layout">
         <TradeV4Page
           model={airModel}
           closedTradesRestoring={!!closedTradesBootRestoring}
@@ -769,6 +859,7 @@ export function TradePage({
           <div style={{ color: '#f85149', fontSize: 11, padding: '0 8px 8px 8px' }}>{scannerConfigError}</div>
         )}
       </div>
+    </div>
     );
 }
   const defaultManualDipperSetup = createDefaultAppSettings().manualDipperSetup;

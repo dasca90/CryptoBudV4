@@ -865,7 +865,9 @@
 .trade-v4-grid-v3 {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
   overflow: hidden;
   background: var(--neon-bg);
   padding: 6px;
@@ -885,13 +887,25 @@
   flex: 0 0 320px;
   min-width: 290px;
   max-width: 420px;
+  min-height: 0;
+  max-height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
+  scroll-padding-bottom: 160px;
+  padding-bottom: calc(160px + env(safe-area-inset-bottom, 0px));
+  box-sizing: border-box;
   scrollbar-width: thin;
   scrollbar-color: rgba(0,234,255,0.12) transparent;
 }
 .trade-v4-left::-webkit-scrollbar { width: 4px; }
 .trade-v4-left::-webkit-scrollbar-thumb { background: rgba(0,234,255,0.12); border-radius: 2px; }
+
+.trade-v4-left-bottom-sentinel {
+  height: 120px;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
 
 .trade-v4-center {
   flex: 1 1 0;

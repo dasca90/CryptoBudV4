@@ -31,6 +31,7 @@ import type {
 import { computeMarketGroupSummary } from '../core/scanner/MarketGroupSummary';
 import type { TradeV4CandidateView } from '../components/trade-v4/types';
 import { logger } from '../utils/logger';
+import { markBinanceExchangeInfoLoaded, resetBinancePublicCircuitForTests } from '../core/market-data/BinancePublicClient';
 
 let passed = 0;
 let failed = 0;
@@ -43,6 +44,56 @@ function assert(condition: boolean, msg: string) {
 function assertEqual<T>(a: T, b: T, msg: string) {
   assert(a === b, `${msg} — expected ${JSON.stringify(a)}, got ${JSON.stringify(b)}`);
 }
+
+function setStableManualPrice(feed: MarketDataFeed, symbol: string, price: number) {
+  feed.setManualBookTicker(symbol, price * 0.999, price * 1.001, Date.now() + 600000);
+}
+
+function makeKlines(symbol: string, interval: string, limit: number): unknown[][] {
+  const base = symbol === 'ETHUSDT' ? 3000 : symbol === 'ADAUSDT' ? 0.5 : symbol === 'SOLUSDT' ? 100 : 50000;
+  const intervalMove: Record<string, number> = { '1m': 0.0002, '5m': 0.0005, '15m': 0.0008, '1h': 0.0025, '4h': 0.006, '1d': 0.015, '1w': 0.035 };
+  const move = intervalMove[interval] ?? 0.001;
+  const now = Date.now();
+  return Array.from({ length: Math.max(2, limit) }, (_, i) => {
+    const progress = i / Math.max(1, limit - 1);
+    const wave = Math.sin(i / 3) * move * 0.35;
+    const close = base * (1 + move * progress + wave);
+    const open = base * (1 + move * Math.max(0, progress - 1 / Math.max(1, limit - 1)));
+    const high = Math.max(open, close) * 1.001;
+    const low = Math.min(open, close) * 0.999;
+    return [now - (limit - i) * 60000, String(open), String(high), String(low), String(close), String(1000 + i)];
+  });
+}
+
+globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
+  const url = new URL(String(input));
+  if (url.pathname === '/api/v3/klines') {
+    const symbol = url.searchParams.get('symbol') ?? 'BTCUSDT';
+    const interval = url.searchParams.get('interval') ?? '1m';
+    const limit = Number(url.searchParams.get('limit') ?? 100);
+    return new Response(JSON.stringify(makeKlines(symbol, interval, limit)), { status: 200 });
+  }
+  if (url.pathname === '/api/v3/ticker/bookTicker') {
+    const symbol = url.searchParams.get('symbol') ?? 'BTCUSDT';
+    const price = symbol === 'ETHUSDT' ? 3000 : symbol === 'ADAUSDT' ? 0.5 : symbol === 'SOLUSDT' ? 100 : 50000;
+    return new Response(JSON.stringify({ symbol, bidPrice: String(price * 0.999), askPrice: String(price * 1.001) }), { status: 200 });
+  }
+  if (url.pathname === '/api/v3/ticker/price') {
+    const symbol = url.searchParams.get('symbol') ?? 'BTCUSDT';
+    const price = symbol === 'ETHUSDT' ? 3000 : symbol === 'ADAUSDT' ? 0.5 : symbol === 'SOLUSDT' ? 100 : 50000;
+    return new Response(JSON.stringify({ symbol, price: String(price) }), { status: 200 });
+  }
+  if (url.pathname === '/api/v3/ticker/24hr') {
+    return new Response(JSON.stringify([{ symbol: 'BTCUSDT', priceChangePercent: '1.2', quoteVolume: '1000000' }]), { status: 200 });
+  }
+  if (url.pathname === '/api/v3/exchangeInfo') {
+    return new Response(JSON.stringify({ symbols: [] }), { status: 200 });
+  }
+  return new Response(JSON.stringify({}), { status: 200 });
+};
+
+resetBinancePublicCircuitForTests();
+markBinanceExchangeInfoLoaded(true);
 
 function makeDecision(overrides?: Partial<TraderBrainDecision>): TraderBrainDecision {
   return {
@@ -73,8 +124,8 @@ async function main() {
 
   const scannerA = new MarketScanner();
   const feedA = MarketDataFeed.getInstance();
-  feedA.setManualPrice('BTCUSDT', 50000);
-  feedA.setManualPrice('ETHUSDT', 3000);
+  setStableManualPrice(feedA, 'BTCUSDT', 50000);
+  setStableManualPrice(feedA, 'ETHUSDT', 3000);
 
   scannerA.setWatchlist(['BTCUSDT', 'ETHUSDT']);
   scannerA.setBrainDecide(async (symbol, _price) => {
@@ -111,7 +162,7 @@ async function main() {
 
   const scannerB = new MarketScanner();
   const feedB = MarketDataFeed.getInstance();
-  feedB.setManualPrice('BTCUSDT', 50000);
+  setStableManualPrice(feedB, 'BTCUSDT', 50000);
 
   scannerB.setWatchlist(['BTCUSDT']);
   scannerB.setBrainDecide(async (symbol, _price) => {
@@ -134,8 +185,8 @@ async function main() {
   console.log('\n── C. Scanner blocks BTC dump for alt ──\n');
 
   const scannerC = new MarketScanner();
-  feedA.setManualPrice('ADAUSDT', 0.5);
-  feedA.setManualPrice('SOLUSDT', 100);
+  setStableManualPrice(feedA, 'ADAUSDT', 0.5);
+  setStableManualPrice(feedA, 'SOLUSDT', 100);
 
   scannerC.setWatchlist(['ADAUSDT', 'SOLUSDT']);
   scannerC.setBrainDecide(async (symbol, _price) => {
@@ -211,9 +262,9 @@ async function main() {
   console.log('\n── E. Scanner diagnostics count blockers ──\n');
 
   const scannerE = new MarketScanner();
-  feedA.setManualPrice('BTCUSDT', 50000);
-  feedA.setManualPrice('ETHUSDT', 3000);
-  feedA.setManualPrice('ADAUSDT', 0.5);
+  setStableManualPrice(feedA, 'BTCUSDT', 50000);
+  setStableManualPrice(feedA, 'ETHUSDT', 3000);
+  setStableManualPrice(feedA, 'ADAUSDT', 0.5);
 
   scannerE.setWatchlist(['BTCUSDT', 'ETHUSDT', 'ADAUSDT']);
   scannerE.setBrainDecide(async (symbol, _price) => {
@@ -263,7 +314,7 @@ async function main() {
 
   // The diagnostics are populated during scan, but we can test the counter logic
   const scannerG = new MarketScanner();
-  feedA.setManualPrice('BTCUSDT', 50000);
+  setStableManualPrice(feedA, 'BTCUSDT', 50000);
   scannerG.setWatchlist(['BTCUSDT']);
   scannerG.setBrainDecide(async (symbol, _price) => {
     return makeDecision({
@@ -315,7 +366,7 @@ async function main() {
   console.log('\n── J. Scanner history capped ──\n');
 
   const scannerJ = new MarketScanner();
-  feedA.setManualPrice('BTCUSDT', 50000);
+  setStableManualPrice(feedA, 'BTCUSDT', 50000);
   scannerJ.setWatchlist(['BTCUSDT']);
   scannerJ.setBrainDecide(async (symbol, _price) => {
     return makeDecision({ symbol, status: 'WAITING', blockReasons: ['waiting'] });
@@ -372,7 +423,7 @@ async function main() {
   // ── M. scanner overlap is skipped/throttled (no parallel scan) ──
   console.log('\n── M. scanner overlap is skipped/throttled (no parallel scan) ──\n');
   const scannerM = new MarketScanner();
-  feedA.setManualPrice('SOLUSDT', 100);
+  setStableManualPrice(feedA, 'SOLUSDT', 100);
   scannerM.setWatchlist(['SOLUSDT']);
   scannerM.setBrainDecide(async (symbol) => {
     await new Promise((r) => setTimeout(r, 150));
@@ -392,7 +443,7 @@ async function main() {
   assert(appSrc.includes('AUTO_START_REQUESTED'), 'Start logs AUTO_START_REQUESTED');
   assert(appSrc.includes('SCANNER_PUBLIC_DATA_CHECK_START'), 'Start logs SCANNER_PUBLIC_DATA_CHECK_START');
   assert(appSrc.includes('SCANNER_PUBLIC_DATA_CHECK_SUCCESS'), 'Start logs SCANNER_PUBLIC_DATA_CHECK_SUCCESS');
-  assert(appSrc.includes('PUBLIC_DATA_OFFLINE') && appSrc.includes('EXCHANGE_INFO_NOT_LOADED'), 'Start has clear public data failure reasons');
+  assert(appSrc.includes('PUBLIC_MARKET_DATA_OFFLINE') && appSrc.includes('exchangeInfoLoaded') && appSrc.includes('lastFailureReason'), 'Start has clear public data failure reasons');
   assert(!appSrc.includes('loadApiConfig') && !appSrc.includes('apiSecret') && !appSrc.includes('apiKeyInput'), 'Start path does not require API key/secret');
   assert(tradeSrc.includes('const autoStartDisabled = state.scannerRunning || !state.universeMode;'), 'Start button state does not depend on API keys');
   const scannerSrc = readFileSync('src/core/scanner/MarketScanner.ts', 'utf8');
@@ -501,7 +552,7 @@ async function main() {
   {
     // Use a dedicated scanner that produces 0 BUY (hard-block all candidates)
     const scannerY = new MarketScanner();
-    feedA.setManualPrice('ADAUSDT', 1.0);
+    setStableManualPrice(feedA, 'ADAUSDT', 1.0);
     scannerY.setWatchlist(['ADAUSDT']);
     scannerY.setBrainDecide(async (symbol) => {
       return makeDecision({
@@ -572,8 +623,8 @@ async function main() {
 
   const scannerX = new MarketScanner();
   const feedX = MarketDataFeed.getInstance();
-  feedX.setManualPrice('BTCUSDT', 50000);
-  feedX.setManualPrice('ETHUSDT', 3000);
+  setStableManualPrice(feedX, 'BTCUSDT', 50000);
+  setStableManualPrice(feedX, 'ETHUSDT', 3000);
   scannerX.setWatchlist(['BTCUSDT']);
   scannerX.setBrainDecide(async (symbol, _price) => {
     return makeDecision({ symbol, status: 'WAITING', confidence: 0.3, blockReasons: [] });
@@ -661,7 +712,7 @@ async function main() {
   logger.clear();
   const scannerY = new MarketScanner();
   const feedY = MarketDataFeed.getInstance();
-  feedY.setManualPrice('BTCUSDT', 50000);
+  setStableManualPrice(feedY, 'BTCUSDT', 50000);
   scannerY.setWatchlist(['BTCUSDT']);
   scannerY.setEntryGateQualitySettings({
     maxSpreadPct: 3,

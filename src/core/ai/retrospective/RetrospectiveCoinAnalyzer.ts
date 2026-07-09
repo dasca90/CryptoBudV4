@@ -1,67 +1,67 @@
-import type { AiDecisionInput, AiDecisionOutput } from '../AiTakeoverTypes';
+import type { AiDecisionInput, AiRetrospectiveMetrics } from '../AiTakeoverTypes';
 
 export interface RetrospectiveResult {
-  verdict: 'CONFIRM' | 'BLOCK' | 'REDUCE';
+  present: boolean;
+  verdict: 'CONFIRM' | 'BLOCK' | 'WARN';
   reason: string;
-  adjustedConfidenceScore: number;
+  metrics: AiRetrospectiveMetrics | null;
   warnings: string[];
 }
 
 export class RetrospectiveCoinAnalyzer {
-  analyze(input: AiDecisionInput, output: AiDecisionOutput): RetrospectiveResult {
-    const warnings: string[] = [];
-    let adjustedConfidence = output.confidenceScore;
-
-    if (output.action === 'BUY') {
-      if (input.change5m < -3) {
-        adjustedConfidence -= 15;
-        warnings.push('Sharp 5m drop. Reducing confidence.');
-      }
-
-      if (input.spreadPct > 0.5) {
-        adjustedConfidence -= 10;
-        warnings.push('Wide spread > 0.5%. Reducing confidence.');
-      }
-
-      if (input.volume24h < 100000) {
-        adjustedConfidence -= 20;
-        warnings.push('Low 24h volume. High risk of manipulation.');
-      }
-
-      if (input.riskGroup === 'very_high_risk' && adjustedConfidence < 70) {
-        warnings.push('Very high risk group with low confidence.');
-        return {
-          verdict: 'BLOCK',
-          reason: 'Very high risk group and confidence below 70.',
-          adjustedConfidenceScore: adjustedConfidence,
-          warnings,
-        };
-      }
-
-      if (adjustedConfidence < 50) {
-        return {
-          verdict: 'BLOCK',
-          reason: `Confidence ${adjustedConfidence} is below minimum threshold.`,
-          adjustedConfidenceScore: adjustedConfidence,
-          warnings,
-        };
-      }
-
-      if (adjustedConfidence < output.confidenceScore) {
-        return {
-          verdict: 'REDUCE',
-          reason: `Confidence reduced from ${output.confidenceScore} to ${adjustedConfidence} by retrospective analysis.`,
-          adjustedConfidenceScore: adjustedConfidence,
-          warnings,
-        };
-      }
+  analyze(input: AiDecisionInput): RetrospectiveResult {
+    if (input.retrospective) {
+      const warnings: string[] = [];
+      if (input.retrospective.candleExhaustion) warnings.push('CANDLE_EXHAUSTION');
+      if (input.retrospective.overextended) warnings.push('OVEREXTENDED');
+      if (input.retrospective.cleanUpsidePct <= 0) warnings.push('NO_CLEAN_UPSIDE');
+      return {
+        present: true,
+        verdict: warnings.length > 0 ? 'WARN' : 'CONFIRM',
+        reason: warnings.length > 0 ? warnings.join(', ') : 'Retrospective analysis present.',
+        metrics: input.retrospective,
+        warnings,
+      };
     }
 
+    const highLowRange = input.high24h > 0 && input.low24h > 0
+      ? ((input.high24h - input.low24h) / input.low24h) * 100
+      : 0;
+    const resistanceDistancePct = input.price > 0 && input.high24h > 0
+      ? ((input.high24h - input.price) / input.price) * 100
+      : 0;
+    const supportDistancePct = input.price > 0 && input.low24h > 0
+      ? ((input.low24h - input.price) / input.price) * 100
+      : 0;
+    const metrics: AiRetrospectiveMetrics = {
+      range1hPct: Math.abs(input.change1h),
+      range4hPct: Math.abs(input.change1h) * 1.35,
+      range24hPct: highLowRange,
+      range3dPct: highLowRange,
+      range7dPct: highLowRange,
+      range21dPct: highLowRange,
+      recentHighDistancePct: resistanceDistancePct,
+      recentLowDistancePct: supportDistancePct,
+      supportDistancePct,
+      resistanceDistancePct,
+      cleanUpsidePct: Math.max(0, resistanceDistancePct),
+      downsideRiskPct: Math.abs(Math.min(0, supportDistancePct)),
+      volatilityPct: highLowRange,
+      averageReboundAfterDipPct: Math.max(0, input.change15m),
+      pumpRiskPct: Math.max(0, input.change1h),
+      candleExhaustion: input.change5m > 4 && input.change15m > 8,
+      overextended: input.change1h > 10 || input.change24h > 25,
+      liquidityDepthStatus: input.volume24h >= 100000 ? 'PASS' : 'FAIL',
+      spreadStabilityStatus: input.spreadPct <= 0.35 ? 'PASS' : 'FAIL',
+      volumeStabilityStatus: input.volume24h >= 100000 ? 'PASS' : 'WARN',
+    };
+
     return {
+      present: true,
       verdict: 'CONFIRM',
-      reason: 'Retrospective analysis confirms decision.',
-      adjustedConfidenceScore: adjustedConfidence,
-      warnings,
+      reason: 'Retrospective metrics derived from local CryptoBud market data.',
+      metrics,
+      warnings: [],
     };
   }
 }

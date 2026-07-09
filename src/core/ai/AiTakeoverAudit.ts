@@ -1,4 +1,4 @@
-import type { AiAuditEntry, AiDecisionRecord, AiTakeoverConfig, AiTakeoverMode } from './AiTakeoverTypes';
+import type { AiAuditEntry, AiAuditEvent, AiDecisionRecord, AiTakeoverConfig } from './AiTakeoverTypes';
 import { AI_TAKEOVER_STORAGE_KEYS } from './AiTakeoverTypes';
 
 export class AiTakeoverAudit {
@@ -18,11 +18,16 @@ export class AiTakeoverAudit {
       rawResponse: '',
       parsedOutput: null,
       validationErrors: [],
+      validationWarnings: [],
       riskVerdict: 'PENDING',
       retrospectiveVerdict: null,
       status: 'PENDING',
-      finalMode: config.mode,
+      mode: config.mode,
+      executionMode: 'current_app_adapter',
       executionId: null,
+      buyIntentCreated: false,
+      submitAttempted: false,
+      blockedReason: null,
       auditEntries: [],
     };
     this.records.unshift(record);
@@ -30,10 +35,10 @@ export class AiTakeoverAudit {
     return record;
   }
 
-  addAuditEntry(record: AiDecisionRecord, stage: string, message: string, data: Record<string, unknown> = {}): void {
+  addAuditEntry(record: AiDecisionRecord, event: AiAuditEvent, message: string, data: Record<string, unknown> = {}): void {
     const entry: AiAuditEntry = {
       timestamp: Date.now(),
-      stage,
+      event,
       message,
       data,
     };

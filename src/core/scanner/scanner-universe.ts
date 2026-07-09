@@ -1,6 +1,7 @@
 import type { UniverseMode } from '../types';
 import { BinancePublicClient } from '../market-data/BinancePublicClient';
 import { filterScannerUniverse, type FilteredUniverseResult, type ScannerBanFilterOptions } from './scanner-ban-filter';
+import { getMarketDataCache } from '../market/MarketDataCache';
 
 const TOP_20_SYMBOLS = [
   'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT',
@@ -133,6 +134,9 @@ export async function buildScannerUniverse(
   const client = new BinancePublicClient();
   const exchangeInfo = await client.getExchangeInfo();
   const tickers = await client.get24hTickers();
+  const marketDataCache = getMarketDataCache();
+  marketDataCache.setExchangeInfo(exchangeInfo);
+  marketDataCache.setTicker24hr(tickers);
 
   const usdtTickers = tickers
     .filter(t => typeof t.symbol === 'string' && (t.symbol as string).endsWith('USDT'))

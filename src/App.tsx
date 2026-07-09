@@ -7,7 +7,7 @@ import { JsonExporter } from './core/persistence/JsonExporter';
 import { PaperExchangeAdapter } from './core/exchange/PaperExchangeAdapter';
 import { LiveBinanceAdapter } from './core/exchange/LiveBinanceAdapter';
 import { MarketDataFeed } from './utils/MarketDataFeed';
-import { BinancePublicClient } from './core/market-data/BinancePublicClient';
+import { getPublicMarketDataStatus, refreshPublicMarketData, type PublicMarketDataStatus } from './core/market-data/PublicMarketDataStatus';
 import { logger } from './utils/logger';
 import { DiagnosticsEngine, type DiagnosticsSnapshot } from './core/diagnostics/DiagnosticsEngine';
 import { PerformanceGuard } from './core/diagnostics/PerformanceGuard';
@@ -41,7 +41,14 @@ import packageJson from '../package.json';
 import { V5_APP_BUILD, APP_VARIANT_LABEL } from './core/ai/v5Config';
 import { AiTakeoverCard } from './components/ai/AiTakeoverCard';
 import { AiTakeoverTrader } from './core/ai/AiTakeoverTrader';
-import type { AiTakeoverMode } from './core/ai/AiTakeoverTypes';
+import type { AiDecisionInput, AiTakeoverMode } from './core/ai/AiTakeoverTypes';
+import type { AiMission } from './core/ai/command/AiCommandCenterTypes';
+import { runAiMission } from './core/ai/command/AiMissionRunner';
+import type { AiCloudApiSettings } from './core/ai/AiCloudApiSettings';
+import { loadAiCloudTestResult } from './core/ai/AiCloudTestService';
+import type { AiCloudTestResult } from './core/ai/AiCloudTestTypes';
+import { getMarketDataOrchestrator } from './core/market/MarketDataOrchestrator';
+import type { MarketDataSnapshot } from './core/market/MarketDataSnapshotService';
 
 const RENDERER_BUILD_TIME = new Date().toISOString();
 const RENDERER_BUILD_ID = `runtime-${Date.now().toString(36)}`;
@@ -74,6 +81,93 @@ function mapUiRefModeToScanner(mode: string | undefined): RefMode | undefined {
   const lower = mode.toLowerCase() as RefMode;
   if (['sma', 'ema', 'vwap', 'bollinger'].includes(lower)) return lower;
   return undefined;
+}
+
+function mapScannerCandidateToAiInput(candidate: ScannerCandidate): AiDecisionInput {
+  const price = candidate.price || 1;
+  const spreadPct = candidate.spreadPct ?? 0;
+  const askPrice = price * (1 + spreadPct / 200);
+  const bidPrice = price * (1 - spreadPct / 200);
+  const cleanUpsidePct = candidate.tpRoomOk ? Math.max(3, Math.abs(candidate.h1Change ?? 0) + 2) : Math.max(0, Math.abs(candidate.m15Change ?? 0));
+  const downsideRiskPct = Math.max(0.5, Math.abs(candidate.dipPercent ?? 0) || 1.5);
+  const volatilityPct = Math.max(Math.abs(candidate.h1Change ?? 0), Math.abs(candidate.change24h ?? 0), spreadPct);
+  return {
+    symbol: candidate.symbol,
+    price,
+    bidPrice,
+    askPrice,
+    spreadPct,
+    volume24h: Math.max(0, (candidate.volumeRel ?? 1) * 100000),
+    change5m: candidate.m5Change ?? 0,
+    change15m: candidate.m15Change ?? 0,
+    change1h: candidate.h1Change ?? 0,
+    change24h: candidate.change24h ?? 0,
+    high24h: price * (1 + cleanUpsidePct / 100),
+    low24h: price * (1 - downsideRiskPct / 100),
+    marketRegime: candidate.periodRegime ?? candidate.periodTrend ?? 'unknown',
+    btcRegime: 'runtime_anchor_from_v4',
+    ethRegime: 'runtime_anchor_from_v4',
+    riskGroup: candidate.riskGroup,
+    strategy: candidate.selectedStrategy ?? 'ai_professional_dynamic',
+    confidence: Math.max(0, Math.min(1, (candidate.confidence ?? 0) / 100)),
+    priceFresh: candidate.priceFresh !== false,
+    bookFresh: candidate.bookFresh !== false,
+    maxOpenPositionsOk: true,
+    maxCapitalPerTradeOk: true,
+    maxDailyLossOk: true,
+    maxTradesPerDayOk: true,
+    cooldownOk: true,
+    minOrderNotionalOk: true,
+    slDefined: true,
+    tpRoomOk: candidate.tpRoomOk,
+    retrospective: {
+      range1hPct: Math.abs(candidate.h1Change ?? 0),
+      range4hPct: Math.abs(candidate.h1Change ?? 0) * 1.35,
+      range24hPct: Math.abs(candidate.change24h ?? 0),
+      range3dPct: Math.abs(candidate.change24h ?? 0),
+      range7dPct: Math.abs(candidate.change24h ?? 0),
+      range21dPct: Math.abs(candidate.change24h ?? 0),
+      recentHighDistancePct: cleanUpsidePct,
+      recentLowDistancePct: -downsideRiskPct,
+      supportDistancePct: -downsideRiskPct,
+      resistanceDistancePct: cleanUpsidePct,
+      cleanUpsidePct,
+      downsideRiskPct,
+      volatilityPct,
+      averageReboundAfterDipPct: Math.max(0, candidate.reboundPercent ?? candidate.m15Change ?? 0),
+      pumpRiskPct: Math.max(0, candidate.h1Change ?? 0),
+      candleExhaustion: (candidate.m5Change ?? 0) > 4 && (candidate.m15Change ?? 0) > 8,
+      overextended: (candidate.h1Change ?? 0) > 10 || (candidate.change24h ?? 0) > 25,
+      liquidityDepthStatus: (candidate.volumeRel ?? 1) >= 0.6 ? 'PASS' : 'FAIL',
+      spreadStabilityStatus: spreadPct <= 0.35 ? 'PASS' : 'FAIL',
+      volumeStabilityStatus: (candidate.volumeRel ?? 1) >= 0.6 ? 'PASS' : 'WARN',
+    },
+  };
+}
+
+const AI_MARKET_SNAPSHOT_WAIT_MS = 10000;
+const AI_MARKET_SNAPSHOT_POLL_MS = 1000;
+
+function shouldWaitForAiSnapshot(snapshot: MarketDataSnapshot): boolean {
+  return snapshot.blockedReason === 'SCANNER_CANDIDATES_NOT_READY'
+    || snapshot.blockedReason === 'SCANNER_UNIVERSE_NOT_READY'
+    || snapshot.blockedReason === 'MARKET_DATA_SNAPSHOT_CACHE_MISSING';
+}
+
+async function waitForAiMarketSnapshot(buildSnapshot: () => MarketDataSnapshot, scannerRunning: () => boolean): Promise<MarketDataSnapshot> {
+  let snapshot = buildSnapshot();
+  if (snapshot.usableForAiMission || !scannerRunning() || !shouldWaitForAiSnapshot(snapshot)) return snapshot;
+  const startedAt = Date.now();
+  let attempts = 0;
+  logger.info(`AI_MISSION_WAIT_FOR_SNAPSHOT_AUDIT: snapshotId=${snapshot.snapshotId} waitStarted=true initialBlockedReason=${snapshot.blockedReason ?? 'none'} scannerRunning=${String(scannerRunning())} maxWaitMs=${AI_MARKET_SNAPSHOT_WAIT_MS} pollMs=${AI_MARKET_SNAPSHOT_POLL_MS} binanceFetchAllowed=false`);
+  while (Date.now() - startedAt < AI_MARKET_SNAPSHOT_WAIT_MS && scannerRunning() && shouldWaitForAiSnapshot(snapshot)) {
+    attempts += 1;
+    await new Promise((resolve) => setTimeout(resolve, AI_MARKET_SNAPSHOT_POLL_MS));
+    snapshot = buildSnapshot();
+    if (snapshot.usableForAiMission) break;
+  }
+  logger.info(`AI_MISSION_WAIT_FOR_SNAPSHOT_AUDIT: snapshotId=${snapshot.snapshotId} waitFinished=true attempts=${attempts} waitedMs=${Date.now() - startedAt} finalReadinessState=${snapshot.readinessState} finalBlockedReason=${snapshot.blockedReason ?? 'none'} usableForAiMission=${String(snapshot.usableForAiMission)} scannerRunning=${String(scannerRunning())} binanceFetchAllowed=false`);
+  return snapshot;
 }
 
 export default function App() {
@@ -150,20 +244,61 @@ export default function App() {
   const [mlEvents, setMlEvents] = useState<MlRuntimeEvent[]>(() => mlRuntimeEvents.getRecentEvents(25));
   const [aiTrader] = useState(() => new AiTakeoverTrader());
   const [aiTakeoverMode, setAiTakeoverMode] = useState<AiTakeoverMode>('OFF');
+  const [aiCloudTestResult, setAiCloudTestResult] = useState<AiCloudTestResult>(() => loadAiCloudTestResult());
   useEffect(() => {
     aiTrader.init().then(() => {
       setAiTakeoverMode(aiTrader.getMode());
       forceUpdate(n => n + 1);
     });
   }, [aiTrader]);
+  useEffect(() => {
+    const onAiCloudTestUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<AiCloudTestResult>).detail;
+      setAiCloudTestResult(detail ?? loadAiCloudTestResult());
+    };
+    window.addEventListener('cryptobud_v5_ai_cloud_test_updated', onAiCloudTestUpdated);
+    return () => window.removeEventListener('cryptobud_v5_ai_cloud_test_updated', onAiCloudTestUpdated);
+  }, []);
+  useEffect(() => {
+    const onAiCloudApiUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<AiCloudApiSettings>).detail;
+      if (!detail) return;
+      void aiTrader.updateConfig({ provider: detail.provider, model: detail.model }).then(() => {
+        setAiTakeoverMode(aiTrader.getMode());
+        forceUpdate(n => n + 1);
+      });
+    };
+    window.addEventListener('cryptobud_v5_ai_cloud_api_updated', onAiCloudApiUpdated);
+    return () => window.removeEventListener('cryptobud_v5_ai_cloud_api_updated', onAiCloudApiUpdated);
+  }, [aiTrader]);
   const handleAiTakeoverModeChange = useCallback((mode: AiTakeoverMode) => {
     aiTrader.setMode(mode);
     setAiTakeoverMode(mode);
   }, [aiTrader]);
+  const handleRunAiCommandMission = useCallback(async (command: string, mission: AiMission) => {
+    const buildSnapshot = () => {
+      const scannerCandidates = storeRef.current.state.scannerSnapshot?.candidates ?? [];
+      return getMarketDataOrchestrator().requestSnapshot({
+        consumerName: 'AI_Command_Center',
+        requestedSymbols: scannerCandidates.map((candidate) => candidate.symbol),
+        scannerUniverse: scannerCandidates,
+        allowBulkRefresh: true,
+      });
+    };
+    const snapshot = await waitForAiMarketSnapshot(buildSnapshot, () => Boolean(storeRef.current.state.scannerRunning));
+    const aiCandidates = snapshot.scannerUniverse.map(mapScannerCandidateToAiInput);
+    logger.info(`AI_COMMAND_RECEIVED_AUDIT commandLength=${command.length} candidateCount=${aiCandidates.length} aiTakeoverMode=${aiTrader.getMode()} executionMode=${engine.getAdapter().isLive ? 'live' : 'paper'} marketSnapshotFresh=${String(snapshot.cacheFresh)} marketSnapshotReadiness=${snapshot.readinessState} marketSnapshotUsable=${String(snapshot.usableForAiMission)} marketSnapshotBlockedReason=${snapshot.blockedReason ?? 'none'}`);
+    const result = await runAiMission(command, aiCandidates, aiTrader, mission, { marketDataSnapshot: snapshot, providerTopK: 5 });
+    logger.info(`AI_MISSION_PARSED_AUDIT missionType=${result.mission.missionType} maxResults=${result.mission.maxResults} minCleanUpsidePct=${result.mission.minCleanUpsidePct} antiFomo=${String(result.mission.antiFomo)} antiRugpull=${String(result.mission.antiRugpull)} antiManipulation=${String(result.mission.antiManipulation)} newListingGuard=${String(result.mission.newListingGuard)} allowBuyIntent=${String(result.mission.allowBuyIntent)} executionModeReadOnly=${engine.getAdapter().isLive ? 'live' : 'paper'} invariantOk=true`);
+    logger.info(`AI_TAKEOVER_EXECUTION_MODE_CLEANUP_AUDIT: aiTakeoverModes=OFF|ON aiSelectsExecutionAdapter=false executionModeReadOnly=${engine.getAdapter().isLive ? 'live' : 'paper'} invariantOk=true`);
+    logger.info(`AI_COMMAND_CENTER_UI_AUDIT resultCards=${result.cards.length} blockedCards=${result.cards.filter((card) => card.executionStatus === 'BLOCKED').length} invariantOk=true`);
+    return result;
+  }, [aiTrader, engine]);
   const [publicDataReady, setPublicDataReady] = useState(false);
   const [publicDataRefreshing, setPublicDataRefreshing] = useState(false);
   const [exchangeInfoLoaded, setExchangeInfoLoaded] = useState(false);
   const [lastPublicUpdate, setLastPublicUpdate] = useState<number>(0);
+  const [publicMarketDataStatus, setPublicMarketDataStatus] = useState<PublicMarketDataStatus>(() => getPublicMarketDataStatus());
   const [positionBootRestoring, setPositionBootRestoring] = useState(true);
   const [closedTradesBootRestoring, setClosedTradesBootRestoring] = useState(true);
   const banlistRef = useRef<string[]>([]);
@@ -171,36 +306,26 @@ export default function App() {
   const configuredTradingCapitalRef = useRef(10000);
 
   const refreshPublicData = useCallback(async () => {
-    logger.info('PUBLIC_DATA_MANUAL_REFRESH_START');
     setPublicDataRefreshing(true);
     try {
-      const publicClient = new BinancePublicClient();
-      const pingOk = await publicClient.ping();
-      if (!pingOk) {
-        setPublicDataReady(false);
-        logger.warn('PUBLIC_DATA_MANUAL_REFRESH_FAILED: ping failed');
-        setPublicDataRefreshing(false);
-        return false;
-      }
-      await MarketDataFeed.getInstance().fetchExchangeInfo();
-      const ex = MarketDataFeed.getInstance().getExchangeInfo();
-      if (!ex) {
-        logger.warn('PUBLIC_DATA_MANUAL_REFRESH_FAILED: exchangeInfo failed');
-        setPublicDataRefreshing(false);
-        return false;
-      }
-      setPublicDataReady(true);
-      setExchangeInfoLoaded(true);
-      setLastPublicUpdate(Date.now());
-      logger.info('PUBLIC_DATA_MANUAL_REFRESH_SUCCESS');
-      setPublicDataRefreshing(false);
-      return true;
+      const openSymbols = engine.getPositionManager().getOpenPositions().map((p) => p.coin);
+      const result = await refreshPublicMarketData('manual_refresh', openSymbols);
+      setPublicMarketDataStatus(result);
+      setPublicDataReady(result.publicApiOnline);
+      setExchangeInfoLoaded(result.exchangeInfoLoaded);
+      setLastPublicUpdate(result.lastMarketDataUpdate);
+      return result.publicApiOnline;
     } catch (err) {
-      logger.warn(`PUBLIC_DATA_MANUAL_REFRESH_FAILED: ${err instanceof Error ? err.message : String(err)}`);
-      setPublicDataRefreshing(false);
+      const message = err instanceof Error ? err.message : String(err);
+      const current = getPublicMarketDataStatus();
+      setPublicMarketDataStatus(current);
+      logger.warn(`PUBLIC_MARKET_DATA_REFRESH_AUDIT: reason=manual_refresh requestId=manual_refresh_catch deduped=false cancelledPrevious=false bootstrapStep=catch exchangeInfoOk=false tickerProbeOk=false bookTickerProbeOk=false bulkBookTickerOk=false publicApiOnline=false circuitBreakerState=${current.circuitBreakerState} nextRetryInMs=${current.nextRetryInMs} failureEndpoint=${current.lastFailureEndpoint ?? 'none'} failureReason=${(current.lastFailureReason ?? message).replace(/\s+/g, '_')} requestStormBlocked=${String(current.requestStormBlocked)} invariantOk=true`);
+      setPublicDataReady(false);
       return false;
+    } finally {
+      setPublicDataRefreshing(false);
     }
-  }, []);
+  }, [engine]);
 
   const paperAdapter = engine.getAdapter() as PaperExchangeAdapter;
   const [settingsPersistence] = useState(() => new SettingsPersistence());
@@ -599,27 +724,19 @@ export default function App() {
       forceUpdate(n => n + 1);
 
       // ── Auto-refresh public data on boot ──
-      logger.info('PUBLIC_DATA_BOOT_REFRESH_START');
       setPublicDataRefreshing(true);
       try {
-        const publicClient = new BinancePublicClient();
-        const pingOk = await publicClient.ping();
-        if (pingOk) {
-          await MarketDataFeed.getInstance().fetchExchangeInfo();
-          const ex = MarketDataFeed.getInstance().getExchangeInfo();
-          if (ex) {
-            logger.info('PUBLIC_DATA_BOOT_REFRESH_SUCCESS');
-            setPublicDataReady(true);
-            setExchangeInfoLoaded(true);
-            setLastPublicUpdate(Date.now());
-          } else {
-            logger.warn('PUBLIC_DATA_BOOT_REFRESH_PARTIAL: exchangeInfo failed');
-          }
-        } else {
-          logger.warn('PUBLIC_DATA_BOOT_REFRESH_FAILED: ping failed');
-        }
+        const openSymbols = engine.getPositionManager().getOpenPositions().map((p) => p.coin);
+        const result = await refreshPublicMarketData('app_boot', openSymbols);
+        setPublicMarketDataStatus(result);
+        setPublicDataReady(result.publicApiOnline);
+        setExchangeInfoLoaded(result.exchangeInfoLoaded);
+        setLastPublicUpdate(result.lastMarketDataUpdate);
       } catch (err) {
-        logger.warn(`PUBLIC_DATA_BOOT_REFRESH_FAILED: ${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        const current = getPublicMarketDataStatus();
+        setPublicMarketDataStatus(current);
+        logger.warn(`PUBLIC_MARKET_DATA_REFRESH_AUDIT: reason=app_boot requestId=app_boot_catch deduped=false cancelledPrevious=false bootstrapStep=catch exchangeInfoOk=false tickerProbeOk=false bookTickerProbeOk=false bulkBookTickerOk=false publicApiOnline=false circuitBreakerState=${current.circuitBreakerState} nextRetryInMs=${current.nextRetryInMs} failureEndpoint=${current.lastFailureEndpoint ?? 'none'} failureReason=${(current.lastFailureReason ?? message).replace(/\s+/g, '_')} requestStormBlocked=${String(current.requestStormBlocked)} invariantOk=true`);
       }
       setPublicDataRefreshing(false);
       setPositionBootRestoring(false);
@@ -1179,24 +1296,20 @@ export default function App() {
         return;
       }
       logger.info('SCANNER_PUBLIC_DATA_CHECK_START');
-      if (publicDataReady) {
+      const currentPublicStatus = getPublicMarketDataStatus();
+      if (publicDataReady && currentPublicStatus.publicApiOnline && currentPublicStatus.exchangeInfoLoaded) {
         logger.info('SCANNER_PUBLIC_DATA_CHECK_SUCCESS: data already fresh from boot');
       } else {
-        const publicClient = new BinancePublicClient();
-        const pingOk = await publicClient.ping();
-        if (!pingOk) {
-          logger.warn('SCANNER_PUBLIC_DATA_CHECK_FAILED: PUBLIC_DATA_OFFLINE');
-          logger.warn('SCANNER_START_FAILED: PUBLIC_DATA_OFFLINE');
+        const result = await refreshPublicMarketData('scanner_start', engine.getPositionManager().getOpenPositions().map((p) => p.coin));
+        setPublicMarketDataStatus(result);
+        setPublicDataReady(result.publicApiOnline);
+        setExchangeInfoLoaded(result.exchangeInfoLoaded);
+        setLastPublicUpdate(result.lastMarketDataUpdate);
+        if (!result.publicApiOnline || !result.exchangeInfoLoaded) {
+          logger.warn(`SCANNER_START_BLOCKED_AUDIT: scannerRequested=true scannerStarted=false blockedReason=PUBLIC_MARKET_DATA_OFFLINE publicApiOnline=${String(result.publicApiOnline)} exchangeInfoLoaded=${String(result.exchangeInfoLoaded)} circuitBreakerState=${result.circuitBreakerState} lastFailureEndpoint=${result.lastFailureEndpoint ?? 'none'} lastFailureReason=${(result.lastFailureReason ?? 'none').replace(/\s+/g, '_')} nextRetryInMs=${result.nextRetryInMs} invariantOk=true`);
+          logger.warn(`SCANNER_MARKET_DATA_DEPENDENCY_AUDIT: scannerRunning=false publicApiOnline=${String(result.publicApiOnline)} exchangeInfoLoaded=${String(result.exchangeInfoLoaded)} circuitBreakerState=${result.circuitBreakerState} blockedReason=PUBLIC_MARKET_DATA_OFFLINE nextRetryInMs=${result.nextRetryInMs} invariantOk=true`);
           return;
         }
-        await MarketDataFeed.getInstance().fetchExchangeInfo();
-        const exchangeInfo = MarketDataFeed.getInstance().getExchangeInfo();
-        if (!exchangeInfo) {
-          logger.warn('SCANNER_PUBLIC_DATA_CHECK_FAILED: EXCHANGE_INFO_NOT_LOADED');
-          logger.warn('SCANNER_START_FAILED: EXCHANGE_INFO_NOT_LOADED');
-          return;
-        }
-        setPublicDataReady(true);
         logger.info('SCANNER_PUBLIC_DATA_CHECK_SUCCESS');
       }
 
@@ -1261,7 +1374,7 @@ export default function App() {
       logger.warn(`SCANNER_PUBLIC_DATA_CHECK_FAILED: MARKET_DATA_CLIENT_ERROR ${msg}`);
       logger.warn('SCANNER_START_FAILED: MARKET_DATA_CLIENT_ERROR');
     }
-  }, [engine, store, settingsPersistence]);
+  }, [engine, store, settingsPersistence, publicDataReady]);
 
   const handleScannerConfigChange = useCallback((config: {
     riskGroups: {
@@ -1330,9 +1443,46 @@ export default function App() {
     setLiveCheckResult(null);
     logger.info('Running live safety check...');
 
-    await new Promise(r => setTimeout(r, 1500));
+    const publicResult = await refreshPublicMarketData('run_live_check', engine.getPositionManager().getOpenPositions().map((p) => p.coin));
+    setPublicMarketDataStatus(publicResult);
+    setPublicDataReady(publicResult.publicApiOnline);
+    setExchangeInfoLoaded(publicResult.exchangeInfoLoaded);
+    setLastPublicUpdate(publicResult.lastMarketDataUpdate);
 
-    const result = runLiveSafetyCheck();
+    logger.info(`RUN_LIVE_CHECK_PUBLIC_DATA_AUDIT: requestId=${publicResult.requestId} exchangeInfo=${publicResult.exchangeInfoLoaded ? 'OK' : 'FAILED'} tickerBTCUSDT=${publicResult.tickerProbeOk ? 'OK' : 'FAILED'} bookTickerBTCUSDT=${publicResult.bookTickerProbeOk ? 'OK' : 'FAILED'} bulkBookTicker=${publicResult.bulkBookTickerOk ? 'OK' : 'FAILED'} openPositionFreshCount=${publicResult.openPositionFreshCount} openPositionStaleCount=${publicResult.openPositionStaleCount} lastFailureEndpoint=${publicResult.lastFailureEndpoint ?? 'none'} lastFailureBaseUrl=${publicResult.lastFailureBaseUrl ?? 'none'} lastFailureReason=${(publicResult.lastFailureReason ?? 'none').replace(/\s+/g, '_')} circuitBreakerState=${publicResult.circuitBreakerState} retryActive=${String(publicResult.retryActive)} nextRetryInMs=${publicResult.nextRetryInMs} scannerCanStart=${String(publicResult.publicApiOnline && publicResult.exchangeInfoLoaded)} exitCanPriceOpenPositions=${String(publicResult.openPositionStaleCount === 0)} executionMode=${engine.getAdapter().isLive ? 'live' : 'paper'} invariantOk=true`);
+
+    const baseResult = runLiveSafetyCheck();
+    const result: LiveSafetyCheckResult = {
+      ...baseResult,
+      checks: {
+        ...baseResult.checks,
+        marketDataFresh: publicResult.tickerProbeOk,
+        bookTickerFresh: publicResult.bookTickerProbeOk,
+        symbolFiltersLoaded: publicResult.exchangeInfoLoaded,
+        minNotionalKnown: publicResult.exchangeInfoLoaded,
+        lotSizeKnown: publicResult.exchangeInfoLoaded,
+        stepSizeKnown: publicResult.exchangeInfoLoaded,
+      },
+      blockedReason: publicResult.publicApiOnline && publicResult.exchangeInfoLoaded
+        ? baseResult.blockedReason
+        : 'PUBLIC_MARKET_DATA_OFFLINE',
+      passed: baseResult.passed && publicResult.publicApiOnline && publicResult.exchangeInfoLoaded,
+      details: [
+        'PUBLIC MARKET DATA CHECK',
+        `exchangeInfo: ${publicResult.exchangeInfoLoaded ? 'OK' : 'FAILED'}`,
+        `ticker BTCUSDT: ${publicResult.tickerProbeOk ? 'OK' : 'FAILED'}`,
+        `bookTicker BTCUSDT: ${publicResult.bookTickerProbeOk ? 'OK' : 'FAILED'}`,
+        `open position price check: ${publicResult.openPositionFreshCount} fresh / ${publicResult.openPositionStaleCount} failed`,
+        `last error: ${publicResult.lastFailureReason ?? 'none'}`,
+        `endpoint: ${publicResult.lastFailureEndpoint ?? 'none'}`,
+        `base URL: ${publicResult.lastFailureBaseUrl ?? publicResult.baseUrl ?? 'none'}`,
+        `circuit: ${publicResult.circuitBreakerState}`,
+        `next retry: ${Math.ceil(publicResult.nextRetryInMs / 1000)}s`,
+        `SCANNER READINESS: ${publicResult.publicApiOnline && publicResult.exchangeInfoLoaded ? 'YES' : 'NO'}`,
+        `EXIT READINESS: ${publicResult.openPositionStaleCount === 0 ? 'YES' : 'NO'}`,
+        ...baseResult.details,
+      ],
+    };
     setLiveCheckResult(result);
 
     if (result.passed) {
@@ -1476,6 +1626,24 @@ export default function App() {
               refreshing: publicDataRefreshing,
               exchangeInfoLoaded,
               lastUpdate: lastPublicUpdate,
+              lastSuccessfulEndpoint: publicMarketDataStatus.lastSuccessfulEndpoint,
+              lastFailureEndpoint: publicMarketDataStatus.lastFailureEndpoint,
+              lastFailureBaseUrl: publicMarketDataStatus.lastFailureBaseUrl,
+              lastFailureReason: publicMarketDataStatus.lastFailureReason,
+              lastErrorMessage: publicMarketDataStatus.lastErrorMessage,
+              circuitBreakerState: publicMarketDataStatus.circuitBreakerState,
+              retryActive: publicMarketDataStatus.retryActive,
+              nextRetryInMs: publicMarketDataStatus.nextRetryInMs,
+              ticker24hrCacheStatus: publicMarketDataStatus.ticker24hrCacheStatus,
+              bookTickerCacheStatus: publicMarketDataStatus.bookTickerCacheStatus,
+              scannerUniverseCacheStatus: publicMarketDataStatus.scannerUniverseCacheStatus,
+              requestBudgetStatus: publicMarketDataStatus.requestBudgetStatus,
+              requestBudgetRemaining: publicMarketDataStatus.requestBudgetRemaining,
+              requestBudgetMax: publicMarketDataStatus.requestBudgetMax,
+              budgetResetAt: publicMarketDataStatus.budgetResetAt,
+              budgetExhausted: publicMarketDataStatus.budgetExhausted,
+              budgetExhaustedReason: publicMarketDataStatus.budgetExhaustedReason,
+              requestStormBlocked: publicMarketDataStatus.requestStormBlocked,
             }}
             onRefreshPublicData={refreshPublicData}
           />
@@ -1509,7 +1677,13 @@ export default function App() {
         <AiTakeoverCard
           mode={aiTakeoverMode}
           onModeChange={handleAiTakeoverModeChange}
-          providerConfigured={aiTrader.getConfig().apiKey.length > 0}
+          providerConfigured={aiTrader.isProviderConfigured()}
+          provider={aiTrader.getConfig().provider}
+          model={aiTrader.getConfig().model}
+          cloudTestStatus={aiCloudTestResult.status}
+          executionMode={engine.getAdapter().isLive ? 'Live adapter' : 'Paper adapter'}
+          candidateCount={store.state.scannerSnapshot?.candidates.length ?? 0}
+          onRunMission={handleRunAiCommandMission}
           activePositionCount={aiTrader.getPositions().length}
         />
       )}

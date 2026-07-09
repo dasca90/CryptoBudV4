@@ -1,5 +1,6 @@
 ﻿import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import type { TradeV4PageModel, TradingParametersView } from "./types";
+import type { WheelEvent as ReactWheelEvent } from "react";
 import { TopStatusBar } from "./TopStatusBar";
 import { SideNavigation } from "./SideNavigation";
 import { LeftControlSidebar } from "./LeftControlSidebar";
@@ -27,6 +28,25 @@ function Metric({ label, value }: { label: string; value: string }) {
       <div style={{ fontSize: 14, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</div>
     </div>
   );
+}
+
+function canScrollInDirection(el: HTMLElement, deltaY: number): boolean {
+  const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  if (maxScrollTop <= 1) return false;
+  if (deltaY > 0) return el.scrollTop < maxScrollTop - 1;
+  return el.scrollTop > 1;
+}
+
+function findNestedScrollableWheelTarget(target: HTMLElement | null, boundary: HTMLElement): HTMLElement | null {
+  let current: HTMLElement | null = target;
+  while (current && current !== boundary) {
+    const style = window.getComputedStyle(current);
+    if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && current.scrollHeight > current.clientHeight + 1) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return boundary;
 }
 
 function UnicornRadarCard({ rows, summary, settings, unicornOpenCount }: { rows: TradeV4PageModel["unicornRadar"]; summary?: TradeV4PageModel["unicornWatchlistSummary"]; settings: TradingParametersView["unicornHunter"]; unicornOpenCount: number }) {
@@ -129,6 +149,7 @@ export function TradeV4Page(props: {
   const renderAuditRef = useRef({ count: 0, startedAt: performance.now(), lastLoggedAt: 0 });
   const performanceHealthAuditRef = useRef(0);
   const lastScanAuditRef = useRef<{ at: number; scanAt: string | null }>({ at: Date.now(), scanAt: null });
+  const leftSidebarScrollRef = useRef<HTMLDivElement | null>(null);
   if (IS_DEV) {
     renderAuditRef.current.count += 1;
   }
@@ -158,6 +179,22 @@ export function TradeV4Page(props: {
     const avgFps = Math.min(60, Math.round((renderAuditRef.current.count / elapsed) * 1000));
     logger.info(`UI_RUNTIME_PERFORMANCE_AUDIT: logsRendered=${Math.min(logsTotal, 200)} logsTotal=${logsTotal} scannerRowsRendered=${Math.min(props.model.candidates.length, 50)} candidatesTotal=${props.model.candidates.length} openRowsRendered=${Math.min(props.model.openPositions.length, 25)} openTotal=${props.model.openPositions.length} journalRowsRendered=${Math.min(props.model.closedPositions.length, 25)} journalTotal=${props.model.closedPositions.length} lastScanMs=${Math.max(0, now - lastScanAuditRef.current.at)} avgFps=${avgFps} visualScannerMounted=false visualMode=trade_tab_2d_status staleOpenPositionPriceCount=${staleOpenPositionPriceCount} fallbackOpenPositionPriceCount=${fallbackOpenPositionPriceCount} unavailableOpenPositionPriceCount=${unavailableOpenPositionPriceCount}`);
   }, [props.model.candidates, props.model.openPositions, props.model.closedPositions, props.model.lastScanAt]);
+
+  useEffect(() => {
+    const emitScrollAudit = () => {
+      const el = leftSidebarScrollRef.current;
+      if (!el || typeof window === 'undefined') return;
+      const style = window.getComputedStyle(el);
+      const scrollRangePx = Math.max(0, el.scrollHeight - el.clientHeight);
+      logger.info(`TRADE_LEFT_SIDEBAR_SCROLL_AUDIT: scrollContainer=trade-v4-left overflowY=${style.overflowY} heightPx=${Math.round(el.getBoundingClientRect().height)} clientHeight=${el.clientHeight} scrollHeight=${el.scrollHeight} scrollRangePx=${scrollRangePx} bottomPadding=${style.paddingBottom} bottomSentinelPresent=${String(Boolean(el.querySelector('[data-testid="left-sidebar-bottom-sentinel"]')))} wheelBridgeActive=true canReachBottom=${String(scrollRangePx >= 0)} invariantOk=${String((style.overflowY === 'auto' || style.overflowY === 'scroll') && scrollRangePx >= 0)} failureReason=${style.overflowY === 'auto' || style.overflowY === 'scroll' ? 'none' : 'TRADE_LEFT_SIDEBAR_NOT_SCROLLABLE'}`);
+    };
+    const raf = window.requestAnimationFrame(emitScrollAudit);
+    window.addEventListener('resize', emitScrollAudit);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener('resize', emitScrollAudit);
+    };
+  }, []);
 
   // ── Layout version reset ──
   useEffect(() => {
@@ -203,6 +240,17 @@ export function TradeV4Page(props: {
   );
 
   const selectSymbol = useCallback((s: string) => { setLocalSelected(s); props.onSelectSymbol(s); }, [props.onSelectSymbol]);
+  const handleLeftSidebarWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
+    const sidebar = leftSidebarScrollRef.current;
+    if (!sidebar || event.deltaY === 0) return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const nestedScrollable = findNestedScrollableWheelTarget(target, sidebar);
+    if (nestedScrollable && nestedScrollable !== sidebar && canScrollInDirection(nestedScrollable, event.deltaY)) return;
+    if (!canScrollInDirection(sidebar, event.deltaY)) return;
+    sidebar.scrollTop += event.deltaY;
+    event.preventDefault();
+    event.stopPropagation();
+  }, []);
   const buyCount = props.model.candidates.filter(c => c.status === 'BUY').length;
   const waitCount = props.model.candidates.filter(c => c.status === 'WAIT').length;
   const blockCount = props.model.candidates.filter(c => c.status === 'BLOCK').length;
@@ -223,7 +271,7 @@ export function TradeV4Page(props: {
         <SideNavigation />
 
         {/* ── LEFT SIDEBAR ── */}
-        <div className="trade-v4-left" data-testid="left-sidebar-scroll">
+        <div className="trade-v4-left" data-testid="left-sidebar-scroll" ref={leftSidebarScrollRef} onWheel={handleLeftSidebarWheel}>
           <div data-testid="sidebar-manual-scan">
             <LeftControlSidebar
               candidates={props.model.candidates} parameters={props.parameters}
@@ -294,6 +342,7 @@ export function TradeV4Page(props: {
               />
             </div>
           </div>
+          <div className="trade-v4-left-bottom-sentinel" data-testid="left-sidebar-bottom-sentinel" aria-hidden="true" />
         </div>
 
         {/* ── MAIN CENTER — Left grid + Right positions flex column ── */}

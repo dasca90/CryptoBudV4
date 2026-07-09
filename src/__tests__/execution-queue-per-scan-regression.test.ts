@@ -206,6 +206,49 @@ function plan(candidates: ScannerCandidate[], overrides: Record<string, unknown>
 }
 
 {
+  const snapshotRows = [
+    candidate('CAP1USDT', { rank: 1 }),
+    candidate('CAP2USDT', { rank: 2 }),
+    candidate('CAP3USDT', { rank: 3 }),
+    candidate('STALEHANDOFFCAPUSDT', {
+      rank: 4,
+      finalNoBuyReason: 'STRATEGY_HANDOFF_INTEGRITY_FAILED' as any,
+      executionDecision: { finalNoBuyReason: 'STRATEGY_HANDOFF_INTEGRITY_FAILED' } as any,
+    }),
+  ];
+  const executionRows = [
+    candidate('CAP1USDT', { rank: 1 }),
+    candidate('CAP2USDT', { rank: 2 }),
+    candidate('CAP3USDT', { rank: 3 }),
+    candidate('STALEHANDOFFCAPUSDT', {
+      rank: 4,
+    }),
+  ];
+  const result = buildExecutionPlan({
+    scannerSnapshot: snapshot(snapshotRows, 'stale_handoff_cap_scan'),
+    executionPool: executionRows,
+    watchPool: [],
+    nearMissPool: [],
+    openSymbols: [],
+    pendingOrderSymbols: [],
+    capital: 100000,
+    usedCapital: 0,
+    maxPositions: 24,
+    maxEntriesPerCycle: 10,
+    maxSelectedPerScan: 3,
+    maxSelectedPerScanUserExplicit: true,
+    capitalPerTrade: 100,
+    maxSpreadPct: 0.35,
+    decisionMode: 'unified',
+    executionAdapter: 'paper_simulated',
+    enabledRiskGroups: { top_caps: true, large_caps: true, mid_caps: true, high_risk: true, very_high_risk: true },
+  } as any);
+  const skipped = result.skippedCandidates.find((row) => row.symbol === 'STALEHANDOFFCAPUSDT');
+  assert.equal(skipped?.finalNoBuyReason, 'MAX_NEW_BUYS_PER_CYCLE_REACHED', 'cycle cap dominates stale handoff diagnostics');
+  assert.equal(result.noBuyReasons.includes('MAX_NEW_BUYS_PER_CYCLE_REACHED'), true, 'real cycle cap is reported');
+}
+
+{
   const scanN = Array.from({ length: 11 }, (_, index) => candidate(`R${index + 1}USDT`, { rank: index + 1 }));
   const resultN = plan(scanN, { scanId: 'scan_n' });
   const deferred = resultN.deferredByQueueLimitSymbols?.[0];

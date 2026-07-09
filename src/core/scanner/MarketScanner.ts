@@ -39,6 +39,7 @@ import type { ExecutionDecision } from './executionDecision';
 import { createOrUpdateUnicornWatchState, evaluateUnicornEntryGate, getUnicornExpiration, isUnicornEligibleSymbol, resolveUnicornDpConfirmation, scoreUnicornCandidate, shouldTrackUnicornEarly } from '../unicorn/UnicornScoreEngine';
 import { createDefaultUnicornHunterSettings, normalizeUnicornHunterSettings, type UnicornHunterSettings, type UnicornLifecycleStage, type UnicornRadarRow, type UnicornWatchState, type UnicornWatchlistSummary } from '../unicorn/UnicornHunterTypes';
 import { normalizeUnicornFinalBlockReason, unicornStageForFinalBlockReason } from '../unicorn/unicornExecutionBlockers';
+import { getMarketDataCache } from '../market/MarketDataCache';
 import {
   applyCandidatePromotionGuard,
   assertCandidateRuntimeReady,
@@ -1292,7 +1293,13 @@ export class MarketScanner {
       .slice(0, this.unicornCandidateBufferMax);
     logger.info(`UNICORN_UNIVERSE_REFRESH_AUDIT enabled=true mode=${settings.mode} sourceCandidates=${input.candidates.length} candidateCount=${top.length} min24hChangePct=${settings.min24hChangePct} min5mChangePct=${settings.min5mChangePct}`);
     logger.info(`UNICORN_RADAR_REFRESH_AUDIT scanId=${input.scanId} sourceCandidates=${input.candidates.length} trackedCandidates=${top.length} internalWatchlistBefore=${this.unicornWatchlistBySymbol.size} earlyThresholds=m5>=0.5|m15>=1|h1>=1.5|growthSinceFirstSeen>=1.5 displayProjectionOnly=true`);
-    const tickerRows = top.length > 0 ? await this.publicClient.get24hTickers(top.map(c => c.symbol)).catch(() => []) : [];
+    const marketDataCache = getMarketDataCache();
+    const tickerRows = top.length > 0
+      ? top.map(c => marketDataCache.getTicker24hr(c.symbol)).filter((row): row is Record<string, unknown> => Boolean(row))
+      : [];
+    if (top.length > 0 && tickerRows.length === 0) {
+      logger.warn(`MARKET_DATA_DIRECT_FETCH_BLOCKED_AUDIT: consumerName=UnicornUniverseRefresh requestedSymbolsCount=${top.length} usedCache=true cacheFresh=false bulkRefreshScheduled=false directFetchBlocked=true perSymbolRequestsCount=0 bulkRequestsCount=0 requestBudgetBefore=n/a requestBudgetAfter=n/a requestBudgetState=UNKNOWN circuitBreakerState=UNKNOWN retryActive=false nextRetryInMs=0 publicApiConnectivity=UNKNOWN scannerReadiness=BLOCKED_CACHE_STALE aiMissionBlockedReason=none invariantOk=true failureReason=TICKER24HR_CACHE_UNAVAILABLE`);
+    }
     const tickerBySymbol = new Map<string, any>();
     for (const t of tickerRows as any[]) tickerBySymbol.set(String(t.symbol), t);
     const executable: ScannerCandidate[] = [];
@@ -3439,10 +3446,18 @@ export class MarketScanner {
     try {
       const sanitySymbols = allRanked.slice(0, 20).map(c => c.symbol);
       if (sanitySymbols.length > 0) {
-        const [ticker24hrData, bookTickerData] = await Promise.all([
-          this.publicClient.get24hTickers(sanitySymbols),
-          this.publicClient.getBookTickers(sanitySymbols),
-        ]);
+        const marketCache = getMarketDataCache();
+        const cacheStatus = marketCache.getStatus();
+        if (cacheStatus.ticker24hrStatus === 'missing' || cacheStatus.bookTickerStatus === 'missing') {
+          logger.warn(`MARKET_DATA_DIRECT_FETCH_BLOCKED_AUDIT: consumerName=MarketScannerSanity requestedSymbolsCount=${sanitySymbols.length} usedCache=true cacheFresh=false bulkRefreshScheduled=false directFetchBlocked=true perSymbolRequestsCount=0 bulkRequestsCount=0 requestBudgetBefore=n/a requestBudgetAfter=n/a requestBudgetState=UNKNOWN circuitBreakerState=UNKNOWN retryActive=false nextRetryInMs=0 publicApiConnectivity=UNKNOWN scannerReadiness=BLOCKED_CACHE_STALE aiMissionBlockedReason=none invariantOk=true failureReason=BULK_CACHE_UNAVAILABLE`);
+          throw new Error('BULK_CACHE_UNAVAILABLE');
+        }
+        const ticker24hrData = sanitySymbols
+          .map((symbol) => marketCache.getTicker24hr(symbol))
+          .filter((row): row is Record<string, unknown> => Boolean(row));
+        const bookTickerData = sanitySymbols
+          .map((symbol) => marketCache.getBookTicker(symbol))
+          .filter((row): row is Record<string, string> => Boolean(row));
         const tickerMap = new Map<string, Record<string, unknown>>();
         for (const t of ticker24hrData) { tickerMap.set(t.symbol as string, t); }
         const bookMap = new Map<string, Record<string, string>>();
@@ -5410,6 +5425,20 @@ export class MarketScanner {
       paperAutoResult,
       liveExecutionResult,
     };
+
+    const marketDataCache = getMarketDataCache();
+    marketDataCache.setScannerUniverse(snapshot.candidates);
+    const marketDataCacheStatus = marketDataCache.getStatus();
+    logger.info(
+      `SCANNER_UNIVERSE_BUILD_RESULT_AUDIT: scanId=${scanId} ` +
+      `candidateCount=${snapshot.candidateCount} ` +
+      `scannerUniverseCacheStatus=${marketDataCacheStatus.scannerUniverseStatus} ` +
+      `ticker24hrCacheStatus=${marketDataCacheStatus.ticker24hrStatus} ` +
+      `bookTickerCacheStatus=${marketDataCacheStatus.bookTickerStatus} ` +
+      `perSymbolBookTickerRequests=0 perSymbolTickerPriceRequests=0 ` +
+      `bulkTicker24hrRequests=0 bulkBookTickerRequests=0 ` +
+      `scannerReadiness=READY invariantOk=true failureReason=none`
+    );
 
     // Store snapshot with capped history
     this.snapshots.push(snapshot);

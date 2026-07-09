@@ -1110,7 +1110,7 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
             ? 'UnicornHunter'
             : 'AutoBots';
       const rawLimitReason = moduleSelectionLimitReached || globalSafetyLimitReached ? limitToken : canonicalDecisionBySymbol.get(symbol) ?? limitToken;
-      const canonicalLimitReason = isUnicornCandidate ? normalizeUnicornNoBuyReason(rawLimitReason) : canonicalDecisionBySymbol.get(symbol) ?? limitToken;
+      const canonicalLimitReason = isUnicornCandidate ? normalizeUnicornNoBuyReason(rawLimitReason) : rawLimitReason;
       skippedCandidates.push({ symbol, status: candidateWithPlan.status, reason: limitReason, gate: 'ExecutionPlannerLimit', isRetryable: true, finalNoBuyReason: canonicalLimitReason });
       skippedReasons.push(limitToken);
       if (!noBuyReasons.includes(limitToken)) noBuyReasons.push(limitToken);

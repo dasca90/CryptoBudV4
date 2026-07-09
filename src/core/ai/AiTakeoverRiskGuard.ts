@@ -1,4 +1,4 @@
-import type { AiDecisionOutput, AiTakeoverConfig, AiTakeoverMode } from './AiTakeoverTypes';
+import type { AiDecisionInput, AiDecisionOutput, AiTakeoverConfig } from './AiTakeoverTypes';
 
 export interface RiskGuardResult {
   allowed: boolean;
@@ -8,94 +8,47 @@ export interface RiskGuardResult {
 }
 
 export class AiTakeoverRiskGuard {
-  private dailyTradeCount = 0;
-  private activePositionCount = 0;
-  private lastResetDay = new Date().getDate();
-
-  setActivePositionCount(count: number): void {
-    this.activePositionCount = count;
-  }
-
-  async evaluate(
-    output: AiDecisionOutput,
-    config: AiTakeoverConfig,
-    mode: AiTakeoverMode,
-  ): Promise<RiskGuardResult> {
+  evaluate(output: AiDecisionOutput, config: AiTakeoverConfig, input: AiDecisionInput): RiskGuardResult {
     const blockedBy: string[] = [];
-    this.checkDailyReset();
+    const adjustedOutput: AiDecisionOutput = {
+      ...output,
+      tpPlan: { ...output.tpPlan, tp2Pct: 0 },
+    };
 
-    if (mode === 'OFF') {
-      return {
-        allowed: false,
-        reason: 'AI Takeover is OFF.',
-        blockedBy: ['AI_TAKEOVER_OFF'],
-        adjustedOutput: output,
-      };
-    }
-
-    if (output.action !== 'BUY') {
-      return {
-        allowed: false,
-        reason: `AI decision is ${output.action}, not BUY.`,
-        blockedBy: ['NOT_BUY_DECISION'],
-        adjustedOutput: output,
-      };
-    }
-
-    if (output.confidenceScore < config.minConfidenceScore) {
-      blockedBy.push('LOW_CONFIDENCE');
-    }
-
-    if (this.activePositionCount >= config.maxConcurrentAiPositions) {
-      blockedBy.push('MAX_CONCURRENT_POSITIONS');
-    }
-
-    if (this.dailyTradeCount >= config.maxAiTradesPerDay) {
-      blockedBy.push('DAILY_TRADE_LIMIT');
-    }
-
-    if (mode === 'LIVE_LOCKED') {
-      blockedBy.push('LIVE_LOCKED_MODE');
-    }
-
-    if (output.tp2Pct !== undefined && output.tp2Pct > 0) {
-      output.tp2Pct = 0;
+    if (config.mode !== 'ON') blockedBy.push('AI_TAKEOVER_OFF');
+    if (output.decision !== 'BUY' || output.executionIntent.wantsBuy !== true) blockedBy.push('NOT_BUY_INTENT');
+    if (!input.retrospective) blockedBy.push('RETROSPECTIVE_ANALYSIS_MISSING');
+    if (input.priceFresh === false) blockedBy.push('price_stale');
+    if (input.bookFresh === false) blockedBy.push('book_stale');
+    if (input.spreadPct > 0.35) blockedBy.push('spread_too_high');
+    if (input.duplicateOpenPosition === true) blockedBy.push('duplicate_position');
+    if (input.maxOpenPositionsOk === false) blockedBy.push('max_open_positions');
+    if (input.maxCapitalPerTradeOk === false) blockedBy.push('max_capital_per_trade');
+    if (input.maxDailyLossOk === false) blockedBy.push('max_daily_loss');
+    if (input.maxTradesPerDayOk === false) blockedBy.push('max_trades_per_day');
+    if (input.cooldownOk === false) blockedBy.push('cooldown');
+    if (input.minOrderNotionalOk === false) blockedBy.push('min_order_notional');
+    if (input.slDefined === false || adjustedOutput.riskPlan.slPct <= 0) blockedBy.push('sl_missing');
+    if (adjustedOutput.tpPlan.tp1Pct <= 0) blockedBy.push('tp1_missing');
+    if (input.tpRoomOk === false) blockedBy.push('tp_room_too_small');
+    if (input.retrospective?.cleanUpsidePct !== undefined && input.retrospective.cleanUpsidePct < config.minCleanUpsidePct) {
+      blockedBy.push('CLEAN_UPSIDE_TOO_SMALL');
     }
 
     if (blockedBy.length > 0) {
       return {
         allowed: false,
-        reason: `Blocked by: ${blockedBy.join(', ')}`,
+        reason: `CryptoBud blocked execution because: ${blockedBy[0]}`,
         blockedBy,
-        adjustedOutput: output,
+        adjustedOutput,
       };
     }
 
     return {
       allowed: true,
-      reason: 'All risk checks passed.',
+      reason: 'All AI Takeover hard guards passed.',
       blockedBy: [],
-      adjustedOutput: output,
+      adjustedOutput,
     };
-  }
-
-  recordTradeExecuted(): void {
-    this.dailyTradeCount++;
-  }
-
-  recordPositionOpened(): void {
-    this.activePositionCount++;
-  }
-
-  recordPositionClosed(): void {
-    this.activePositionCount = Math.max(0, this.activePositionCount - 1);
-  }
-
-  private checkDailyReset(): void {
-    const today = new Date().getDate();
-    if (today !== this.lastResetDay) {
-      this.dailyTradeCount = 0;
-      this.lastResetDay = today;
-    }
   }
 }

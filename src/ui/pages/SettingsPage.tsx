@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { LiveSafetyState, AppSettings, TelegramSettings } from '../../core/types';
 import { createDefaultAppSettings, createDefaultTelegramSettings } from '../../core/types';
 import { PersistenceBadge } from '../../components/ui/PersistenceBadge';
@@ -13,6 +13,25 @@ import { apiCredentialsStore } from '../../core/persistence/ApiCredentialsStore'
 import { testAppStatePersistenceRoundTrip } from '../../core/persistence/AppStatePersistence';
 import { runResetScope } from '../../core/reset/reset-service';
 import { normalizePerformanceSettings, savePerformanceSettings } from '../../lib/performance/performanceSettings';
+import type { AiProviderName } from '../../core/ai/AiTakeoverTypes';
+import {
+  clearAiCloudApiSettings,
+  createDefaultAiCloudApiSettings,
+  getDefaultAiCloudApiUrl,
+  loadAiCloudApiSettings,
+  maskAiApiKey,
+  normalizeAiCloudApiUrl,
+  saveAiCloudApiSettings,
+  type AiCloudApiSettings,
+} from '../../core/ai/AiCloudApiSettings';
+import {
+  clearAiCloudTestResult,
+  createNotTestedAiCloudTestResult,
+  loadAiCloudTestResult,
+  saveAiCloudTestResult,
+  testAiCloudConnectivity,
+} from '../../core/ai/AiCloudTestService';
+import type { AiCloudTestResult } from '../../core/ai/AiCloudTestTypes';
 
 interface Props {
   liveState: LiveSafetyState;
@@ -32,6 +51,24 @@ interface Props {
     refreshing: boolean;
     exchangeInfoLoaded: boolean;
     lastUpdate: number;
+    lastSuccessfulEndpoint?: string | null;
+    lastFailureEndpoint?: string | null;
+    lastFailureBaseUrl?: string | null;
+    lastFailureReason?: string | null;
+    lastErrorMessage?: string | null;
+    circuitBreakerState?: 'CLOSED' | 'OPEN' | 'HALF_OPEN' | 'RATE_LIMITED';
+    retryActive?: boolean;
+    nextRetryInMs?: number;
+    ticker24hrCacheStatus?: 'fresh' | 'stale' | 'missing';
+    bookTickerCacheStatus?: 'fresh' | 'stale' | 'missing';
+    scannerUniverseCacheStatus?: 'fresh' | 'stale' | 'missing';
+    requestBudgetStatus?: 'OK' | 'EXHAUSTED';
+    requestBudgetRemaining?: number;
+    requestBudgetMax?: number;
+    budgetResetAt?: number;
+    budgetExhausted?: boolean;
+    budgetExhaustedReason?: string | null;
+    requestStormBlocked?: boolean;
   };
   onRefreshPublicData?: () => Promise<boolean>;
 }
@@ -41,6 +78,7 @@ const telegramNotifier = new TelegramNotifier();
 
 
 export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBackup, engine, publicDataState, onRefreshPublicData }: Props) {
+  const settingsScrollRef = useRef<HTMLDivElement | null>(null);
   const [dbInfo, setDbInfo] = useState(journal?.getDbInfo() ?? null);
 
   // ── App settings state ─────────────────────────────
@@ -60,6 +98,11 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
   const [apiSecretInput, setApiSecretInput] = useState('');
   const [apiUiError, setApiUiError] = useState<string | null>(null);
   const [apiTestResult, setApiTestResult] = useState<string | null>(null);
+  const [aiCloudSettings, setAiCloudSettings] = useState<AiCloudApiSettings>(createDefaultAiCloudApiSettings());
+  const [aiCloudApiKeyInput, setAiCloudApiKeyInput] = useState('');
+  const [aiCloudSaved, setAiCloudSaved] = useState(false);
+  const [aiCloudTesting, setAiCloudTesting] = useState(false);
+  const [aiCloudTestResult, setAiCloudTestResult] = useState<AiCloudTestResult>(() => loadAiCloudTestResult());
 
   // ── Telegram state ─────────────────────────────────
   const [tgSettings, setTgSettings] = useState<TelegramSettings>(createDefaultTelegramSettings());
@@ -72,13 +115,59 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
   const [resetResult, setResetResult] = useState<string | null>(null);
 
   // ── Public data state (from global app state, survives tab switches) ──
-  const pd = publicDataState ?? { ready: false, refreshing: false, exchangeInfoLoaded: false, lastUpdate: 0 };
+  const pd = publicDataState ?? {
+    ready: false,
+    refreshing: false,
+    exchangeInfoLoaded: false,
+    lastUpdate: 0,
+    lastSuccessfulEndpoint: null,
+    lastFailureEndpoint: null,
+    lastFailureBaseUrl: null,
+    lastFailureReason: null,
+    lastErrorMessage: null,
+    circuitBreakerState: 'CLOSED' as const,
+    retryActive: false,
+    nextRetryInMs: 0,
+    ticker24hrCacheStatus: 'missing' as const,
+    bookTickerCacheStatus: 'missing' as const,
+    scannerUniverseCacheStatus: 'missing' as const,
+    requestBudgetStatus: 'OK' as const,
+    requestBudgetRemaining: 0,
+    requestBudgetMax: 0,
+    budgetResetAt: 0,
+    budgetExhausted: false,
+    budgetExhaustedReason: null,
+    requestStormBlocked: false,
+  };
+  const publicApiLabel = pd.refreshing
+    ? 'LOADING'
+    : pd.ready
+        ? 'ONLINE'
+        : 'OFFLINE';
+  const requestBudgetLabel = pd.budgetExhausted || pd.requestBudgetStatus === 'EXHAUSTED' ? 'EXHAUSTED' : 'OK';
+  const nextRetrySeconds = Math.ceil((pd.nextRetryInMs ?? 0) / 1000);
 
   // ── Diagnostics state ──────────────────────────────
   const [diagResult, setDiagResult] = useState<string | null>(null);
   const [diagLoading, setDiagLoading] = useState(false);
   const [dbTestResult, setDbTestResult] = useState<string | null>(null);
   const openCountFromPositionManager = engine?.getPositionManager?.().getOpenPositions?.().length ?? dbInfo?.openPositionCount ?? 0;
+
+  useEffect(() => {
+    const emitScrollAudit = () => {
+      const el = settingsScrollRef.current;
+      if (!el) return;
+      const style = window.getComputedStyle(el);
+      const scrollRangePx = Math.max(0, el.scrollHeight - el.clientHeight);
+      logger.info(`SETTINGS_SCROLL_CONTAINER_AUDIT: scrollContainer=settings-layout overflowY=${style.overflowY} heightPx=${Math.round(el.getBoundingClientRect().height)} clientHeight=${el.clientHeight} scrollHeight=${el.scrollHeight} scrollRangePx=${scrollRangePx} canScrollToBottom=${String(scrollRangePx >= 0)} bottomPadding=${style.paddingBottom} bottomClippingProtected=${String(parseFloat(style.paddingBottom || '0') >= 120)} invariantOk=${String(style.overflowY === 'auto' || style.overflowY === 'scroll')} failureReason=${style.overflowY === 'auto' || style.overflowY === 'scroll' ? 'none' : 'SETTINGS_SCROLL_CONTAINER_NOT_SCROLLABLE'}`);
+    };
+    const raf = window.requestAnimationFrame(emitScrollAudit);
+    window.addEventListener('resize', emitScrollAudit);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener('resize', emitScrollAudit);
+    };
+  }, []);
 
   // ── Diagnostics handler ───────────────────────────
   const handleRunDiagnostics = useCallback(async () => {
@@ -109,6 +198,10 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
 
       const credStatus = await apiCredentialsStore.loadStatus();
       setApiStatus(credStatus);
+      const aiCloud = loadAiCloudApiSettings();
+      setAiCloudSettings(aiCloud);
+      setAiCloudApiKeyInput(aiCloud.apiKey);
+      setAiCloudTestResult(loadAiCloudTestResult());
 
       const tg = await settingsPersistence.loadTelegramSettings();
       setTgSettings(tg);
@@ -237,6 +330,54 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
     setApiStatus(status);
   }, [apiKeyInput, apiSecretInput]);
 
+  const handleSaveAiCloudApi = useCallback(() => {
+    const next: AiCloudApiSettings = {
+      ...aiCloudSettings,
+      apiKey: aiCloudApiKeyInput,
+      apiUrl: normalizeAiCloudApiUrl(aiCloudSettings.apiUrl, aiCloudSettings.provider),
+    };
+    saveAiCloudApiSettings(next);
+    setAiCloudSettings(next);
+    const notTested = createNotTestedAiCloudTestResult(next);
+    saveAiCloudTestResult(notTested);
+    setAiCloudTestResult(notTested);
+    setAiCloudSaved(true);
+    logger.info(`AI_CLOUD_API_SETTINGS_SAVED: provider=${next.provider} model=${next.model || 'none'} apiUrlConfigured=${String(next.apiUrl.trim().length > 0)} apiKeyConfigured=${String(next.apiKey.trim().length > 0)} storageKey=cryptobud_v5_ai_cloud_api`);
+    setTimeout(() => setAiCloudSaved(false), 2000);
+  }, [aiCloudSettings, aiCloudApiKeyInput]);
+
+  const handleTestAiCloud = useCallback(async () => {
+    const current: AiCloudApiSettings = {
+      ...aiCloudSettings,
+      apiKey: aiCloudApiKeyInput,
+    };
+    const testing = {
+      ...createNotTestedAiCloudTestResult(current),
+      status: 'TESTING' as const,
+      lastTestedAt: Date.now(),
+    };
+    setAiCloudTesting(true);
+    setAiCloudTestResult(testing);
+    try {
+      const result = await testAiCloudConnectivity(current);
+      saveAiCloudTestResult(result);
+      setAiCloudTestResult(result);
+    } finally {
+      setAiCloudTesting(false);
+    }
+  }, [aiCloudSettings, aiCloudApiKeyInput]);
+
+  const handleClearAiCloudApi = useCallback(() => {
+    clearAiCloudApiSettings();
+    const clearedTest = clearAiCloudTestResult();
+    const empty = createDefaultAiCloudApiSettings();
+    setAiCloudSettings(empty);
+    setAiCloudApiKeyInput('');
+    setAiCloudTestResult(clearedTest);
+    setAiCloudSaved(false);
+    logger.info('AI_CLOUD_API_SETTINGS_CLEARED: storageKey=cryptobud_v5_ai_cloud_api');
+  }, []);
+
   // ── Telegram handlers ──────────────────────────────
 
   const handleSaveTelegram = useCallback(async () => {
@@ -316,7 +457,7 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
   }, [onRefreshPublicData]);
 
   return (
-    <div className="settings-layout">
+    <div className="settings-layout" ref={settingsScrollRef} data-testid="settings-scroll-container">
       <div className="page-panel" style={{ maxWidth: 640 }}>
         {/* ── Section: Persistence ─────────────────────── */}
         <div className="panel-section-title">Persistence Status</div>
@@ -448,14 +589,48 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
           API keys are only required for future live/private account checks.
         </div>
         <div style={{ fontSize: 11, color: pd.ready ? '#3fb950' : pd.refreshing ? '#d29922' : '#f85149', marginBottom: 4 }}>
-          Public API: {pd.ready ? 'ONLINE' : pd.refreshing ? 'LOADING' : 'OFFLINE'}
+          Public API connectivity: {publicApiLabel}
+        </div>
+        <div style={{ fontSize: 11, color: requestBudgetLabel === 'EXHAUSTED' ? '#d29922' : '#3fb950', marginBottom: 4 }}>
+          Request budget: {requestBudgetLabel} ({pd.requestBudgetRemaining ?? 0}/{pd.requestBudgetMax ?? 0})
+        </div>
+        <div style={{ fontSize: 11, color: pd.circuitBreakerState === 'OPEN' ? '#f85149' : pd.circuitBreakerState === 'HALF_OPEN' || pd.circuitBreakerState === 'RATE_LIMITED' ? '#d29922' : '#3fb950', marginBottom: 4 }}>
+          Circuit breaker: {pd.circuitBreakerState ?? 'CLOSED'}
         </div>
         <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 4 }}>
           exchangeInfo loaded: {pd.exchangeInfoLoaded ? 'yes' : 'no'}
         </div>
+        <div style={{ fontSize: 11, color: pd.ticker24hrCacheStatus === 'fresh' ? '#3fb950' : pd.ticker24hrCacheStatus === 'stale' ? '#d29922' : '#f85149', marginBottom: 4 }}>
+          ticker24hr cache: {(pd.ticker24hrCacheStatus ?? 'missing').toUpperCase()}
+        </div>
+        <div style={{ fontSize: 11, color: pd.bookTickerCacheStatus === 'fresh' ? '#3fb950' : pd.bookTickerCacheStatus === 'stale' ? '#d29922' : '#f85149', marginBottom: 4 }}>
+          bookTicker cache: {(pd.bookTickerCacheStatus ?? 'missing').toUpperCase()}
+        </div>
+        <div style={{ fontSize: 11, color: pd.scannerUniverseCacheStatus === 'fresh' ? '#3fb950' : pd.scannerUniverseCacheStatus === 'stale' ? '#d29922' : '#f85149', marginBottom: 4 }}>
+          scanner universe: {(pd.scannerUniverseCacheStatus ?? 'missing').toUpperCase()}
+        </div>
         <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 8 }}>
           last market data update: {pd.lastUpdate ? formatLocalTime(pd.lastUpdate, { format: 'time' }) : 'n/a'}
         </div>
+        <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 4 }}>
+          last successful endpoint: {pd.lastSuccessfulEndpoint ?? 'n/a'}
+        </div>
+        <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 4 }}>
+          next retry in: {nextRetrySeconds}s / retry active: {pd.retryActive ? 'yes' : 'no'}
+        </div>
+        <div style={{ fontSize: 11, color: pd.requestStormBlocked ? '#d29922' : '#8b949e', marginBottom: 4 }}>
+          request storm blocked: {pd.requestStormBlocked ? 'yes' : 'no'}
+        </div>
+        {requestBudgetLabel === 'EXHAUSTED' && (
+          <div style={{ fontSize: 11, color: '#d29922', marginBottom: 8 }}>
+            budget: {pd.budgetExhaustedReason ?? 'REQUEST_BUDGET_EXCEEDED'} / reset: {pd.budgetResetAt ? formatLocalTime(pd.budgetResetAt, { format: 'time' }) : 'n/a'}
+          </div>
+        )}
+        {!pd.ready && requestBudgetLabel !== 'EXHAUSTED' && (
+          <div style={{ fontSize: 11, color: '#f85149', marginBottom: 8 }}>
+            failure: {pd.lastFailureEndpoint ?? 'n/a'} / {pd.lastFailureBaseUrl ?? 'n/a'} / {pd.lastFailureReason ?? pd.lastErrorMessage ?? 'n/a'}
+          </div>
+        )}
         <button className="btn btn-sm btn-yellow" onClick={handleRefreshPublicData}>Refresh Public Data</button>
 
         <div className="panel-section-title" style={{ marginTop: 20 }}>Performance</div>
@@ -545,6 +720,123 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
             Save Time-Based Exit Settings
           </button>
           {settingsSaved && <span style={{ fontSize: 11, color: '#3fb950' }}>Saved</span>}
+        </div>
+
+        <div className="panel-section-title" style={{ marginTop: 20 }}>AI Cloud API</div>
+        <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 8 }}>
+          V5 AI provider settings for AI Takeover missions. This does not change Binance execution mode.
+        </div>
+        <div style={{ fontSize: 11, color: aiCloudSettings.apiKey ? '#3fb950' : '#8b949e', marginBottom: 8 }}>
+          Status: {aiCloudSettings.provider !== 'OFF' && aiCloudSettings.apiKey ? `Configured (${maskAiApiKey(aiCloudSettings.apiKey)})` : 'Not Configured'}
+        </div>
+
+        <div className="settings-row">
+          <label className="settings-label">AI Provider</label>
+          <select
+            className="settings-input"
+            value={aiCloudSettings.provider}
+            onChange={(event) => {
+              const provider = event.target.value as AiProviderName;
+              setAiCloudSettings((s) => ({
+                ...s,
+                provider,
+                apiUrl: normalizeAiCloudApiUrl(s.apiUrl || getDefaultAiCloudApiUrl(provider), provider),
+              }));
+            }}
+          >
+            <option value="OFF">OFF</option>
+            <option value="OpenCode">OpenCode Zen</option>
+            <option value="OpenCode Go">OpenCode Go</option>
+            <option value="OpenAI">OpenAI</option>
+            <option value="DeepSeek">DeepSeek</option>
+            <option value="Ollama Local">Ollama Local</option>
+          </select>
+        </div>
+
+        <div className="settings-row">
+          <label className="settings-label">AI Model</label>
+          <input
+            className="settings-input"
+            type="text"
+            value={aiCloudSettings.model}
+            onChange={(event) => setAiCloudSettings((s) => ({ ...s, model: event.target.value }))}
+            placeholder="e.g. opencode model / gpt-4o-mini / deepseek-chat"
+          />
+        </div>
+
+        <div className="settings-row">
+          <label className="settings-label">API URL</label>
+          <input
+            className="settings-input"
+            type="text"
+            value={aiCloudSettings.apiUrl}
+            onChange={(event) => setAiCloudSettings((s) => ({ ...s, apiUrl: event.target.value }))}
+            placeholder="https://.../v1/chat/completions"
+          />
+        </div>
+
+        <div className="settings-row">
+          <label className="settings-label">API Key</label>
+          <input
+            className="settings-input"
+            type="password"
+            value={aiCloudApiKeyInput}
+            onChange={(event) => setAiCloudApiKeyInput(event.target.value)}
+            placeholder={aiCloudSettings.apiKey ? 'saved AI API key' : 'Enter AI cloud API key'}
+          />
+        </div>
+
+        <div className="ai-cloud-test-panel">
+          <div className="ai-cloud-test-line">
+            <span>AI Cloud Test</span>
+            <span className={`ai-cloud-test-badge ai-cloud-test-badge--${aiCloudTestResult.status.toLowerCase()}`}>
+              {aiCloudTesting ? 'TESTING...' : aiCloudTestResult.status.replace('_', ' ')}
+            </span>
+          </div>
+          <div className="ai-cloud-test-grid">
+            <span>Provider</span>
+            <strong>{aiCloudTestResult.provider}</strong>
+            <span>Model</span>
+            <strong>{aiCloudTestResult.model || 'n/a'}</strong>
+            <span>Endpoint</span>
+            <strong>{aiCloudTestResult.endpointDisplay}</strong>
+            <span>Last tested</span>
+            <strong>{aiCloudTestResult.lastTestedAt ? formatLocalTime(aiCloudTestResult.lastTestedAt, { format: 'datetime' }) : 'n/a'}</strong>
+            <span>Latency</span>
+            <strong>{aiCloudTestResult.latencyMs === null ? 'n/a' : `${aiCloudTestResult.latencyMs}ms`}</strong>
+            <span>Response parsed</span>
+            <strong>{aiCloudTestResult.responseParsed ? 'OK' : 'n/a'}</strong>
+          </div>
+          {aiCloudTestResult.status === 'FAILED' && (
+            <div className="ai-cloud-test-error">
+              Reason: {aiCloudTestResult.failureReason ?? aiCloudTestResult.errorMessage ?? 'AI_TEST_FAILED'}
+            </div>
+          )}
+          {aiCloudTestResult.status === 'SUCCESS' && (
+            <div className="ai-cloud-test-success">Result: OK</div>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+          <button className="btn btn-sm btn-green" onClick={handleSaveAiCloudApi}>Save AI Cloud API</button>
+          <button
+            className="btn btn-sm btn-cyan"
+            onClick={handleTestAiCloud}
+            disabled={aiCloudTesting || aiCloudSettings.provider === 'OFF'}
+            type="button"
+          >
+            {aiCloudTesting ? 'Testing...' : 'Test AI Cloud'}
+          </button>
+          <ConfirmDangerAction
+            confirmText="CLEAR AI API"
+            buttonLabel="Clear AI API"
+            onConfirm={handleClearAiCloudApi}
+            warning="Remove stored V5 AI cloud provider settings and API key."
+          />
+          {aiCloudSaved && <span style={{ fontSize: 11, color: '#3fb950', alignSelf: 'center' }}>Saved</span>}
+        </div>
+        <div style={{ fontSize: 11, color: '#d29922', marginTop: 6 }}>
+          Development storage: key is saved locally under V5 AI storage. Use backend/Tauri secure storage before real live deployment.
         </div>
 
         {/* ── Section E: Binance Private API ───────────── */}
@@ -740,6 +1032,7 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
             {resetResult}
           </div>
         )}
+        <div className="settings-scroll-bottom-sentinel" aria-hidden="true" />
       </div>
     </div>
   );

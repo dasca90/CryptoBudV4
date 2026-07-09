@@ -57,6 +57,20 @@ async function main() {
   // ── Setup ──────────────────────────────────────────
   const feed = MarketDataFeed.getInstance();
   feed.setManualPrice('BTCUSDT', 50000);
+  feed.setExchangeInfo({
+    symbols: [{
+      symbol: 'BTCUSDT',
+      status: 'TRADING',
+      baseAsset: 'BTC',
+      quoteAsset: 'USDT',
+      isSpotTradingAllowed: true,
+      filters: [
+        { filterType: 'PRICE_FILTER', minPrice: '0.01', maxPrice: '10000000', tickSize: '0.01' },
+        { filterType: 'LOT_SIZE', minQty: '0.00001', maxQty: '1000', stepSize: '0.00001' },
+        { filterType: 'MIN_NOTIONAL', minNotional: '10' },
+      ],
+    }],
+  });
 
   const ml = new MLPredictor();
   ml.feedPrice({ coin: 'BTCUSDT', bid: 49950, ask: 50050, last: 50000, timestamp: Date.now() });

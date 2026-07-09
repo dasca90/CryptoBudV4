@@ -1,124 +1,176 @@
-import type { AiDecisionOutput } from './AiTakeoverTypes';
-import { AI_DECISION_SCHEMA_FIELDS, getDefaultAiDecisionOutput } from './AiDecisionSchema';
+import type { AiDecisionOutput, AiTakeoverConfig } from './AiTakeoverTypes';
+import { AI_ALLOWED_DECISIONS, getDefaultAiDecisionOutput } from './AiDecisionSchema';
 
 export interface ValidationResult {
   valid: boolean;
   output: AiDecisionOutput;
   errors: string[];
   warnings: string[];
+  blockedReason: string | null;
 }
 
-export function validateAiResponse(raw: string): ValidationResult {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-
+export function validateAiResponse(raw: string, config: AiTakeoverConfig): ValidationResult {
   if (!raw || raw.trim().length === 0) {
-    return {
-      valid: false,
-      output: getDefaultAiDecisionOutput(),
-      errors: ['Empty AI response.'],
-      warnings: [],
-    };
+    return invalid('AI_SCHEMA_INVALID', 'Empty AI response.');
   }
 
-  let parsed: Record<string, unknown>;
+  let parsed: unknown;
   try {
     parsed = JSON.parse(raw.trim());
   } catch {
+    return invalid('AI_SCHEMA_INVALID', 'Invalid JSON in AI response.');
+  }
+
+  if (!isRecord(parsed)) {
+    return invalid('AI_SCHEMA_INVALID', 'AI response is not a JSON object.');
+  }
+
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  requireString(parsed, 'decision', errors);
+  requireNumber(parsed, 'confidence', errors);
+  requireString(parsed, 'professionalVerdict', errors);
+  requireString(parsed, 'strategy', errors);
+  requireObject(parsed, 'marketRead', errors);
+  requireObject(parsed, 'retrospectiveSummary', errors);
+  requireObject(parsed, 'tpPlan', errors);
+  requireObject(parsed, 'riskPlan', errors);
+  requireObject(parsed, 'executionIntent', errors);
+  requireString(parsed, 'reason', errors);
+
+  if (typeof parsed.decision === 'string' && !AI_ALLOWED_DECISIONS.includes(parsed.decision as any)) {
+    errors.push('AI_DECISION_INVALID');
+  }
+
+  const retrospectiveSummary = isRecord(parsed.retrospectiveSummary) ? parsed.retrospectiveSummary : null;
+  if (!retrospectiveSummary) {
+    errors.push('RETROSPECTIVE_SUMMARY_MISSING');
+  }
+
+  const tpPlan = isRecord(parsed.tpPlan) ? parsed.tpPlan : null;
+  if (!tpPlan || typeof tpPlan.tp1Pct !== 'number') {
+    errors.push('AI_TP1_MISSING');
+  }
+
+  if (errors.length > 0) {
     return {
       valid: false,
-      output: getDefaultAiDecisionOutput(),
-      errors: ['Invalid JSON in AI response.'],
-      warnings: [],
+      output: getDefaultAiDecisionOutput(errors[0] ?? 'AI_SCHEMA_INVALID'),
+      errors,
+      warnings,
+      blockedReason: errors.includes('AI_DECISION_INVALID') ? 'AI_DECISION_INVALID' : 'AI_SCHEMA_INVALID',
     };
   }
 
-  if (typeof parsed !== 'object' || parsed === null) {
+  const output = coerceOutput(parsed as Record<string, unknown>);
+  if (output.confidence < config.minConfidence) {
     return {
       valid: false,
-      output: getDefaultAiDecisionOutput(),
-      errors: ['AI response is not a JSON object.'],
-      warnings: [],
+      output,
+      errors: ['AI_CONFIDENCE_TOO_LOW'],
+      warnings,
+      blockedReason: 'AI_CONFIDENCE_TOO_LOW',
     };
   }
 
-  for (const field of AI_DECISION_SCHEMA_FIELDS) {
-    const value = parsed[field.name];
-    const isPresent = value !== undefined && value !== null;
-
-    if (field.required && !isPresent) {
-      errors.push(`Missing required field: "${field.name}".`);
-      continue;
-    }
-
-    if (!isPresent) continue;
-
-    if (field.type === 'string' && typeof value !== 'string') {
-      errors.push(`Field "${field.name}" must be a string, got ${typeof value}.`);
-      continue;
-    }
-
-    if (field.type === 'number' && typeof value !== 'number') {
-      errors.push(`Field "${field.name}" must be a number, got ${typeof value}.`);
-      continue;
-    }
-
-    if (field.type === 'boolean' && typeof value !== 'boolean') {
-      errors.push(`Field "${field.name}" must be a boolean, got ${typeof value}.`);
-      continue;
-    }
-
-    if (field.type === 'object' && (typeof value !== 'object' || value === null || Array.isArray(value))) {
-      errors.push(`Field "${field.name}" must be an object, got ${typeof value}.`);
-      continue;
-    }
-
-    if (field.allowedValues && typeof value === 'string' && !field.allowedValues.includes(value)) {
-      errors.push(`Field "${field.name}" has invalid value "${value}". Allowed: ${field.allowedValues.join(', ')}.`);
-    }
-
-    if (field.min !== undefined && typeof value === 'number' && value < field.min) {
-      errors.push(`Field "${field.name}" value ${value} is below minimum ${field.min}.`);
-    }
-
-    if (field.max !== undefined && typeof value === 'number' && value > field.max) {
-      if (field.name === 'tp2Pct' && value > 0) {
-        errors.push('TP2 must be 0. AI Takeover does not support TP2. Forcing tp2Pct to 0.');
-      } else {
-        errors.push(`Field "${field.name}" value ${value} exceeds maximum ${field.max}.`);
-      }
-    }
+  if (output.tpPlan.tp1Pct < config.minTp1Pct || output.tpPlan.tp1Pct > config.maxTp1Pct) {
+    return {
+      valid: false,
+      output,
+      errors: ['AI_TP1_OUT_OF_BOUNDS'],
+      warnings,
+      blockedReason: 'AI_TP1_OUT_OF_BOUNDS',
+    };
   }
 
-  const action = (['BUY', 'WAIT', 'AVOID'] as const).includes(parsed.action as any)
-    ? (parsed.action as 'BUY' | 'WAIT' | 'AVOID')
-    : 'WAIT';
+  if (Number((parsed.tpPlan as Record<string, unknown>).tp2Pct) > 0) {
+    warnings.push('AI_TP2_FORCED_ZERO_AUDIT');
+    output.tpPlan.tp2Pct = 0;
+  }
 
-  const output: AiDecisionOutput = {
-    action,
-    confidenceScore: clampNumber(parsed.confidenceScore as number, 0, 100, 0),
-    reason: typeof parsed.reason === 'string' ? parsed.reason : 'AI decision — no reason provided.',
-    suggestedEntryPrice: typeof parsed.suggestedEntryPrice === 'number' && parsed.suggestedEntryPrice > 0
-      ? parsed.suggestedEntryPrice as number : null,
-    suggestedStopLossPct: typeof parsed.suggestedStopLossPct === 'number'
-      ? clampNumber(parsed.suggestedStopLossPct as number, -100, 0, null as any) : null,
-    suggestedTp1Pct: typeof parsed.suggestedTp1Pct === 'number' && parsed.suggestedTp1Pct > 0
-      ? parsed.suggestedTp1Pct as number : null,
-    tp2Pct: 0,
-    maxHoldHours: clampNumber(parsed.maxHoldHours as number, 1, 168, 24),
-    metadata: typeof parsed.metadata === 'object' && parsed.metadata !== null && !Array.isArray(parsed.metadata)
-      ? parsed.metadata as Record<string, unknown> : {},
+  return { valid: true, output, errors, warnings, blockedReason: null };
+}
+
+function invalid(blockedReason: string, message: string): ValidationResult {
+  return {
+    valid: false,
+    output: getDefaultAiDecisionOutput(blockedReason),
+    errors: [message, blockedReason],
+    warnings: [],
+    blockedReason,
   };
+}
 
-  if (parsed.tp2Pct !== undefined && parsed.tp2Pct !== 0) {
-    warnings.push('AI attempted to set non-zero TP2. It has been forced to 0.');
-  }
+function coerceOutput(parsed: Record<string, unknown>): AiDecisionOutput {
+  const marketRead = parsed.marketRead as Record<string, unknown>;
+  const retrospectiveSummary = parsed.retrospectiveSummary as Record<string, unknown>;
+  const tpPlan = parsed.tpPlan as Record<string, unknown>;
+  const riskPlan = parsed.riskPlan as Record<string, unknown>;
+  const executionIntent = parsed.executionIntent as Record<string, unknown>;
+  return {
+    decision: parsed.decision as AiDecisionOutput['decision'],
+    confidence: clampNumber(parsed.confidence, 0, 1, 0),
+    professionalVerdict: stringValue(parsed.professionalVerdict, 'UNKNOWN'),
+    strategy: stringValue(parsed.strategy, 'ai_professional_dynamic'),
+    marketRead: {
+      regime: stringValue(marketRead.regime, 'unknown'),
+      btcEthAlignment: stringValue(marketRead.btcEthAlignment, 'unknown'),
+      trendQuality: stringValue(marketRead.trendQuality, 'unknown'),
+      entryQuality: stringValue(marketRead.entryQuality, 'unknown'),
+      riskLevel: stringValue(marketRead.riskLevel, 'high'),
+    },
+    retrospectiveSummary: {
+      expectedUpsidePct: numberValue(retrospectiveSummary.expectedUpsidePct),
+      expectedDownsidePct: numberValue(retrospectiveSummary.expectedDownsidePct),
+      rangeClass: stringValue(retrospectiveSummary.rangeClass, 'unknown'),
+      supportDistancePct: numberValue(retrospectiveSummary.supportDistancePct),
+      resistanceDistancePct: numberValue(retrospectiveSummary.resistanceDistancePct),
+      volatilityRisk: stringValue(retrospectiveSummary.volatilityRisk, 'unknown'),
+    },
+    tpPlan: {
+      tp1Pct: numberValue(tpPlan.tp1Pct),
+      tp1Reason: stringValue(tpPlan.tp1Reason, 'AI TP1 reason missing.'),
+      tp2Pct: 0,
+    },
+    riskPlan: {
+      slPct: numberValue(riskPlan.slPct),
+      maxCapitalUsd: numberValue(riskPlan.maxCapitalUsd),
+      riskRewardRatio: numberValue(riskPlan.riskRewardRatio),
+    },
+    executionIntent: {
+      wantsBuy: executionIntent.wantsBuy === true,
+      urgency: executionIntent.urgency === 'high' || executionIntent.urgency === 'normal' ? executionIntent.urgency : 'low',
+      rejectIf: Array.isArray(executionIntent.rejectIf) ? executionIntent.rejectIf.map(String) : [],
+    },
+    reason: stringValue(parsed.reason, 'AI decision reason missing.'),
+  };
+}
 
-  const valid = errors.length === 0;
-  return { valid, output, errors, warnings };
+function requireString(obj: Record<string, unknown>, field: string, errors: string[]): void {
+  if (typeof obj[field] !== 'string') errors.push(`Missing or invalid field: ${field}`);
+}
+
+function requireNumber(obj: Record<string, unknown>, field: string, errors: string[]): void {
+  if (typeof obj[field] !== 'number' || Number.isNaN(obj[field])) errors.push(`Missing or invalid field: ${field}`);
+}
+
+function requireObject(obj: Record<string, unknown>, field: string, errors: string[]): void {
+  if (!isRecord(obj[field])) errors.push(`Missing or invalid field: ${field}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim().length > 0 ? value : fallback;
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
-  if (typeof value !== 'number' || isNaN(value)) return fallback;
+  if (typeof value !== 'number' || Number.isNaN(value)) return fallback;
   return Math.max(min, Math.min(max, value));
 }

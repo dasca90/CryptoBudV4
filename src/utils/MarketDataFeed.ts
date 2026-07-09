@@ -2,6 +2,12 @@ import type { MarketPrice, SymbolFilters, MarketDataQualityLevel } from '../core
 import { parseSymbolFilters, isSymbolTradable } from '../core/market-data/symbol-filters';
 import { evaluateMarketDataQuality, getStalePriceAgeMs, getStaleBookAgeMs } from '../core/market-data/market-data-quality';
 import { logger } from './logger';
+import {
+  BinancePublicClient,
+  getBinancePublicCircuitSnapshot,
+  markBinanceBulkTickerCacheFresh,
+  markBinanceExchangeInfoLoaded,
+} from '../core/market-data/BinancePublicClient';
 
 type PriceCallback = (price: MarketPrice) => void;
 
@@ -14,6 +20,8 @@ export class MarketDataFeed {
   private exchangeInfoFetchedAt = 0;
   private symbolFiltersCache: Map<string, SymbolFilters> = new Map();
   private inFlightExchangeInfo: Promise<void> | null = null;
+  private singleSymbolFallbacks: Map<string, Promise<MarketPrice>> = new Map();
+  private singleSymbolFallbackBlockedUntil = 0;
 
   static getInstance(): MarketDataFeed {
     if (!MarketDataFeed.instance) {
@@ -26,7 +34,7 @@ export class MarketDataFeed {
 
   async getPrice(coin: string): Promise<MarketPrice> {
     const cached = this.prices.get(coin);
-    if (cached && Date.now() - cached.timestamp < 2000) return cached;
+    if (cached && Date.now() - cached.timestamp < 30000) return cached;
 
     const price = await this.fetchPrice(coin);
     this.prices.set(coin, price);
@@ -51,6 +59,15 @@ export class MarketDataFeed {
     return p ? Date.now() - p.timestamp : 999999;
   }
 
+  getBookTickerCacheStatus(): 'fresh' | 'stale' | 'missing' {
+    let newest = 0;
+    for (const price of this.prices.values()) {
+      if (price.bid > 0 && price.ask > 0) newest = Math.max(newest, price.timestamp);
+    }
+    if (newest <= 0) return 'missing';
+    return Date.now() - newest <= 30000 ? 'fresh' : 'stale';
+  }
+
   getSpreadPct(coin: string): number {
     const p = this.prices.get(coin);
     if (!p || p.ask <= 0) return 999;
@@ -58,22 +75,68 @@ export class MarketDataFeed {
   }
 
   private async fetchPrice(coin: string): Promise<MarketPrice> {
+    const circuit = getBinancePublicCircuitSnapshot();
+    const cached = this.prices.get(coin);
+    if (cached && cached.bid > 0 && cached.ask > 0) {
+      if (Date.now() - cached.timestamp < 30000) return cached;
+    }
+
+    const cacheStatus = this.getBookTickerCacheStatus();
+    markBinanceBulkTickerCacheFresh(cacheStatus === 'fresh');
+    const budgetBlocked = circuit.budgetExhausted || circuit.circuitBreakerState === 'RATE_LIMITED';
+    const hardBlocked = circuit.circuitBreakerState === 'OPEN' || circuit.circuitBreakerState === 'HALF_OPEN' || !circuit.exchangeInfoLoaded || budgetBlocked;
+    if (hardBlocked) {
+      const finalState = budgetBlocked
+        ? 'skipped_request_budget_exceeded'
+        : circuit.circuitBreakerState === 'CLOSED'
+          ? 'skipped_exchange_info_missing'
+          : 'skipped_public_api_offline';
+      const failureReason = budgetBlocked
+        ? 'REQUEST_BUDGET_EXCEEDED'
+        : circuit.circuitBreakerState === 'CLOSED'
+          ? 'EXCHANGE_INFO_MISSING'
+          : 'PUBLIC_API_OFFLINE';
+      logger.throttled('WARN', `BINANCE_PUBLIC_REQUEST_FANOUT_BLOCKED_AUDIT: endpoint=/api/v3/ticker/bookTicker?symbol=${coin} baseUrl=none attempted=false finalState=${finalState} success=false statusCode=n/a errorName=CircuitBreakerOpen errorMessage=${finalState} durationMs=0 timeoutMs=0 circuitBreakerState=${circuit.circuitBreakerState} retryActive=${String(circuit.retryActive)} nextRetryInMs=${circuit.nextRetryInMs} publicApiOnline=${String(circuit.exchangeInfoLoaded && circuit.circuitBreakerState !== 'OPEN')} exchangeInfoLoaded=${String(circuit.exchangeInfoLoaded)} requestFanoutBlocked=true inflightDeduped=false requestBudgetRemaining=${circuit.requestBudgetRemaining} requestBudgetMax=${circuit.requestBudgetMax} budgetResetAt=${circuit.budgetResetAt} budgetExhausted=${String(circuit.budgetExhausted)} budgetExhaustedReason=${circuit.budgetExhaustedReason ?? 'none'} bulkTickerCacheFresh=${String(circuit.bulkTickerCacheFresh)} singleSymbolFallbackAllowed=${String(circuit.singleSymbolFallbackAllowed)} invariantOk=true failureReason=${failureReason}`, 'book_ticker_fanout_blocked_global', 30000);
+      if (cached && cached.last > 0) return cached;
+      return { coin, bid: 0, ask: 0, last: 0, timestamp: Date.now() };
+    }
+
+    if (!circuit.singleSymbolFallbackAllowed || Date.now() < this.singleSymbolFallbackBlockedUntil) {
+      if (cached && cached.last > 0) return cached;
+      return { coin, bid: 0, ask: 0, last: 0, timestamp: Date.now() };
+    }
+
+    const existing = this.singleSymbolFallbacks.get(coin);
+    if (existing) return existing;
+
+    const task = this.fetchSingleSymbolFallback(coin);
+    this.singleSymbolFallbacks.set(coin, task);
+    try {
+      return await task;
+    } finally {
+      this.singleSymbolFallbacks.delete(coin);
+    }
+  }
+
+  private async fetchSingleSymbolFallback(coin: string): Promise<MarketPrice> {
+    this.singleSymbolFallbackBlockedUntil = Date.now() + 10000;
     try {
       const symbol = coin.replace('USDT', '') + 'USDT';
-      const resp = await fetch(`https://api.binance.com/api/v3/ticker/bookTicker?symbol=${symbol}`);
-      const data = await resp.json();
-
-      if (data.code === -1121) throw new Error(`Unknown symbol: ${symbol}`);
-
-      return {
+      const data = await new BinancePublicClient().getBookTicker(symbol);
+      const bid = parseFloat(data.bidPrice);
+      const ask = parseFloat(data.askPrice);
+      const price = {
         coin,
-        bid: parseFloat(data.bidPrice),
-        ask: parseFloat(data.askPrice),
-        last: (parseFloat(data.bidPrice) + parseFloat(data.askPrice)) / 2,
+        bid,
+        ask,
+        last: (bid + ask) / 2,
         timestamp: Date.now(),
       };
+      this.prices.set(coin, price);
+      return price;
     } catch (err) {
-      console.warn(`MarketDataFeed: Failed to fetch ${coin}, using fallback.`, err);
+      const message = err instanceof Error ? err.message : String(err);
+      logger.throttled('WARN', `BINANCE_PUBLIC_BOOK_TICKER_PROBE_AUDIT: endpoint=/api/v3/ticker/bookTicker?symbol=${coin} baseUrl=auto attempted=true success=false errorName=${err instanceof Error ? err.name : 'Error'} errorMessage=${message.replace(/\s+/g, '_')} publicApiOnline=true invariantOk=true failureReason=${message.replace(/\s+/g, '_')}`, 'book_ticker_single_symbol_fallback_failed', 30000);
       return {
         coin,
         bid: 0, ask: 0, last: 0, timestamp: Date.now(),
@@ -126,8 +189,41 @@ export class MarketDataFeed {
     });
   }
 
+  setManualBookTicker(coin: string, bid: number, ask: number, timestamp = Date.now()) {
+    const last = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+    this.prices.set(coin, { coin, bid, ask, last, timestamp });
+    markBinanceBulkTickerCacheFresh(this.getBookTickerCacheStatus() === 'fresh');
+  }
+
+  setBulkBookTickers(rows: Array<Record<string, string>>, timestamp = Date.now()) {
+    for (const row of rows) {
+      const symbol = String(row.symbol ?? '');
+      const bid = Number(row.bidPrice);
+      const ask = Number(row.askPrice);
+      if (symbol && bid > 0 && ask > 0) {
+        this.setManualBookTicker(symbol, bid, ask, timestamp);
+      }
+    }
+    markBinanceBulkTickerCacheFresh(this.getBookTickerCacheStatus() === 'fresh');
+  }
+
   setSymbolFilters(symbol: string, filters: import('../core/types').SymbolFilters) {
     this.symbolFiltersCache.set(symbol, filters);
+  }
+
+  setExchangeInfo(exchangeInfo: Record<string, unknown>, fetchedAt = Date.now()) {
+    this.exchangeInfo = exchangeInfo;
+    this.exchangeInfoFetchedAt = fetchedAt;
+    markBinanceExchangeInfoLoaded(Array.isArray(exchangeInfo.symbols));
+    this.symbolFiltersCache.clear();
+    const symbols = Array.isArray(exchangeInfo.symbols)
+      ? exchangeInfo.symbols as Record<string, unknown>[]
+      : [];
+    for (const sym of symbols) {
+      const symbolName = sym.symbol as string;
+      const filters = parseSymbolFilters(symbolName, exchangeInfo);
+      if (filters) this.symbolFiltersCache.set(symbolName, filters);
+    }
   }
 
   // ── ExchangeInfo / Symbol Filters ──────────────
@@ -146,24 +242,19 @@ export class MarketDataFeed {
 
   private async doFetchExchangeInfo(): Promise<void> {
     try {
-      const resp = await fetch('https://api.binance.com/api/v3/exchangeInfo');
-      this.exchangeInfo = await resp.json() as Record<string, unknown>;
-      this.exchangeInfoFetchedAt = Date.now();
-      this.symbolFiltersCache.clear();
-
-      const symbols = Array.isArray(this.exchangeInfo.symbols)
+      const client = new BinancePublicClient();
+      const exchangeInfo = await client.getExchangeInfo();
+      this.setExchangeInfo(exchangeInfo);
+      const symbols = Array.isArray(this.exchangeInfo?.symbols)
         ? this.exchangeInfo.symbols as Record<string, unknown>[]
         : [];
       if (symbols.length === 0) {
         logger.warn('EXCHANGE_INFO_SYMBOLS_UNAVAILABLE: exchangeInfo response missing symbols array; symbol filters remain cached/empty');
       }
-      for (const sym of symbols) {
-        const symbolName = sym.symbol as string;
-        const filters = parseSymbolFilters(symbolName, this.exchangeInfo);
-        if (filters) this.symbolFiltersCache.set(symbolName, filters);
-      }
     } catch (err) {
-      console.warn('MarketDataFeed: Failed to fetch exchangeInfo', err);
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn(`BINANCE_EXCHANGE_INFO_BOOTSTRAP_AUDIT: endpoint=/api/v3/exchangeInfo baseUrl=auto attempted=true success=false errorName=${err instanceof Error ? err.name : 'Error'} errorMessage=${message.replace(/\s+/g, '_')} publicApiOnline=false exchangeInfoLoaded=false invariantOk=true failureReason=${message.replace(/\s+/g, '_')}`);
+      throw err;
     }
   }
 
@@ -219,5 +310,7 @@ export class MarketDataFeed {
     this.symbolFiltersCache.clear();
     this.exchangeInfo = null;
     this.exchangeInfoFetchedAt = 0;
+    markBinanceExchangeInfoLoaded(false);
+    markBinanceBulkTickerCacheFresh(false);
   }
 }
