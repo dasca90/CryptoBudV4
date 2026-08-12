@@ -12,15 +12,16 @@ const ok = (c: boolean, m: string) => { if (c) p++; else { f++; console.error('F
   ok(!settingsPage.includes('Capital Per Trade'), 'A Paper Settings not rendered in Settings page');
   ok(tradePage.includes('onTogglePaperAuto'), 'B Paper Settings rendered in Trade page');
   ok(settingsPage.includes('Telegram Notifications'), 'C Settings has Telegram section');
-  ok(settingsPage.includes('Binance API'), 'D Settings has API section');
+  ok(settingsPage.includes('Binance LIVE Credentials'), 'D Settings has API section');
   ok(settingsPage.includes('BTC Anchor') && settingsPage.includes('ETH Anchor'), 'E Settings has anchors');
   ok(settingsPage.includes('Binance Public Data') && settingsPage.includes('Public API'), 'I Settings shows public data status');
   ok(settingsPage.includes('scanner does not require API keys'), 'J Settings clarifies scanner does not require API keys');
-  ok(settingsPage.includes('Binance API (Private)') && settingsPage.includes('Live trading remains locked'), 'K private API section remains locked/live-only');
-  ok(settingsPage.includes("Status: {apiStatus.configured ? 'Configured' : 'Not Configured'}"), 'M Settings page shows configured status text');
+  ok(settingsPage.includes('Binance LIVE Credentials') && settingsPage.includes('Live trading remains locked'), 'K private API section remains locked/live-only');
+  ok(settingsPage.includes("Status: {apiStatus.state ?? (apiStatus.configured ? 'SECURE' : 'NOT_CONFIGURED')}"), 'M Settings page shows secure credential status text');
   ok(settingsPage.includes('Saved: {apiStatus.maskedApiKey}'), 'N Settings page shows masked key');
-  ok(settingsPage.includes('API Secret: saved'), 'O Settings page does not show raw secret');
-  ok(settingsPage.includes('Clear API Keys') && settingsPage.includes('Status: {apiStatus.configured ? \'Configured\' : \'Not Configured\'}'), 'P Clear API keys path exists and status can switch to Not Configured');
+  ok(settingsPage.includes('API Secret: CONFIGURED') && !settingsPage.includes('show saved secret'), 'O Settings page does not show raw secret');
+  ok(settingsPage.includes('Delete Credentials') && settingsPage.includes('NOT_CONFIGURED'), 'P secure credential deletion path exists and status can switch to Not Configured');
+  ok(settingsPage.includes("handleModeChange('DEMO')") && settingsPage.includes("handleModeChange('LIVE')"), 'Q Settings exposes explicit DEMO/LIVE switch');
 
   const persistence = new SettingsPersistence();
   const updated = { ...createDefaultAppSettings(), riskStyle: 'aggressive' as const, capitalPerTrade: 222, maxPositions: 7 };

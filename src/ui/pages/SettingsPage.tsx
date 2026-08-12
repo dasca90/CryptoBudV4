@@ -16,7 +16,9 @@ import { normalizePerformanceSettings, savePerformanceSettings } from '../../lib
 
 interface Props {
   liveState: LiveSafetyState;
+  executionMode: 'DEMO' | 'LIVE';
   onRunLiveCheck: () => void;
+  onExecutionModeChange: (mode: 'DEMO' | 'LIVE') => Promise<{ ok: boolean; error?: string }>;
   journal?: Journal;
   onExportBackup?: () => void;
   engine?: {
@@ -40,7 +42,7 @@ const settingsPersistence = new SettingsPersistence();
 const telegramNotifier = new TelegramNotifier();
 
 
-export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBackup, engine, publicDataState, onRefreshPublicData }: Props) {
+export function SettingsPage({ liveState, executionMode, onRunLiveCheck, onExecutionModeChange, journal, onExportBackup, engine, publicDataState, onRefreshPublicData }: Props) {
   const [dbInfo, setDbInfo] = useState(journal?.getDbInfo() ?? null);
 
   // ── App settings state ─────────────────────────────
@@ -62,6 +64,8 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
   const [apiSecretInput, setApiSecretInput] = useState('');
   const [apiUiError, setApiUiError] = useState<string | null>(null);
   const [apiTestResult, setApiTestResult] = useState<string | null>(null);
+  const [modeSwitchError, setModeSwitchError] = useState<string | null>(null);
+  const [modeSwitchBusy, setModeSwitchBusy] = useState(false);
 
   // ── Telegram state ─────────────────────────────────
   const [tgSettings, setTgSettings] = useState<TelegramSettings>(createDefaultTelegramSettings());
@@ -130,7 +134,7 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
     return () => clearInterval(interval);
   }, [journal]);
 
-  const isLive = liveState === 'LIVE_RUNNING' || liveState === 'LIVE_READY';
+  const liveReady = liveState === 'LIVE_READY' || liveState === 'LIVE_RUNNING';
   const status = dbInfo?.status ?? 'FALLBACK';
 
   // ── Handlers ───────────────────────────────────────
@@ -248,6 +252,17 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
     const status = await apiCredentialsStore.loadStatus();
     setApiStatus(status);
   }, []);
+
+  const handleModeChange = useCallback(async (mode: 'DEMO' | 'LIVE') => {
+    setModeSwitchBusy(true);
+    setModeSwitchError(null);
+    try {
+      const result = await onExecutionModeChange(mode);
+      if (!result.ok) setModeSwitchError(result.error ?? 'Execution mode switch failed.');
+    } finally {
+      setModeSwitchBusy(false);
+    }
+  }, [onExecutionModeChange]);
 
   // ── Telegram handlers ──────────────────────────────
 
@@ -733,15 +748,36 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
         <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 8 }}>
           Live trading is disabled by default. Run the safety check to verify your setup.
         </div>
-        {isLive ? (
-          <div style={{ color: '#d29922', fontSize: 12 }}>⚠ Live mode active. Handle with care.</div>
+        <div style={{ display: 'inline-flex', gap: 4, padding: 4, border: '1px solid #30363d', borderRadius: 8, marginBottom: 8 }}>
+          <button
+            className={`btn btn-sm ${executionMode === 'DEMO' ? 'btn-green' : 'btn-outline'}`}
+            disabled={modeSwitchBusy || executionMode === 'DEMO'}
+            onClick={() => void handleModeChange('DEMO')}
+          >
+            DEMO
+          </button>
+          <button
+            className={`btn btn-sm ${executionMode === 'LIVE' ? 'btn-red' : 'btn-outline'}`}
+            disabled={modeSwitchBusy || executionMode === 'LIVE' || !liveReady}
+            onClick={() => void handleModeChange('LIVE')}
+            title={!liveReady ? 'Run Live Check successfully first' : 'Switch execution to Binance LIVE'}
+          >
+            LIVE
+          </button>
+        </div>
+        {executionMode === 'LIVE' ? (
+          <div style={{ color: '#f85149', fontSize: 12 }}>⚠ LIVE execution active. Real Binance orders are enabled.</div>
         ) : (
-          <div style={{ color: '#8b949e', fontSize: 12 }}>
-            API not configured. Live remains locked until safety check passes.
-          </div>
+          <div style={{ color: '#8b949e', fontSize: 12 }}>DEMO execution active. LIVE requires a successful safety check.</div>
         )}
-        <button className="btn btn-sm btn-yellow" style={{ marginTop: 8 }} onClick={onRunLiveCheck}>
-          Run Live Check
+        {modeSwitchError && <div style={{ color: '#f85149', fontSize: 11, marginTop: 6 }}>{modeSwitchError}</div>}
+        <button
+          className="btn btn-sm btn-yellow"
+          style={{ marginTop: 8 }}
+          onClick={onRunLiveCheck}
+          disabled={liveState === 'LIVE_CHECK_RUNNING' || executionMode === 'LIVE'}
+        >
+          {liveState === 'LIVE_CHECK_RUNNING' ? 'Checking...' : 'Run Live Check'}
         </button>
 
         <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>

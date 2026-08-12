@@ -20,6 +20,7 @@ interface Props {
   onStop: () => void;
   onEmergencyStop: () => void;
   onRunLiveCheck: () => void;
+  onExecutionModeChange: (mode: 'DEMO' | 'LIVE') => Promise<{ ok: boolean; error?: string }>;
   onExportTrades: () => void;
   onExportML: () => void;
   onExportTraining: () => void;
@@ -29,7 +30,7 @@ export function AppShell({
   engine, children, activeTab, onTabChange,
   isRunning, liveState, liveCheckResult, totalEquity, openPositionCount,
   persistenceStatus,
-  onStart, onStop, onEmergencyStop, onRunLiveCheck,
+  onStart, onStop, onEmergencyStop, onRunLiveCheck, onExecutionModeChange,
   onExportTrades, onExportML, onExportTraining,
 }: Props) {
   return (
@@ -46,6 +47,7 @@ export function AppShell({
         onStop={onStop}
         onEmergencyStop={onEmergencyStop}
         onRunLiveCheck={onRunLiveCheck}
+        onExecutionModeChange={onExecutionModeChange}
         onExportTrades={onExportTrades}
         onExportML={onExportML}
         onExportTraining={onExportTraining}

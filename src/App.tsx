@@ -13,6 +13,7 @@ import { DiagnosticsEngine, type DiagnosticsSnapshot } from './core/diagnostics/
 import { PerformanceGuard } from './core/diagnostics/PerformanceGuard';
 import { runLiveSafetyCheck } from './core/live/LiveSafetyCheck';
 import { INITIAL_SAFETY_STATE } from './core/live/LiveSafetyState';
+import { evaluateExecutionModeSwitch } from './core/live/ExecutionModeSwitchPolicy';
 import { appStatePersistence } from './core/persistence/AppStatePersistence';
 import { buildOpenPositionPersistenceRows, repairOpenPositionRiskSnapshot, runRuntimeStorageCleanup } from './core/persistence/localStorageMaintenance';
 import { backupService } from './core/persistence/BackupService';
@@ -1316,46 +1317,8 @@ export default function App() {
   }, [engine]);
 
   const handleRunLiveCheck = useCallback(async () => {
-    if (liveState === 'LIVE_RUNNING') {
-      try {
-        await engine.switchAdapter(paperAdapter);
-        const scanner = engine.getAutoRuntime().getScanner();
-        scanner.setLiveBuyFn(null);
-        const settings = await settingsPersistence.loadSettings();
-        scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? true);
-        liveStateRef.current = 'LIVE_STOPPED';
-        setLiveState('LIVE_STOPPED');
-        logger.info('LIVE_RUNTIME_HEALTH_AUDIT state=LIVE_STOPPED adapter=Paper newBuysAllowed=true');
-      } catch (error) {
-        liveStateRef.current = 'LIVE_ERROR'; setLiveState('LIVE_ERROR');
-        logger.error(`LIVE_STOP_FAILED: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      return;
-    }
-    if (liveState === 'LIVE_READY') {
-      const engineWasRunning = engine.isRunning();
-      liveStateRef.current = 'LIVE_RUNNING';
-      try {
-        const scanner = engine.getAutoRuntime().getScanner();
-        scanner.setPaperAutoEnabled(false);
-        scanner.setLiveBuyFn(async (_symbol, candidate, plannedCandidate) => {
-          await engine.executePlannedScannerBuy(candidate, plannedCandidate);
-        });
-        await engine.switchAdapter(liveAdapter);
-        if (!engine.isRunning()) await engine.start();
-        setIsRunning(true);
-        setLiveState('LIVE_RUNNING');
-        logger.info('LIVE_RUNTIME_HEALTH_AUDIT state=LIVE_RUNNING adapter=Binance_Live privateStreamRequired=true invariantOk=true');
-      } catch (error) {
-        const scanner = engine.getAutoRuntime().getScanner();
-        scanner.setLiveBuyFn(null);
-        scanner.setPaperAutoEnabled(true);
-        await engine.switchAdapter(paperAdapter);
-        if (engineWasRunning && !engine.isRunning()) await engine.start();
-        setIsRunning(engineWasRunning);
-        liveStateRef.current = 'LIVE_ERROR'; setLiveState('LIVE_ERROR');
-        logger.error(`LIVE_START_FAILED: ${error instanceof Error ? error.message : String(error)}`);
-      }
+    if (liveState === 'LIVE_RUNNING' || liveState === 'LIVE_CHECK_RUNNING') {
+      logger.warn(`LIVE_CHECK_BLOCKED_AUDIT state=${liveState} reason=SWITCH_TO_DEMO_BEFORE_CHECK`);
       return;
     }
     if (!['LIVE_DISABLED', 'LIVE_STOPPED', 'LIVE_CHECK_REQUIRED', 'LIVE_BLOCKED', 'LIVE_ERROR'].includes(liveState)) return;
@@ -1392,6 +1355,79 @@ export default function App() {
       result.details.forEach(d => logger.warn(`  - ${d}`));
     }
   }, [engine, guardState.modelTrained, journal, liveAdapter, liveState, paperAdapter, settingsPersistence]);
+
+  const handleExecutionModeChange = useCallback(async (targetMode: 'DEMO' | 'LIVE'): Promise<{ ok: boolean; error?: string }> => {
+    const currentlyLive = engine.getAdapter().isLive;
+    const openLivePositions = engine.getPositionManager().getOpenPositions().filter(position =>
+      /live|binance/i.test(`${position.adapter ?? ''}|${position.executionAdapter ?? ''}`)
+    );
+    const decision = evaluateExecutionModeSwitch({
+      currentMode: currentlyLive ? 'LIVE' : 'DEMO',
+      targetMode,
+      liveState,
+      liveCheckPassed: liveCheckResult?.passed === true,
+      openLivePositionCount: openLivePositions.length,
+    });
+    if (decision.noOp) return { ok: true };
+    if (!decision.allowed) {
+      logger.warn(`EXECUTION_MODE_SWITCH_AUDIT from=${currentlyLive ? 'LIVE' : 'DEMO'} to=${targetMode} switched=false reason=${decision.reason} openLiveCount=${openLivePositions.length}`);
+      return {
+        ok: false,
+        error: decision.reason === 'OPEN_LIVE_EXPOSURE'
+          ? 'Cannot switch to DEMO while LIVE positions are open. Close or reconcile them first.'
+          : 'Run Live Check successfully before switching to LIVE.',
+      };
+    }
+
+    if (targetMode === 'DEMO') {
+      try {
+        await engine.switchAdapter(paperAdapter);
+        const scanner = engine.getAutoRuntime().getScanner();
+        scanner.setLiveBuyFn(null);
+        const settings = await settingsPersistence.loadSettings();
+        scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? true);
+        liveStateRef.current = 'LIVE_CHECK_REQUIRED';
+        setLiveState('LIVE_CHECK_REQUIRED');
+        setLiveCheckResult(null);
+        forceUpdate(value => value + 1);
+        logger.info('EXECUTION_MODE_SWITCH_AUDIT from=LIVE to=DEMO switched=true adapter=Paper liveCheckInvalidated=true newBuysAllowed=true');
+        return { ok: true };
+      } catch {
+        liveStateRef.current = 'LIVE_ERROR';
+        setLiveState('LIVE_ERROR');
+        logger.error('EXECUTION_MODE_SWITCH_AUDIT from=LIVE to=DEMO switched=false reason=ADAPTER_SWITCH_FAILED');
+        return { ok: false, error: 'Failed to switch safely to DEMO.' };
+      }
+    }
+
+    const engineWasRunning = engine.isRunning();
+    liveStateRef.current = 'LIVE_RUNNING';
+    try {
+      const scanner = engine.getAutoRuntime().getScanner();
+      scanner.setPaperAutoEnabled(false);
+      scanner.setLiveBuyFn(async (_symbol, candidate, plannedCandidate) => {
+        await engine.executePlannedScannerBuy(candidate, plannedCandidate);
+      });
+      await engine.switchAdapter(liveAdapter);
+      if (!engine.isRunning()) await engine.start();
+      setIsRunning(true);
+      setLiveState('LIVE_RUNNING');
+      forceUpdate(value => value + 1);
+      logger.info('EXECUTION_MODE_SWITCH_AUDIT from=DEMO to=LIVE switched=true adapter=Binance_Live privateStreamRequired=true invariantOk=true');
+      return { ok: true };
+    } catch {
+      const scanner = engine.getAutoRuntime().getScanner();
+      scanner.setLiveBuyFn(null);
+      scanner.setPaperAutoEnabled(true);
+      await engine.switchAdapter(paperAdapter);
+      if (engineWasRunning && !engine.isRunning()) await engine.start();
+      setIsRunning(engineWasRunning);
+      liveStateRef.current = 'LIVE_ERROR';
+      setLiveState('LIVE_ERROR');
+      logger.error('EXECUTION_MODE_SWITCH_AUDIT from=DEMO to=LIVE switched=false reason=LIVE_ADAPTER_START_FAILED');
+      return { ok: false, error: 'LIVE activation failed safely; DEMO remains active.' };
+    }
+  }, [engine, liveAdapter, liveCheckResult, liveState, paperAdapter, settingsPersistence]);
 
   const handleExportTrades = useCallback(async () => {
     const { json, filename } = await exporter.exportTrades();
@@ -1509,7 +1545,9 @@ export default function App() {
         return (
           <SettingsPage
             liveState={liveState}
+            executionMode={engine.getAdapter().isLive ? 'LIVE' : 'DEMO'}
             onRunLiveCheck={handleRunLiveCheck}
+            onExecutionModeChange={handleExecutionModeChange}
             journal={journal}
             onExportBackup={handleExportBackup}
             engine={engine}
@@ -1542,6 +1580,7 @@ export default function App() {
       onStop={handleStop}
       onEmergencyStop={handleEmergencyStop}
       onRunLiveCheck={handleRunLiveCheck}
+      onExecutionModeChange={handleExecutionModeChange}
       onExportTrades={handleExportTrades}
       onExportML={handleExportML}
       onExportTraining={handleExportTraining}

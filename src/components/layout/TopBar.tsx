@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { StatusBadge } from '../ui/StatusBadge';
 import { PersistenceBadge } from '../ui/PersistenceBadge';
 import type { LiveSafetyState, LiveSafetyCheckResult } from '../../core/types';
@@ -14,6 +15,7 @@ interface Props {
   onStop: () => void;
   onEmergencyStop: () => void;
   onRunLiveCheck: () => void;
+  onExecutionModeChange: (mode: 'DEMO' | 'LIVE') => Promise<{ ok: boolean; error?: string }>;
   onExportTrades: () => void;
   onExportML: () => void;
   onExportTraining: () => void;
@@ -28,7 +30,7 @@ function liveBadgeVariant(state: LiveSafetyState) {
   }
 }
 
-function renderLiveButton(state: LiveSafetyState, onCheck: () => void) {
+function renderLiveCheckButton(state: LiveSafetyState, onCheck: () => void) {
   switch (state) {
     case 'LIVE_DISABLED': case 'LIVE_STOPPED':
       return <button className="btn btn-sm btn-outline" onClick={onCheck}>Run Live Check</button>;
@@ -37,9 +39,9 @@ function renderLiveButton(state: LiveSafetyState, onCheck: () => void) {
     case 'LIVE_CHECK_RUNNING':
       return <button className="btn btn-sm" disabled>Checking...</button>;
     case 'LIVE_READY':
-      return <button className="btn btn-sm btn-green glow-button" onClick={onCheck}>Ready — Start Live</button>;
+      return <button className="btn btn-sm btn-green" onClick={onCheck}>Live Check Passed</button>;
     case 'LIVE_RUNNING':
-      return <button className="btn btn-sm btn-red" onClick={onCheck}>Stop Live</button>;
+      return <button className="btn btn-sm" disabled>LIVE Active</button>;
     case 'LIVE_BLOCKED':
       return <button className="btn btn-sm btn-red" onClick={onCheck}>Live Blocked</button>;
     case 'LIVE_ERROR':
@@ -51,9 +53,23 @@ function renderLiveButton(state: LiveSafetyState, onCheck: () => void) {
 
 export function TopBar({
   liveState, isRunning, totalEquity, openPositionCount, adapterName, persistenceStatus,
-  onStart, onStop, onEmergencyStop, onRunLiveCheck,
+  onStart, onStop, onEmergencyStop, onRunLiveCheck, onExecutionModeChange,
   onExportTrades, onExportML, onExportTraining,
 }: Props) {
+  const executionMode = /live|binance/i.test(adapterName) ? 'LIVE' : 'DEMO';
+  const liveReady = liveState === 'LIVE_READY' || liveState === 'LIVE_RUNNING';
+  const [modeSwitchBusy, setModeSwitchBusy] = useState(false);
+  const [modeSwitchError, setModeSwitchError] = useState<string | null>(null);
+  const changeMode = async (mode: 'DEMO' | 'LIVE') => {
+    setModeSwitchBusy(true);
+    setModeSwitchError(null);
+    try {
+      const result = await onExecutionModeChange(mode);
+      if (!result.ok) setModeSwitchError(result.error ?? 'Mode switch failed.');
+    } finally {
+      setModeSwitchBusy(false);
+    }
+  };
   return (
     <header className="topbar">
       <div className="topbar-left">
@@ -72,7 +88,21 @@ export function TopBar({
         <button className="btn btn-sm" onClick={onExportTrades}>Export Journal</button>
         <button className="btn btn-sm" onClick={onExportML}>Export ML</button>
         <button className="btn btn-sm" onClick={onExportTraining}>Export Training</button>
-        {renderLiveButton(liveState, onRunLiveCheck)}
+        {renderLiveCheckButton(liveState, onRunLiveCheck)}
+        <div style={{ display: 'inline-flex', gap: 3, padding: 3, border: '1px solid #30363d', borderRadius: 7 }}>
+          <button
+            className={`btn btn-sm ${executionMode === 'DEMO' ? 'btn-green' : 'btn-outline'}`}
+            disabled={modeSwitchBusy || executionMode === 'DEMO'}
+            onClick={() => void changeMode('DEMO')}
+          >DEMO</button>
+          <button
+            className={`btn btn-sm ${executionMode === 'LIVE' ? 'btn-red' : 'btn-outline'}`}
+            disabled={modeSwitchBusy || executionMode === 'LIVE' || !liveReady}
+            title={!liveReady ? 'Run Live Check successfully first' : 'Enable Binance LIVE execution'}
+            onClick={() => void changeMode('LIVE')}
+          >LIVE</button>
+        </div>
+        {modeSwitchError && <span title={modeSwitchError} style={{ color: '#f85149', fontSize: 10 }}>Mode blocked</span>}
         <button
           className={`btn btn-sm ${isRunning ? 'btn-red btn-glow-sell' : 'btn-green btn-glow-buy'}`}
           onClick={isRunning ? onStop : onStart}
