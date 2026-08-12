@@ -2,7 +2,7 @@ import type { TradeV4CandidateView } from "./types";
 import { formatFinalNoBuyReasonPriorityAudit, resolveFinalNoBuyReasonPriority } from "../../core/scanner/finalNoBuyReasonPriority";
 import { logger } from "../../utils/logger";
 
-export type SourceFilter = 'All' | 'Dipper' | 'Scalper' | 'Unicorn';
+export type SourceFilter = 'All' | 'Dipper' | 'Scalper';
 
 export type TopCandidateDisplay = {
   status: string;
@@ -24,8 +24,6 @@ const DEBUG_UI_AUDITS = (() => {
 function resolveWhyNoBuy(candidate: TradeV4CandidateView): { label: string; color: string } {
   if (candidate.finalExecutable === true) return { label: 'BUY_READY', color: '#2ea043' };
   const setupResult = String(candidate.strategyAudit?.dynamicSetupContext?.setupResult ?? '').toUpperCase();
-  const unicornDp = candidate.unicornDp;
-  if (candidate.sourcePresentation?.canonicalLabel === 'Unicorn' && unicornDp && unicornDp.dpConfirmed === false) return { label: 'DIP_NOT_CONFIRMED', color: '#d29922' };
   if (setupResult === 'WAITING_FOR_DIP') return { label: 'WAITING_FOR_DIP', color: '#d29922' };
   if (setupResult === 'WAITING_FOR_REBOUND') return { label: 'WAITING_FOR_REBOUND', color: '#d29922' };
   if (setupResult === 'BLOCKED_BY_SPREAD') return { label: 'SPREAD_TOO_HIGH', color: '#f85149' };
@@ -33,13 +31,13 @@ function resolveWhyNoBuy(candidate: TradeV4CandidateView): { label: string; colo
   if (setupResult === 'BLOCKED_BY_TP_ROOM') return { label: 'TP_ROOM_MISSING', color: '#f85149' };
   const blocker = String(candidate.primaryBlocker || candidate.gateAudit?.blocker || candidate.mainReason || '').toLowerCase();
   if (blocker.includes('tp1_missing_or_zero') || blocker.includes('tp1_invalid')) return { label: 'TP1_INVALID', color: '#f85149' };
-  if (blocker.includes('unicorn_block_duplicate_position')) return { label: 'UNICORN_BLOCK_DUPLICATE_POSITION', color: '#f85149' };
-  if (blocker.includes('unicorn_block_open_position_limit')) return { label: 'UNICORN_BLOCK_OPEN_POSITION_LIMIT', color: '#f85149' };
-  if (blocker.includes('unicorn_block_group_limit')) return { label: 'UNICORN_BLOCK_GROUP_LIMIT', color: '#f85149' };
-  if (blocker.includes('unicorn_block_max_new_buys_per_cycle_reached')) return { label: 'UNICORN_BLOCK_MAX_NEW_BUYS_PER_CYCLE_REACHED', color: '#f85149' };
-  if (blocker.includes('unicorn_block_waiting_confirmation')) return { label: 'UNICORN_BLOCK_WAITING_CONFIRMATION', color: '#d29922' };
-  if (blocker.includes('unicorn_block_no_executable_candidate')) return { label: 'UNICORN_BLOCK_NO_EXECUTABLE_CANDIDATE', color: '#f85149' };
-  if (blocker.includes('unicorn_block_risk')) return { label: 'UNICORN_BLOCK_RISK', color: '#f85149' };
+  if (blocker.includes('unicorn_block_duplicate_position')) return { label: 'DUPLICATE_OPEN_POSITION', color: '#f85149' };
+  if (blocker.includes('unicorn_block_open_position_limit')) return { label: 'MAX_GLOBAL_POSITIONS_REACHED', color: '#f85149' };
+  if (blocker.includes('unicorn_block_group_limit')) return { label: 'MAX_GROUP_POSITIONS_REACHED', color: '#f85149' };
+  if (blocker.includes('unicorn_block_max_new_buys_per_cycle_reached')) return { label: 'MAX_NEW_BUYS_PER_CYCLE_REACHED', color: '#f85149' };
+  if (blocker.includes('unicorn_block_waiting_confirmation')) return { label: 'WAITING_FOR_CONFIRMATION', color: '#d29922' };
+  if (blocker.includes('unicorn_block_no_executable_candidate')) return { label: 'NO_EXECUTABLE_CANDIDATE', color: '#f85149' };
+  if (blocker.includes('unicorn_block_risk')) return { label: 'RISK_BLOCKED', color: '#f85149' };
   if (blocker.includes('candle_exhaustion')) return { label: 'CANDLE_EXHAUSTION', color: '#f85149' };
   if (blocker.includes('overextended') || blocker.includes('over_extension')) return { label: 'OVEREXTENDED', color: '#f85149' };
   if (blocker.includes('spread')) return { label: 'SPREAD_TOO_HIGH', color: '#f85149' };
@@ -50,7 +48,7 @@ function resolveWhyNoBuy(candidate: TradeV4CandidateView): { label: string; colo
   if (blocker.includes('book_stale') || blocker.includes('book stale')) return { label: 'BOOK_STALE', color: '#f85149' };
   if (blocker.includes('price_stale') || blocker.includes('stale') || blocker.includes('price_not_fresh')) return { label: 'PRICE_NOT_FRESH', color: '#f85149' };
   if (blocker.includes('falling_knife')) return { label: 'FALLING_KNIFE', color: '#f85149' };
-  if (blocker.includes('max_unicorn_positions')) return { label: 'MAX_UNICORN_POSITIONS_REACHED', color: '#f85149' };
+  if (blocker.includes('max_unicorn_positions')) return { label: 'MAX_GLOBAL_POSITIONS_REACHED', color: '#f85149' };
   if (blocker.includes('max_group_positions') || blocker.includes('group_cap')) return { label: 'MAX_GROUP_POSITIONS_REACHED', color: '#f85149' };
   if (blocker.includes('max_global_positions') || blocker.includes('max_open_positions')) return { label: 'MAX_GLOBAL_POSITIONS_REACHED', color: '#f85149' };
   if (blocker.includes('max_positions')) return { label: 'MAX_GLOBAL_POSITIONS_REACHED', color: '#f85149' };
@@ -70,22 +68,22 @@ export function mapExactExecutionSkipReason(reason: string | null | undefined): 
     ? 'UNKNOWN_EXECUTION_SELECTION_BUG'
     : normalized;
   if (compact.includes('GLOBAL_RISK_OFF') || (compact.includes('RISK') && compact.includes('OFF'))) return { code: 'GLOBAL_RISK_OFF', label: 'BLOCKED / RISK_OFF', human: 'Strong local setup, blocked by global market risk-off' };
-  if (compact.includes('UNICORN_BLOCK_DUPLICATE_POSITION')) return { code: 'UNICORN_BLOCK_DUPLICATE_POSITION', label: 'UNICORN SKIPPED - ALREADY OPEN', human: 'Unicorn Hunter found a candidate, but the position is already open' };
-  if (compact.includes('UNICORN_BLOCK_OPEN_POSITION_LIMIT')) return { code: 'UNICORN_BLOCK_OPEN_POSITION_LIMIT', label: 'UNICORN SKIPPED - POSITION LIMIT', human: 'Unicorn Hunter is blocked by an open-position limit' };
-  if (compact.includes('UNICORN_BLOCK_GROUP_LIMIT')) return { code: 'UNICORN_BLOCK_GROUP_LIMIT', label: 'UNICORN SKIPPED - GROUP LIMIT', human: 'Unicorn Hunter is blocked by a risk-group limit' };
-  if (compact.includes('UNICORN_BLOCK_MAX_NEW_BUYS_PER_CYCLE_REACHED')) return { code: 'UNICORN_BLOCK_MAX_NEW_BUYS_PER_CYCLE_REACHED', label: 'UNICORN SKIPPED - CYCLE BUDGET', human: 'Unicorn Hunter reached its safe submit limit for this cycle' };
-  if (compact.includes('UNICORN_BLOCK_WAITING_CONFIRMATION')) return { code: 'UNICORN_BLOCK_WAITING_CONFIRMATION', label: 'UNICORN WAITING CONFIRMATION', human: 'Unicorn Hunter is waiting for final confirmation' };
-  if (compact.includes('UNICORN_BLOCK_NO_EXECUTABLE_CANDIDATE')) return { code: 'UNICORN_BLOCK_NO_EXECUTABLE_CANDIDATE', label: 'UNICORN SKIPPED - NO EXECUTABLE', human: 'No executable Unicorn candidate survived the final gate' };
-  if (compact.includes('UNICORN_BLOCK_RISK')) return { code: 'UNICORN_BLOCK_RISK', label: 'UNICORN SKIPPED - RISK', human: 'Unicorn Hunter is blocked by risk controls' };
+  if (compact.includes('UNICORN_BLOCK_DUPLICATE_POSITION')) return { code: 'DUPLICATE_OPEN_POSITION', label: 'EXECUTION SKIPPED - ALREADY OPEN', human: 'Already open' };
+  if (compact.includes('UNICORN_BLOCK_OPEN_POSITION_LIMIT')) return { code: 'MAX_GLOBAL_POSITIONS_REACHED', label: 'EXECUTION SKIPPED - GLOBAL MAX', human: 'Global max positions reached' };
+  if (compact.includes('UNICORN_BLOCK_GROUP_LIMIT')) return { code: 'GROUP_CAP_REACHED', label: 'EXECUTION SKIPPED - GROUP CAP', human: 'Risk group cap reached' };
+  if (compact.includes('UNICORN_BLOCK_MAX_NEW_BUYS_PER_CYCLE_REACHED')) return { code: 'MAX_NEW_BUYS_PER_CYCLE_REACHED', label: 'EXECUTION SKIPPED - CYCLE CAP', human: 'New buys per cycle reached' };
+  if (compact.includes('UNICORN_BLOCK_WAITING_CONFIRMATION')) return { code: 'WAITING_FOR_CONFIRMATION', label: 'WAITING FOR CONFIRMATION', human: 'Waiting for final confirmation' };
+  if (compact.includes('UNICORN_BLOCK_NO_EXECUTABLE_CANDIDATE')) return { code: 'NO_EXECUTABLE_CANDIDATE', label: 'EXECUTION SKIPPED - NO EXECUTABLE', human: 'No executable candidate survived the final gate' };
+  if (compact.includes('UNICORN_BLOCK_RISK')) return { code: 'RISK_BLOCKED', label: 'EXECUTION SKIPPED - RISK', human: 'Risk controls blocked execution' };
   if (compact.includes('PRICE_NOT_FRESH') && compact.includes('BOOK_STALE')) return { code: 'PRICE_NOT_FRESH / BOOK_STALE', label: 'EXECUTION SKIPPED - PRICE/BOOK STALE', human: 'Price and book became stale before execution' };
   if (compact.includes('PRICE_STALE') && compact.includes('REBOUND_STALE')) return { code: 'PRICE_STALE / REBOUND_STALE', label: 'EXECUTION SKIPPED - PRICE/REBOUND STALE', human: 'Price and rebound confirmation became stale before execution' };
-  if (compact.includes('DP_NOT_CONFIRMED') || compact.includes('DIP_NOT_CONFIRMED')) return { code: 'DIP_NOT_CONFIRMED', label: 'SCORE READY - WAITING DIP', human: 'Unicorn score is ready, but dip/rebound pattern confirmation is missing' };
+  if (compact.includes('DP_NOT_CONFIRMED') || compact.includes('DIP_NOT_CONFIRMED')) return { code: 'DIP_NOT_CONFIRMED', label: 'SCORE READY - WAITING DIP', human: 'Dip/rebound pattern confirmation is missing' };
   if (compact.includes('BOOK_STALE') || compact.includes('BLOCK_BOOK_STALE')) return { code: 'BOOK_STALE', label: 'EXECUTION SKIPPED - BOOK STALE', human: 'Order book became stale before execution' };
   if (compact.includes('PRICE_STALE') || compact.includes('BLOCK_PRICE_STALE') || compact.includes('PRICE_NOT_FRESH')) return { code: 'PRICE_STALE', label: 'EXECUTION SKIPPED - PRICE STALE', human: 'Price became stale before execution' };
   if (compact.includes('DUPLICATE_OPEN_POSITION') || compact.includes('BLOCK_DUPLICATE_POSITION') || compact.includes('DUPLICATE')) return { code: 'DUPLICATE_OPEN_POSITION', label: 'EXECUTION SKIPPED - ALREADY OPEN', human: 'Already open' };
   if (compact.includes('PENDING_ORDER')) return { code: 'PENDING_ORDER', label: 'EXECUTION SKIPPED - PENDING ORDER', human: 'Pending order exists' };
   if (compact.includes('CAPITAL_NOT_OK') || compact.includes('CAPITAL')) return { code: 'CAPITAL_NOT_OK', label: 'EXECUTION SKIPPED - CAPITAL', human: 'Not enough capital' };
-  if (compact.includes('MAX_UNICORN_POSITIONS_REACHED')) return { code: 'MAX_UNICORN_POSITIONS_REACHED', label: 'EXECUTION SKIPPED - UNICORN CAP', human: 'Unicorn max positions reached' };
+  if (compact.includes('MAX_UNICORN_POSITIONS_REACHED')) return { code: 'MAX_GLOBAL_POSITIONS_REACHED', label: 'EXECUTION SKIPPED - GLOBAL MAX', human: 'Global max positions reached' };
   if (compact.includes('MAX_GROUP_POSITIONS_REACHED')) return { code: 'MAX_GROUP_POSITIONS_REACHED', label: 'EXECUTION SKIPPED - GROUP CAP', human: 'Risk group cap reached' };
   if (compact.includes('MAX_NEW_BUYS_PER_CYCLE_REACHED')) return { code: 'MAX_NEW_BUYS_PER_CYCLE_REACHED', label: 'EXECUTION SKIPPED - CYCLE CAP', human: 'New buys per cycle reached' };
   if (compact.includes('MAX_EXECUTION_QUEUE_REACHED')) return { code: 'MAX_EXECUTION_QUEUE_REACHED', label: 'EXECUTION SKIPPED - QUEUE CAP', human: 'Execution queue limit reached' };

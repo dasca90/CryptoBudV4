@@ -376,24 +376,12 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
     };
   }, [viewMode, filtered.length]);
 
-  const unicornNoBuyRow = filtered
-    .map((candidate) => {
-      const skippedReasons = new Map((props.executionPlan?.skippedCandidates ?? []).map((s) => [s.symbol, s.finalNoBuyReason || s.reason]));
-      const params = getCanonicalDisplayParams({
-        candidate,
-        selectedSymbols: new Set((props.executionPlan?.selectedCandidates ?? []).map((s) => s.symbol)),
-        skippedReasons,
-        fallbackFinalNoBuyReason: props.noBuyDisplay?.finalNoBuyReason,
-      });
-      const display = resolveTopCandidateDisplay({ candidate, executionSkipReason: params.executionSkipReason, finalNoBuyReason: params.finalNoBuyReason });
-      return { candidate, params, display };
-    })
-    .find((row) => row.candidate.sourcePresentation?.canonicalLabel === 'Unicorn' && row.display.status !== 'BUY');
-  const unicornNoBuyBecause = unicornNoBuyRow
-    ? `No Unicorn BUY because: ${unicornNoBuyRow.display.exactSkipReason || unicornNoBuyRow.params.finalNoBuyReason || unicornNoBuyRow.display.reasonText || 'no executable unicorn candidate'}${unicornNoBuyRow.candidate.unicornDp ? ` (dipObserved=${String(unicornNoBuyRow.candidate.unicornDp.dipObserved)} dipPct=${unicornNoBuyRow.candidate.unicornDp.dipPct.toFixed(2)} requiredDipPct=${unicornNoBuyRow.candidate.unicornDp.requiredDipPct} reboundObserved=${String(unicornNoBuyRow.candidate.unicornDp.reboundObserved)} reboundPct=${unicornNoBuyRow.candidate.unicornDp.reboundPct.toFixed(2)} requiredReboundPct=${unicornNoBuyRow.candidate.unicornDp.requiredReboundPct} dpConfirmed=${String(unicornNoBuyRow.candidate.unicornDp.dpConfirmed)} dpReason=${unicornNoBuyRow.candidate.unicornDp.dpReason})` : ''}`
-    : filtered.some((candidate) => candidate.sourcePresentation?.canonicalLabel === 'Unicorn')
-      ? null
-      : 'No Unicorn BUY because: no executable unicorn candidate';
+  const noBuyBecause = !hasBuy
+    ? `No BUY — ${props.noBuyDisplay?.finalNoBuyReason
+      ?? props.executionPlan?.noBuyReasons?.[0]
+      ?? filtered[0]?.mainReason
+      ?? 'waiting for an executable candidate'}`
+    : null;
 
   return (
     <section className="panel" style={{ padding: '6px 4px 4px', display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1, overflow: 'hidden' }}>
@@ -407,7 +395,6 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
             <option value="All">All</option>
             <option value="Dipper">Dipper</option>
             <option value="Scalper">Scalper</option>
-            <option value="Unicorn">Unicorn</option>
           </select>
         </div>
       </div>
@@ -437,9 +424,9 @@ export const TopCandidatesPanel = memo(function TopCandidatesPanel(props: {
               Blockers: {props.executionPlan.noBuyReasons.slice(0, 3).join(' | ')}
             </span>
           )}
-          {unicornNoBuyBecause && (
+          {noBuyBecause && (
             <span style={{ color: '#d29922', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {unicornNoBuyBecause}
+              {noBuyBecause}
             </span>
           )}
         </div>

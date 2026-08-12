@@ -36,13 +36,8 @@ export function CandidatePoolSummaryPanel(props: {
     alreadyOpenBlockedCount?: number;
     pendingBuyBlockedCount?: number;
     autoBotsSubmitAttemptedThisCycle?: number;
-    unicornSubmitAttemptedThisCycle?: number;
     globalSubmitAttemptedThisCycle?: number;
     maxAutoBotsBuysPerCycle?: number;
-    maxUnicornBuysPerCycle?: number;
-    unicornSelectedThisCycle?: number;
-    unicornSelectedExecutableCount?: number;
-    unicornSelectedButNotSubmittedReason?: string;
   } | null;
 }) {
   const buyCount = props.candidates.filter(c => c.status === 'BUY').length;
@@ -85,24 +80,10 @@ export function CandidatePoolSummaryPanel(props: {
   const pipelineQueueAccepted = props.executionPlan?.queueAcceptedCount ?? executionQueueAcceptedCount;
   const pipelineDeferredCount = props.executionPlan?.deferredByQueueLimitCount ?? deferredByQueueLimitCount;
   const queueParityMismatch = pipelineQueueAccepted !== executionQueueAcceptedCount || pipelineDeferredCount !== deferredByQueueLimitCount;
-  const isUnicornCandidate = (candidate: TradeV4CandidateView) => [
-    (candidate as any).source,
-    (candidate as any).candidateSource,
-    (candidate as any).sourceOwner,
-    (candidate as any).ownerType,
-    (candidate as any).sourcePresentation,
-  ].some((value) => String(value ?? '').toLowerCase().includes('unicorn'));
-  const unicornCandidateCount = props.candidates.filter(isUnicornCandidate).length;
-  const unicornReadyCount = props.candidates.filter((candidate) => isUnicornCandidate(candidate) && candidate.status === 'BUY').length;
-  const unicornExecutableCount = props.executionPlan?.unicornSelectedExecutableCount
-    ?? props.candidates.filter((candidate) => isUnicornCandidate(candidate) && candidate.status === 'BUY' && candidate.finalExecutable === true && candidate.buyAllowed === true).length;
-  const autoBotsReadyCount = Math.max(0, buyCount - unicornReadyCount);
-  const autoBotsSubmitted = props.executionPlan?.autoBotsSubmitAttemptedThisCycle ?? Math.max(0, submittedThisCycleCount - (props.executionPlan?.unicornSubmitAttemptedThisCycle ?? 0));
-  const unicornSubmitted = props.executionPlan?.unicornSubmitAttemptedThisCycle ?? 0;
+  const autoBotsReadyCount = buyCount;
+  const autoBotsSubmitted = props.executionPlan?.autoBotsSubmitAttemptedThisCycle ?? submittedThisCycleCount;
   const globalSubmitted = props.executionPlan?.globalSubmitAttemptedThisCycle ?? submittedThisCycleCount;
   const maxAutoBotsBuysPerCycle = props.executionPlan?.maxAutoBotsBuysPerCycle ?? Math.max(1, actionableBuyCountNow);
-  const maxUnicornBuysPerCycle = props.executionPlan?.maxUnicornBuysPerCycle ?? 1;
-  const unicornBlockedReason = props.executionPlan?.unicornSelectedButNotSubmittedReason ?? 'none';
 
   useEffect(() => {
     logger.info(
@@ -199,10 +180,6 @@ export function CandidatePoolSummaryPanel(props: {
             <PoolBox label="Submitted" value={`${submittedThisCycleCount}/${Math.max(1, actionableBuyCountNow)}`} color={submittedThisCycleCount > 0 ? "#3fb950" : "#8b949e"} />
             <PoolBox label="AutoBots ready" value={String(autoBotsReadyCount)} color={autoBotsReadyCount > 0 ? "#58a6ff" : "#8b949e"} />
             <PoolBox label="AutoBots submit" value={`${autoBotsSubmitted}/${maxAutoBotsBuysPerCycle}`} color={autoBotsSubmitted > 0 ? "#3fb950" : "#8b949e"} />
-            <PoolBox label="Unicorn pool" value={String(unicornCandidateCount)} color={unicornCandidateCount > 0 ? "#b985ff" : "#8b949e"} />
-            <PoolBox label="Unicorn submit" value={`${unicornSubmitted}/${maxUnicornBuysPerCycle}`} color={unicornSubmitted > 0 ? "#3fb950" : unicornReadyCount > 0 ? "#d29922" : "#8b949e"} />
-            <PoolBox label="Unicorn READY" value={`${unicornReadyCount}/${unicornExecutableCount}`} color={unicornExecutableCount > 0 ? "#3fb950" : unicornReadyCount > 0 ? "#d29922" : "#8b949e"} />
-            <PoolBox label="Unicorn block" value={unicornBlockedReason} color={unicornBlockedReason !== 'none' ? "#d29922" : "#8b949e"} />
             <PoolBox label="Global submit" value={String(globalSubmitted)} color={globalSubmitted > 0 ? "#3fb950" : "#8b949e"} />
             <PoolBox label="Global queue" value={`${executionQueueAcceptedCount}/${maxExecutionQueuePerScan}`} color={executionQueueAcceptedCount >= maxExecutionQueuePerScan ? "#d29922" : "#58a6ff"} />
             <PoolBox label="Deferred queue" value={String(deferredByQueueLimitCount)} color={deferredByQueueLimitCount > 0 ? "#d29922" : "#8b949e"} />

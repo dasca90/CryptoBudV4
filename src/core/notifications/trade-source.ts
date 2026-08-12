@@ -31,7 +31,10 @@ function normalize(v: unknown): string {
 function mapSourceToLabel(source: string): SourceResolved['label'] | null {
   const s = source.toLowerCase();
   if (!s) return null;
-  if (s.includes('unicorn')) return 'Unicorn';
+  // V6 retired the former parallel scanner. Historical rows are presented as
+  // AutoBots so old journals and restored positions stay readable without
+  // reintroducing a retired owner in the UI.
+  if (s.includes('unicorn')) return 'AutoBots';
   if (s === 'ml' || s.includes('ml_predict_buy') || s.includes('ml predict') || s.includes('ml-buy')) return 'ML Predict Buy';
   if (s.includes('manual')) return 'Manual';
   if (s.includes('micro') || s.includes('scalp')) return 'Micro Scalping';
@@ -141,11 +144,9 @@ export function getTradeSourcePresentation(input: Position | TradeRecord | Recor
     : resolveTradeSourceLabel(input as Position | TradeRecord | Record<string, unknown> | null | undefined);
   const label = resolved.label;
   let presentation: Omit<TradeSourcePresentation, 'canonicalLabel' | 'executionPath'>;
-  if (label === 'Unicorn') {
-    presentation = { icon: '\uD83E\uDD84', shortLabel: 'UNICORN', fullLabel: 'Unicorn Hunter \uD83E\uDD84', compactLabel: 'Unicorn Hunter \uD83E\uDD84', badgeVariant: 'unicorn' };
-  } else if (label === 'ML Predict Buy') {
+  if (label === 'ML Predict Buy') {
     presentation = { icon: 'ML', shortLabel: 'ML BUY', fullLabel: 'ML Predict Buy', compactLabel: 'ML BUY', badgeVariant: 'ml' };
-  } else if (label === 'AutoBots' || label === 'The Dipper / Scanner') {
+  } else if (label === 'AutoBots' || label === 'The Dipper / Scanner' || label === 'Unicorn') {
     presentation = { icon: '\uD83E\uDD16', shortLabel: 'AUTOBOTS', fullLabel: '\uD83E\uDD16 AutoBots', compactLabel: '\uD83E\uDD16 AUTOBOTS', badgeVariant: 'autobots' };
   } else if (label === 'Manual') {
     presentation = { icon: '\u270B', shortLabel: 'MANUAL', fullLabel: '\u270B Manual', compactLabel: '\u270B MANUAL', badgeVariant: 'manual' };

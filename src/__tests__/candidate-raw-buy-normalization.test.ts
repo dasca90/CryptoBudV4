@@ -359,7 +359,7 @@ function candidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate 
   assert.equal(view.executionPrecheckSnapshotPresent, true);
 }
 
-// Test 15 - Unicorn candidates keep canonical source presentation in UI.
+// Test 15 - Retired legacy-source candidates migrate to canonical AutoBots presentation in UI.
 {
   const view = mapScannerCandidateToTradeV4View(candidate({
     source: 'unicorn_hunter',
@@ -372,8 +372,9 @@ function candidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate 
     strategySource: 'unicorn_hunter' as any,
     runtimeSnapshot: completeRuntimeSnapshot({ sourceOwner: 'UnicornHunter' }) as any,
   } as any));
-  assert.equal(view.source, 'unicorn');
-  assert.match(view.sourceLabel ?? '', /Unicorn Hunter/);
+  assert.equal(view.source, 'dipper');
+  assert.match(view.sourceLabel ?? '', /AutoBots/);
+  assert.doesNotMatch(view.sourceLabel ?? '', /Unicorn/i);
   assert.notEqual(view.sourceLabel, 'Unknown');
   assert.equal(view.finalExecutable, true);
   assert.equal(view.buyAllowed, true);
@@ -402,7 +403,8 @@ function candidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate 
   assert.equal(view.finalExecutable, false);
   assert.equal(view.buyAllowed, false);
   assert.equal(view.finalNoBuyReason, 'STRATEGY_HANDOFF_INTEGRITY_FAILED');
-  assert.match(view.sourceLabel ?? '', /Unicorn Hunter/);
+  assert.match(view.sourceLabel ?? '', /AutoBots/);
+  assert.doesNotMatch(view.sourceLabel ?? '', /Unicorn/i);
 }
 
 // Test 17 - Unicorn DIP_NOT_CONFIRMED cannot render as BUY READY.

@@ -151,7 +151,6 @@ export function SelectedCoinInspector(props: {
   const selectedContext = useMemo(() => {
     if (!c) return null;
     const planSkip = props.executionPlan?.skippedCandidates?.find(sc => sc.symbol === c.symbol);
-    const isUnicornCandidate = /unicorn/i.test(`${c.source} ${c.sourceLabel ?? ""} ${c.sourcePresentation?.canonicalLabel ?? ""} ${c.strategySource ?? ""}`);
     const priority = resolveFinalNoBuyReasonPriority({
       symbol: c.symbol,
       rawStatus: c.status,
@@ -187,15 +186,6 @@ export function SelectedCoinInspector(props: {
     return {
       verdict: getSelectedCoinVerdict(c),
       planSkip,
-      exactUnicornNoBuyReason: isUnicornCandidate
-        ? normalizeExactUnicornNoBuyReason(
-            planSkip?.finalNoBuyReason
-            ?? c.executionDecision?.finalNoBuyReason
-            ?? c.finalNoBuyReason
-            ?? priority.resolvedFinalNoBuyReason
-            ?? planSkip?.reason
-          )
-        : null,
       rawReasons,
       friendlyReasons,
       mainReason: buildSelectedCoinMainReason(c, rawReasons),
@@ -278,9 +268,6 @@ export function SelectedCoinInspector(props: {
           <ReadableList items={selectedContext.friendlyReasons.slice(0, 4)} fallback="No blocking reason is active." tone={selectedContext.verdict === "BUY READY" ? "good" : "warn"} />
           {selectedContext.planSkip && (
             <div className="selected-note status-warn">Execution plan skipped this coin at {translateBlocker(selectedContext.planSkip.gate)}.</div>
-          )}
-          {selectedContext.exactUnicornNoBuyReason && selectedContext.exactUnicornNoBuyReason !== "none" && (
-            <div className="selected-note status-warn">Unicorn no-submit reason: {selectedContext.exactUnicornNoBuyReason}</div>
           )}
           {planSelected && <div className="selected-note status-good">Execution plan selected this coin for {planSelected.plannedAction}.</div>}
         </InspectorSection>
@@ -410,20 +397,6 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
     result.push(normalized);
   }
   return result;
-}
-
-function normalizeExactUnicornNoBuyReason(value: string | null | undefined): string | null {
-  const raw = String(value ?? "").trim();
-  const lower = raw.toLowerCase();
-  if (!raw || /^n\/a$|^ok$|^allow$|^none$/i.test(raw)) return null;
-  if (lower.includes("duplicate") || lower.includes("already") || lower.includes("open_position")) return "UNICORN_BLOCK_DUPLICATE_POSITION";
-  if (lower.includes("group") && (lower.includes("limit") || lower.includes("cap") || lower.includes("max"))) return "UNICORN_BLOCK_GROUP_LIMIT";
-  if (lower.includes("max_unicorn") || lower.includes("max_open") || lower.includes("position_limit") || (lower.includes("unicorn") && lower.includes("position"))) return "UNICORN_BLOCK_OPEN_POSITION_LIMIT";
-  if (lower.includes("capital") || lower.includes("budget") || lower.includes("queue") || lower.includes("cycle")) return "UNICORN_BLOCK_MAX_NEW_BUYS_PER_CYCLE_REACHED";
-  if (lower.includes("confirmation") || lower.includes("pullback") || lower.includes("watch") || lower.includes("wait") || lower.includes("score") || lower.includes("confidence")) return "UNICORN_BLOCK_WAITING_CONFIRMATION";
-  if (lower.includes("no_executable") || lower.includes("no_candidate")) return "UNICORN_BLOCK_NO_EXECUTABLE_CANDIDATE";
-  if (lower.includes("risk_off") || (lower.includes("risk") && lower.includes("off")) || lower.includes("ath") || lower.includes("overextended") || lower.includes("candle") || lower.includes("entry") || lower.includes("gate") || lower.includes("book") || lower.includes("price") || lower.includes("stale") || lower.includes("spread") || lower.includes("tp")) return "UNICORN_BLOCK_RISK";
-  return raw.toUpperCase().replace(/[^A-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "") || null;
 }
 
 function baseSymbol(symbol: string): string {

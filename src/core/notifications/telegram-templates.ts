@@ -29,7 +29,6 @@ function finiteNumber(v: unknown): number | null {
 }
 
 function telegramHeaderOwner(source: ReturnType<typeof logTradeSourceResolved>, fallbackCompactLabel: string): string {
-  if (source.label === 'Unicorn') return 'Unicorn Hunter 🦄';
   if (source.label === 'AutoBots' || source.label === 'The Dipper / Scanner') return '🤖 AUTOBOTS';
   return fallbackCompactLabel;
 }
