@@ -20,7 +20,7 @@ interface Props {
   journal?: Journal;
   onExportBackup?: () => void;
   engine?: {
-    getPositionManager: () => { clearAllPositions: () => void; getOpenPositions?: () => Array<{ coin: string }> };
+    getPositionManager: () => { clearAllPositions: () => void; getOpenPositions?: () => Array<{ coin: string; adapter?: string; executionAdapter?: string }> };
     getOrderLockManager: () => { releaseAllLocks: () => void };
     setAnchorSettingsOnBrains: (btc: boolean, eth: boolean) => Promise<void>;
     getAccountBalance: () => number;
@@ -53,7 +53,9 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
     configured: boolean;
     maskedApiKey: string | null;
     apiSecretConfigured?: boolean;
-    storageMode?: 'secure' | 'tauri_app_state' | 'local_fallback';
+    storageMode?: 'secure' | 'unavailable';
+    state?: 'NOT_CONFIGURED' | 'SECURE' | 'MIGRATION_REQUIRED' | 'SECURE_STORE_UNAVAILABLE' | 'ERROR';
+    legacyCredentialDetected?: boolean;
     error?: string;
   }>({ configured: false, maskedApiKey: null });
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -79,6 +81,9 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
   const [diagLoading, setDiagLoading] = useState(false);
   const [dbTestResult, setDbTestResult] = useState<string | null>(null);
   const openCountFromPositionManager = engine?.getPositionManager?.().getOpenPositions?.().length ?? dbInfo?.openPositionCount ?? 0;
+  const openLiveExposureCount = engine?.getPositionManager?.().getOpenPositions?.().filter(position =>
+    /live|binance/i.test(`${position.adapter ?? ''}|${position.executionAdapter ?? ''}`)
+  ).length ?? 0;
 
   // ── Diagnostics handler ───────────────────────────
   const handleRunDiagnostics = useCallback(async () => {
@@ -213,29 +218,36 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
       return;
     }
     setApiUiError(null);
-    const result = await apiCredentialsStore.save(apiKeyInput, apiSecretInput);
-    setApiStatus(result);
-    setApiKeyInput('');
-    setApiSecretInput('');
+    try {
+      const result = await apiCredentialsStore.save(apiKeyInput, apiSecretInput);
+      setApiStatus(result);
+      setApiKeyInput('');
+      setApiSecretInput('');
+    } catch (error) {
+      setApiUiError(error instanceof Error ? error.message : 'SECURE_STORE_WRITE_FAILED');
+    }
   }, [apiKeyInput, apiSecretInput]);
 
   const handleClearApi = useCallback(async () => {
-    const result = await apiCredentialsStore.clear();
-    setApiStatus(result);
-    setApiKeyInput('');
-    setApiSecretInput('');
-    setApiUiError(null);
-    setApiTestResult(null);
-  }, []);
+    try {
+      const result = await apiCredentialsStore.clear({ hasOpenLiveExposure: openLiveExposureCount > 0 });
+      setApiStatus(result);
+      setApiKeyInput('');
+      setApiSecretInput('');
+      setApiUiError(null);
+      setApiTestResult(null);
+    } catch (error) {
+      setApiUiError(error instanceof Error ? error.message : 'SECURE_STORE_DELETE_FAILED');
+    }
+  }, [openLiveExposureCount]);
 
   const handleTestApi = useCallback(async () => {
     setApiTestResult(null);
-    const typed = apiKeyInput && apiSecretInput ? { apiKey: apiKeyInput, apiSecret: apiSecretInput } : null;
-    const result = await apiCredentialsStore.testApiCredentials(typed);
+    const result = await apiCredentialsStore.testApiCredentials();
     setApiTestResult(result.code);
     const status = await apiCredentialsStore.loadStatus();
     setApiStatus(status);
-  }, [apiKeyInput, apiSecretInput]);
+  }, []);
 
   // ── Telegram handlers ──────────────────────────────
 
@@ -548,14 +560,14 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
         </div>
 
         {/* ── Section E: Binance Private API ───────────── */}
-        <div className="panel-section-title" style={{ marginTop: 20 }}>Binance API (Private)</div>
+        <div className="panel-section-title" style={{ marginTop: 20 }}>Binance LIVE Credentials</div>
         <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 8 }}>
           Private API is live-only scope. Live trading remains locked.
         </div>
 
         <div style={{ marginBottom: 8 }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: apiStatus.configured ? '#3fb950' : '#8b949e' }}>
-            Status: {apiStatus.configured ? 'Configured' : 'Not Configured'}
+            Status: {apiStatus.state ?? (apiStatus.configured ? 'SECURE' : 'NOT_CONFIGURED')}
           </span>
         </div>
 
@@ -585,24 +597,29 @@ export function SettingsPage({ liveState, onRunLiveCheck, journal, onExportBacku
         </div>
 
         <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
-          <button className="btn btn-sm btn-green" onClick={handleSaveApi}>Save API Keys</button>
-          <button className="btn btn-sm btn-yellow" onClick={handleTestApi}>Test Connection</button>
+          <button className="btn btn-sm btn-green" onClick={handleSaveApi}>{apiStatus.configured ? 'Replace Credentials' : 'Save Credentials'}</button>
+          <button className="btn btn-sm btn-yellow" onClick={handleTestApi} disabled={!apiStatus.configured}>Test API</button>
           <ConfirmDangerAction
             confirmText="CLEAR API"
-            buttonLabel="Clear API Keys"
+            buttonLabel="Delete Credentials"
             onConfirm={handleClearApi}
-            warning="Remove stored API keys."
+            warning={openLiveExposureCount > 0 ? 'Blocked while LIVE positions require management.' : 'Remove credentials from the operating system secure store.'}
           />
         </div>
         {apiUiError && <div style={{ fontSize: 11, color: '#f85149', marginTop: 6 }}>{apiUiError}</div>}
         {apiStatus.configured && (
           <div style={{ fontSize: 11, color: '#8b949e', marginTop: 6 }}>
-            API Secret: saved
+            API Key: CONFIGURED | API Secret: CONFIGURED | Storage: SECURE
           </div>
         )}
-        {apiStatus.storageMode && apiStatus.storageMode !== 'secure' && (
+        {apiStatus.state === 'MIGRATION_REQUIRED' && (
           <div style={{ fontSize: 11, color: '#d29922', marginTop: 6 }}>
-            API keys saved in app storage for development. Secure storage required before live trading.
+            MIGRATION REQUIRED: re-enter and save credentials. LIVE remains blocked until the plaintext legacy copy is removed.
+          </div>
+        )}
+        {apiStatus.storageMode && apiStatus.storageMode !== 'secure' && apiStatus.state !== 'MIGRATION_REQUIRED' && (
+          <div style={{ fontSize: 11, color: '#d29922', marginTop: 6 }}>
+            Secure OS credential storage is unavailable. Paper/Demo remains available; LIVE is blocked.
           </div>
         )}
         {apiTestResult && (

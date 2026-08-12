@@ -17,6 +17,30 @@ interface ThrottleEntry {
   lastLogged: number;
 }
 
+export function redactCredentialText(input: string): string {
+  return input
+    .replace(/(["']?(?:apiSecret|api_secret|secret)["']?\s*[:=]\s*["']?)[^\s,"'}&]+/gi, '$1[REDACTED]')
+    .replace(/(["']?(?:signature|X-MBX-APIKEY)["']?\s*[:=]\s*["']?)[^\s,"'}&]+/gi, '$1[REDACTED]')
+    .replace(/(["']?(?:apiKey|api_key)["']?\s*[:=]\s*["']?)([^\s,"'}&]+)/gi, (_match, prefix: string, value: string) => `${prefix}****${value.slice(-4)}`)
+    .replace(/([?&]signature=)[^&\s]+/gi, '$1[REDACTED]');
+}
+
+function redactCredentialData(value: unknown, depth = 0): unknown {
+  if (depth > 6 || value == null) return value;
+  if (typeof value === 'string') return redactCredentialText(value);
+  if (Array.isArray(value)) return value.map(item => redactCredentialData(item, depth + 1));
+  if (typeof value === 'object') {
+    const output: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (/secret|signature|x-mbx-apikey/i.test(key)) output[key] = '[REDACTED]';
+      else if (/api.?key/i.test(key) && typeof nested === 'string') output[key] = `****${nested.slice(-4)}`;
+      else output[key] = redactCredentialData(nested, depth + 1);
+    }
+    return output;
+  }
+  return value;
+}
+
 export interface LoggerStats {
   totalLogged: number;
   totalSuppressed: number;
@@ -89,6 +113,8 @@ class Logger {
   }
 
   private push(level: LogLevel, message: string, data?: unknown) {
+    message = redactCredentialText(message);
+    data = redactCredentialData(data);
     if (level === 'INFO' && getMemoryPressureState().active && isNonCriticalUiAudit(message)) {
       this.totalSuppressed++;
       this.byLevel[level].suppressed++;
@@ -204,7 +230,8 @@ class Logger {
   export() {
     return JSON.stringify(this.logs.toArray().map(entry => ({
       ...entry,
-      message: sanitizeExecutionDisplayText(entry.message),
+      message: sanitizeExecutionDisplayText(redactCredentialText(entry.message)),
+      data: redactCredentialData(entry.data),
     })), null, 2);
   }
 

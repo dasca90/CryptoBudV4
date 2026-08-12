@@ -3,6 +3,7 @@ import type { PersistedAppState } from './AppStatePersistence';
 import { logger } from '../../utils/logger';
 import { SettingsPersistence } from './SettingsPersistence';
 import { buildMLFeatures } from '../ml/ml-feature-builder';
+import { sanitizeCredentialArtifact } from '../security/credentialRedaction';
 
 export interface FullBackup {
   schemaVersion: string;
@@ -61,7 +62,7 @@ export const backupService = {
     };
 
     const filename = `cryptobud_backup_${new Date().toISOString().split('T')[0]}.json`;
-    return { json: JSON.stringify(backup, null, 2), filename };
+    return { json: JSON.stringify(sanitizeCredentialArtifact(backup), null, 2), filename };
   },
 
   async importFullBackup(json: string): Promise<FullBackup | null> {

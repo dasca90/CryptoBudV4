@@ -196,15 +196,6 @@ export class SettingsPersistence {
 
   // ── API Config ────────────────────────────────────────
 
-  async saveApiConfig(config: ApiConfig): Promise<void> {
-    const safe: ApiConfig = {
-      ...config,
-      apiKey: config.apiKey || '',
-      apiSecret: config.apiSecret || '',
-    };
-    await this.setItem(API_CONFIG_KEY, JSON.stringify(safe));
-  }
-
   async loadApiConfig(): Promise<ApiConfig> {
     const rawConfig = await this.loadApiConfigRaw();
     return {
@@ -221,6 +212,11 @@ export class SettingsPersistence {
     } catch {
       return createDefaultApiConfig();
     }
+  }
+
+  async hasLegacyPlaintextApiCredentials(): Promise<boolean> {
+    const config = await this.loadApiConfigRaw();
+    return Boolean(config.apiKey || config.apiSecret);
   }
 
   async getApiStorageMode(): Promise<'secure' | 'tauri_app_state' | 'local_fallback'> {

@@ -87,6 +87,9 @@ export interface LiveSafetyCheckResult {
   checks: {
     apiKeyPresent: boolean;
     apiSecretPresent: boolean;
+    credentialStorageSecure: boolean;
+    legacyPlaintextSecretAbsent: boolean;
+    secureCredentialProviderHealthy: boolean;
     tradingPermissionOk: boolean;
     accountBalanceOk: boolean;
     marketDataFresh: boolean;
@@ -102,6 +105,7 @@ export interface LiveSafetyCheckResult {
     mlQualityReady: boolean;
     publicApiConnectivity: boolean;
     privateSignedApiConnectivity: boolean;
+    privateStreamAuthenticated: boolean;
     serverTimeOk: boolean;
     accountReadOk: boolean;
     liveAdapterInitialized: boolean;

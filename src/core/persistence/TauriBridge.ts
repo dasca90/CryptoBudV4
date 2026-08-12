@@ -2,6 +2,18 @@ import type { TradeRecord } from '../types';
 import { logger } from '../../utils/logger';
 
 export type DbStatus = 'OK' | 'FALLBACK' | 'ERROR' | 'CHECKING';
+export interface NativeCredentialStatus {
+  configured: boolean;
+  storageSecure: boolean;
+  provider: string;
+  platform: string;
+  maskedApiKey: string | null;
+}
+
+export interface NativeBinanceSignature {
+  apiKey: string;
+  signature: string;
+}
 let tauriAvailabilityChecked = false;
 let tauriAvailable = false;
 let tauriUnavailableLogged = false;
@@ -221,6 +233,21 @@ export function logFallbackOnce(log: (msg: string) => void): void {
 export { isTauriAvailable };
 
 export const tauriDb = {
+  async saveBinanceCredentials(apiKey: string, apiSecret: string): Promise<NativeCredentialStatus> {
+    return invoke<NativeCredentialStatus>('save_binance_credentials', { apiKey, apiSecret });
+  },
+
+  async getBinanceCredentialStatus(): Promise<NativeCredentialStatus> {
+    return invoke<NativeCredentialStatus>('get_binance_credential_status');
+  },
+
+  async deleteBinanceCredentials(): Promise<void> {
+    return invoke<void>('delete_binance_credentials');
+  },
+
+  async signBinancePayload(payload: string, includeApiKey = false): Promise<NativeBinanceSignature> {
+    return invoke<NativeBinanceSignature>('sign_binance_payload', { payload, includeApiKey });
+  },
   async saveTrade(trade: TradeRecord): Promise<number> {
     return invoke<number>('save_trade', { trade: toTauriTrade(trade) });
   },

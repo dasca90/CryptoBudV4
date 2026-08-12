@@ -4,7 +4,7 @@ import { MarketDataFeed } from '../../utils/MarketDataFeed';
 import { roundQuantityToStepSize, validateOrderAgainstFilters } from '../market-data/symbol-filters';
 import { apiCredentialsStore } from '../persistence/ApiCredentialsStore';
 import { logger } from '../../utils/logger';
-import { BinancePrivateClient, BinancePrivateError, hmacSha256Hex, type BinanceCredentialsProvider, type BinanceFetch } from './BinancePrivateClient';
+import { BinancePrivateClient, BinancePrivateError, type BinanceCredentialsProvider, type BinanceFetch, type BinanceSigningProvider } from './BinancePrivateClient';
 import { normalizeBinanceExecutionReport, normalizeBinanceOrder, type BinanceOrderPayload } from './BinanceOrderNormalizer';
 
 export type BinancePrivateStreamState = 'CONNECTED' | 'DEGRADED' | 'DISCONNECTED' | 'RECONNECTING';
@@ -13,6 +13,9 @@ type WebSocketFactory = (url: string) => WebSocket;
 
 export interface LiveBinanceAdapterOptions {
   credentialsProvider?: BinanceCredentialsProvider;
+  signingProvider?: BinanceSigningProvider;
+  credentialSecurityProvider?: () => Promise<{ configured: boolean; storageSecure: boolean; legacyCredentialDetected: boolean; providerHealthy: boolean }>;
+  credentialLifecycleSubscribe?: (listener: (event: 'saved' | 'replaced' | 'deleted') => void) => () => void;
   fetchImpl?: BinanceFetch;
   baseUrl?: string;
   wsUrl?: string;
@@ -41,7 +44,7 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
   private readonly feed = MarketDataFeed.getInstance();
   private connected = false;
   private readonly getSafetyState: () => LiveSafetyState;
-  private readonly credentialsProvider: BinanceCredentialsProvider;
+  private readonly credentialSecurityProvider: () => Promise<{ configured: boolean; storageSecure: boolean; legacyCredentialDetected: boolean; providerHealthy: boolean }>;
   private readonly client: BinancePrivateClient;
   private readonly wsUrl: string;
   private readonly webSocketFactory: WebSocketFactory | null;
@@ -54,14 +57,36 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
   private readonly orderSymbols = new Map<string, string>();
   private readonly orderUpdateListeners = new Set<BinanceOrderUpdateListener>();
   private readonly streamStateListeners = new Set<(state: BinancePrivateStreamState) => void>();
+  private readonly privateEventDedupe = new Map<string, number>();
+  private credentialSessionGeneration = 0;
+  private readonly unsubscribeCredentialLifecycle: (() => void) | null;
 
   constructor(getSafetyState: () => LiveSafetyState, options: LiveBinanceAdapterOptions = {}) {
     this.getSafetyState = getSafetyState;
-    this.credentialsProvider = options.credentialsProvider ?? (() => apiCredentialsStore.getCredentialsForTest());
-    this.client = new BinancePrivateClient(this.credentialsProvider, options.fetchImpl ?? fetch, options.baseUrl, 5000, options.requestTimeoutMs);
+    const injectedCredentials = options.credentialsProvider;
+    const signingProvider = options.signingProvider ?? (injectedCredentials
+      ? injectedCredentials
+      : { signPayload: (payload: string, includeApiKey?: boolean) => apiCredentialsStore.signPayload(payload, includeApiKey) });
+    this.credentialSecurityProvider = options.credentialSecurityProvider ?? (injectedCredentials
+      ? async () => ({ configured: true, storageSecure: true, legacyCredentialDetected: false, providerHealthy: true })
+      : () => apiCredentialsStore.loadStatus());
+    this.client = new BinancePrivateClient(signingProvider, options.fetchImpl ?? fetch, options.baseUrl, 5000, options.requestTimeoutMs);
     this.wsUrl = options.wsUrl ?? 'wss://ws-api.binance.com:443/ws-api/v3';
     this.webSocketFactory = options.webSocketFactory ?? (typeof WebSocket !== 'undefined' ? (url => new WebSocket(url)) : null);
     this.shouldStartPrivateStream = options.startPrivateStream ?? true;
+    const lifecycleSubscribe = options.credentialLifecycleSubscribe ?? (injectedCredentials ? null : apiCredentialsStore.subscribe.bind(apiCredentialsStore));
+    this.unsubscribeCredentialLifecycle = lifecycleSubscribe ? lifecycleSubscribe(event => {
+      if (!this.connected) return;
+      if (event === 'deleted') { void this.disconnect(); return; }
+      void this.restartPrivateStreamAfterCredentialReplacement();
+    }) : null;
+  }
+
+  private async assertCredentialSecurity(): Promise<void> {
+    const status = await this.credentialSecurityProvider();
+    const invariantOk = status.configured && status.storageSecure && !status.legacyCredentialDetected && status.providerHealthy;
+    logger.info(`LIVE_CREDENTIAL_GATE_AUDIT credentialsConfigured=${String(status.configured)} credentialStorageSecure=${String(status.storageSecure)} legacySecretPresent=${String(status.legacyCredentialDetected)} providerHealthy=${String(status.providerHealthy)} runtimeLiveAllowed=${String(invariantOk)}`);
+    if (!invariantOk) throw new Error('LIVE_CREDENTIAL_STORAGE_NOT_SECURE');
   }
 
   private assertLiveState(allowReady = false): void {
@@ -72,6 +97,7 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
 
   async connect(): Promise<void> {
     this.assertLiveState(true);
+    await this.assertCredentialSecurity();
     await this.client.syncServerTime();
     const account = await this.readAccount();
     if (!account.accountReadable || !account.spotTradingAllowed) throw new BinancePrivateError('PERMISSION_DENIED', 'Binance Spot trading permission is unavailable');
@@ -81,6 +107,7 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
   }
 
   async disconnect(): Promise<void> {
+    this.credentialSessionGeneration++;
     this.intentionalDisconnect = true;
     this.connected = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -88,6 +115,11 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
     this.socket?.close();
     this.socket = null;
     this.setPrivateStreamState('DISCONNECTED');
+  }
+
+  async dispose(): Promise<void> {
+    await this.disconnect();
+    this.unsubscribeCredentialLifecycle?.();
   }
 
   async getMarketPrice(coin: string): Promise<MarketPrice> { return this.feed.getPrice(coin); }
@@ -109,6 +141,11 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
 
   async submitOrder(req: OrderRequest): Promise<OrderResult> {
     this.assertLiveState();
+    try { await this.assertCredentialSecurity(); }
+    catch (error) {
+      logger.error(`LIVE_CREDENTIAL_EXECUTION_BLOCK_AUDIT severity=${req.side === 'SELL' ? 'CRITICAL' : 'ERROR'} side=${req.side} symbol=${req.coin} newBuysAllowed=false knownPositionsPreserved=true exitSubmissionAvailable=false reason=LIVE_CREDENTIAL_STORAGE_NOT_SECURE`);
+      throw error;
+    }
     if (!this.connected) throw new BinancePrivateError('PRIVATE_STREAM_DISCONNECTED', 'Binance LIVE adapter is not connected');
     if (this.shouldStartPrivateStream && this.privateStreamState !== 'CONNECTED') throw new BinancePrivateError('PRIVATE_STREAM_DISCONNECTED', `Binance private stream is ${this.privateStreamState}; new orders are blocked until reconciliation`);
     if (!req.clientOrderId) throw new BinancePrivateError('ORDER_REJECTED', 'LIVE order requires the persisted CryptoBud clientOrderId');
@@ -188,6 +225,7 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
     orderQueryCapability: boolean;
     clientOrderIdCapability: boolean;
   }> {
+    await this.assertCredentialSecurity();
     await this.client.syncServerTime();
     const account = await this.readAccount();
     // A unique nonexistent identity exercises the real signed query endpoint. Binance -2013 is normalized to null.
@@ -201,6 +239,41 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
   getPrivateStreamState(): BinancePrivateStreamState { return this.privateStreamState; }
   onOrderUpdate(listener: BinanceOrderUpdateListener): () => void { this.orderUpdateListeners.add(listener); return () => this.orderUpdateListeners.delete(listener); }
   onPrivateStreamState(listener: (state: BinancePrivateStreamState) => void): () => void { this.streamStateListeners.add(listener); return () => this.streamStateListeners.delete(listener); }
+
+  /** Authenticates a short-lived read-only user-data subscription. It never submits, cancels, or modifies orders. */
+  async probePrivateStreamAuthentication(timeoutMs = 8_000): Promise<boolean> {
+    await this.assertCredentialSecurity();
+    if (!this.webSocketFactory) throw new BinancePrivateError('PRIVATE_STREAM_DISCONNECTED', 'PRIVATE_STREAM_UNAVAILABLE');
+    const socket = this.webSocketFactory(this.wsUrl);
+    return new Promise<boolean>((resolve, reject) => {
+      let settled = false;
+      const finish = (ok: boolean, error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.close();
+        if (ok) resolve(true); else reject(error ?? new BinancePrivateError('PRIVATE_STREAM_DISCONNECTED', 'PRIVATE_STREAM_AUTH_FAILED'));
+      };
+      const timer = setTimeout(() => finish(false, new BinancePrivateError('REQUEST_TIMEOUT', 'PRIVATE_STREAM_AUTH_TIMEOUT')), timeoutMs);
+      socket.onopen = async () => {
+        try {
+          const timestamp = Date.now() + this.client.getTimeState().serverTimeOffsetMs;
+          const recvWindow = 5000;
+          const payload = `recvWindow=${recvWindow}&timestamp=${timestamp}`;
+          const signed = await this.client.signPayload(payload, true);
+          socket.send(JSON.stringify({ id: `cryptobud-livecheck-${Date.now()}`, method: 'userDataStream.subscribe.signature', params: { apiKey: signed.apiKey, recvWindow, timestamp, signature: signed.signature } }));
+        } catch { finish(false, new BinancePrivateError('AUTH_FAILED', 'PRIVATE_STREAM_SIGNING_FAILED')); }
+      };
+      socket.onmessage = event => {
+        try {
+          const message = JSON.parse(String(event.data)) as Record<string, unknown>;
+          if (message.status === 200 && message.result) finish(true);
+          else if (typeof message.status === 'number' && message.status >= 400) finish(false);
+        } catch { finish(false); }
+      };
+      socket.onerror = () => finish(false);
+    });
+  }
 
   private rememberOrder(order: OrderResult): void {
     if (order.orderId && order.coin) this.orderSymbols.set(order.orderId, order.coin);
@@ -226,14 +299,14 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
     const socket = this.webSocketFactory(this.wsUrl);
     this.socket = socket;
     socket.onopen = async () => {
+      if (this.socket !== socket || !this.connected) return;
       try {
-        const credentials = await this.credentialsProvider();
-        if (!credentials) throw new Error('credentials_unavailable');
         const timestamp = Date.now() + this.client.getTimeState().serverTimeOffsetMs;
         const recvWindow = 5000;
-        const signingPayload = `apiKey=${encodeURIComponent(credentials.apiKey)}&recvWindow=${recvWindow}&timestamp=${timestamp}`;
-        const signature = await hmacSha256Hex(credentials.apiSecret, signingPayload);
-        socket.send(JSON.stringify({ id: `cryptobud-stream-${Date.now()}`, method: 'userDataStream.subscribe.signature', params: { apiKey: credentials.apiKey, recvWindow, timestamp, signature } }));
+        const unsigned = { recvWindow, timestamp };
+        const signingPayload = new URLSearchParams(Object.entries(unsigned).map(([key, value]) => [key, String(value)])).toString();
+        const signed = await this.client.signPayload(signingPayload, true);
+        socket.send(JSON.stringify({ id: `cryptobud-stream-${Date.now()}`, method: 'userDataStream.subscribe.signature', params: { ...unsigned, apiKey: signed.apiKey, signature: signed.signature } }));
       } catch (error) {
         logger.error(`LIVE_PRIVATE_STREAM_STATE_AUDIT state=DEGRADED failureReason=${error instanceof Error ? error.message : String(error)}`);
         this.setPrivateStreamState('DEGRADED');
@@ -241,6 +314,7 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
       }
     };
     socket.onmessage = event => {
+      if (this.socket !== socket || !this.connected) return;
       try {
         const message = JSON.parse(String(event.data)) as Record<string, unknown>;
         if (message.status === 200 && message.result) { this.reconnectAttempts = 0; this.setPrivateStreamState('CONNECTED'); return; }
@@ -252,13 +326,50 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
         const payload = (message.event && typeof message.event === 'object' ? message.event : message) as Record<string, unknown>;
         if (payload.e === 'executionReport') {
           const order = normalizeBinanceExecutionReport(payload); this.rememberOrder(order); this.auditOrder(order, 'private_stream');
+          const dedupeKey = `${order.orderId}|${order.status}|${order.quantity}|${String(payload.E ?? payload.T ?? order.timestamp)}`;
+          if (this.privateEventDedupe.has(dedupeKey)) {
+            logger.warn(`LIVE_PRIVATE_STREAM_DUPLICATE_IGNORED exchangeOrderId=${order.orderId} exchangeStatus=${order.status}`);
+            return;
+          }
+          this.privateEventDedupe.set(dedupeKey, Date.now());
+          if (this.privateEventDedupe.size > 1000) {
+            const oldest = this.privateEventDedupe.keys().next().value;
+            if (oldest) this.privateEventDedupe.delete(oldest);
+          }
           logger.info(`LIVE_ORDER_EXECUTION_UPDATE_AUDIT source=private_stream symbol=${order.coin} clientOrderId=${order.clientOrderId ?? 'none'} exchangeOrderId=${order.orderId} exchangeStatus=${order.status} executedQty=${order.quantity}`);
           for (const listener of this.orderUpdateListeners) listener(order);
         }
       } catch (error) { logger.warn(`LIVE_PRIVATE_STREAM_EVENT_IGNORED reason=${error instanceof Error ? error.message : String(error)}`); }
     };
     socket.onerror = () => this.setPrivateStreamState('DEGRADED');
-    socket.onclose = () => { this.socket = null; this.setPrivateStreamState('DISCONNECTED'); if (!this.intentionalDisconnect && this.connected) this.scheduleReconnect(); };
+    socket.onclose = () => {
+      // Ignore a close event from a superseded credential/session socket.
+      if (this.socket !== socket) return;
+      this.socket = null;
+      this.setPrivateStreamState('DISCONNECTED');
+      if (!this.intentionalDisconnect && this.connected) this.scheduleReconnect();
+    };
+  }
+
+  private async restartPrivateStreamAfterCredentialReplacement(): Promise<void> {
+    const generation = ++this.credentialSessionGeneration;
+    this.intentionalDisconnect = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const oldSocket = this.socket;
+    this.socket = null;
+    oldSocket?.close();
+    this.intentionalDisconnect = false;
+    this.setPrivateStreamState('DISCONNECTED');
+    if (!this.connected || !this.shouldStartPrivateStream) return;
+    try {
+      await this.assertCredentialSecurity();
+      await this.client.syncServerTime();
+      if (!this.connected || generation !== this.credentialSessionGeneration) return;
+      await this.connectPrivateStream();
+    } catch {
+      this.setPrivateStreamState('DEGRADED');
+    }
   }
 
   private scheduleReconnect(): void {

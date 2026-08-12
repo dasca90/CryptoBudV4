@@ -18,6 +18,9 @@ export class BinancePrivateError extends Error {
 
 export interface BinanceCredentials { apiKey: string; apiSecret: string }
 export type BinanceCredentialsProvider = () => Promise<BinanceCredentials | null>;
+export interface BinanceSigningProvider {
+  signPayload(payload: string, includeApiKey?: boolean): Promise<{ apiKey: string; signature: string }>;
+}
 export type BinanceFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export interface BinancePrivateMetrics {
@@ -61,12 +64,20 @@ export class BinancePrivateClient {
   private readonly metrics: BinancePrivateMetrics = { privateRequestCount: 0, orderQueryCount: 0, accountQueryCount: 0, reconciliationQueryCount: 0, requestTimestamps: [] };
 
   constructor(
-    private readonly credentialsProvider: BinanceCredentialsProvider,
+    private readonly signingProvider: BinanceCredentialsProvider | BinanceSigningProvider,
     private readonly fetchImpl: BinanceFetch = fetch,
     private readonly baseUrl = 'https://api.binance.com',
     private readonly recvWindow = 5000,
     private readonly defaultTimeoutMs = 10_000,
   ) {}
+
+  async signPayload(payload: string, includeApiKey = false): Promise<{ apiKey: string; signature: string }> {
+    if (typeof this.signingProvider !== 'function') return this.signingProvider.signPayload(payload, includeApiKey);
+    const credentials = await this.signingProvider();
+    if (!credentials?.apiKey || !credentials.apiSecret) throw new BinancePrivateError('AUTH_FAILED', 'CREDENTIALS_NOT_CONFIGURED');
+    const signingPayload = includeApiKey ? `apiKey=${credentials.apiKey}&${payload}` : payload;
+    return { apiKey: credentials.apiKey, signature: await hmacSha256Hex(credentials.apiSecret, signingPayload) };
+  }
 
   getTimeState() { return { serverTimeOffsetMs: this.serverTimeOffsetMs, lastServerTimeSyncAt: this.lastServerTimeSyncAt }; }
   getMetrics(): BinancePrivateMetrics {
@@ -79,7 +90,7 @@ export class BinancePrivateClient {
     const start = Date.now();
     let response: Response;
     try { response = await this.fetchImpl(`${this.baseUrl}/api/v3/time`, { method: 'GET' }); }
-    catch (error) { throw new BinancePrivateError('NETWORK_FAILURE', error instanceof Error ? error.message : String(error), undefined, undefined, 'server_time', Date.now() - start); }
+    catch { throw new BinancePrivateError('NETWORK_FAILURE', 'Binance server-time request failed', undefined, undefined, 'server_time', Date.now() - start); }
     if (!response.ok) throw new BinancePrivateError('NETWORK_FAILURE', `Server time HTTP ${response.status}`, response.status, undefined, 'server_time', Date.now() - start);
     const body = await response.json() as { serverTime?: number };
     if (!Number.isFinite(body.serverTime)) throw new BinancePrivateError('NETWORK_FAILURE', 'Invalid Binance server-time response', response.status, undefined, 'server_time', Date.now() - start);
@@ -95,14 +106,15 @@ export class BinancePrivateClient {
   }
 
   private async doSignedRequest<T>(method: 'GET' | 'POST' | 'DELETE', path: string, params: Record<string, string | number | boolean | undefined>, options: SignedRequestOptions, attempt: number): Promise<T> {
-    const credentials = await this.credentialsProvider();
-    if (!credentials?.apiKey || !credentials.apiSecret) throw new BinancePrivateError('AUTH_FAILED', 'Binance credentials are not configured', undefined, undefined, options.endpointClass);
     const signedParams: Record<string, string> = {};
     for (const [key, value] of Object.entries(params)) if (value !== undefined) signedParams[key] = String(value);
     signedParams.recvWindow = String(this.recvWindow);
     signedParams.timestamp = String(Date.now() + this.serverTimeOffsetMs);
     const query = new URLSearchParams(signedParams).toString();
-    const signature = await hmacSha256Hex(credentials.apiSecret, query);
+    let signed: { apiKey: string; signature: string };
+    try { signed = await this.signPayload(query); }
+    catch { throw new BinancePrivateError('AUTH_FAILED', 'SECURE_CREDENTIAL_SIGNING_UNAVAILABLE', undefined, undefined, options.endpointClass); }
+    const signature = signed.signature;
     const url = `${this.baseUrl}${path}?${query}&signature=${signature}`;
     const controller = new AbortController();
     const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
@@ -114,7 +126,7 @@ export class BinancePrivateClient {
     if (options.endpointClass === 'account' || options.endpointClass === 'balance') this.metrics.accountQueryCount++;
     if (options.endpointClass === 'reconciliation') { this.metrics.reconciliationQueryCount++; this.metrics.orderQueryCount++; }
     try {
-      const response = await this.fetchImpl(url, { method, headers: { 'X-MBX-APIKEY': credentials.apiKey }, signal: controller.signal });
+      const response = await this.fetchImpl(url, { method, headers: { 'X-MBX-APIKEY': signed.apiKey }, signal: controller.signal });
       const latencyMs = Date.now() - start;
       const body = await response.json().catch(() => ({})) as { code?: number; msg?: string } & T;
       logger.info(`BINANCE_PRIVATE_REQUEST_AUDIT endpointClass=${options.endpointClass} method=${method} httpStatus=${response.status} latencyMs=${latencyMs} success=${String(response.ok)}`);
@@ -133,7 +145,7 @@ export class BinancePrivateClient {
       if (error instanceof BinancePrivateError) throw error;
       const latencyMs = Date.now() - start;
       if ((error as Error)?.name === 'AbortError') throw new BinancePrivateError('REQUEST_TIMEOUT', 'Binance private request timed out', undefined, undefined, options.endpointClass, latencyMs);
-      throw new BinancePrivateError('NETWORK_FAILURE', error instanceof Error ? error.message : String(error), undefined, undefined, options.endpointClass, latencyMs);
+      throw new BinancePrivateError('NETWORK_FAILURE', 'Binance private network request failed', undefined, undefined, options.endpointClass, latencyMs);
     } finally { clearTimeout(timer); }
   }
 }

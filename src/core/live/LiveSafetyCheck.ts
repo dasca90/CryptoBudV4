@@ -28,12 +28,15 @@ export async function runLiveSafetyCheck(context: LiveSafetyCheckContext): Promi
   const checks: LiveSafetyCheckResult['checks'] = {
     apiKeyPresent: credentialStatus.apiKeyConfigured,
     apiSecretPresent: credentialStatus.apiSecretConfigured,
+    credentialStorageSecure: credentialStatus.storageSecure,
+    legacyPlaintextSecretAbsent: !credentialStatus.legacyCredentialDetected,
+    secureCredentialProviderHealthy: credentialStatus.providerHealthy,
     tradingPermissionOk: false, accountBalanceOk: false, marketDataFresh: false, bookTickerFresh: false,
     symbolFiltersLoaded: false, minNotionalKnown: false, lotSizeKnown: false, stepSizeKnown: false,
     killSwitchReady: context.killSwitchReady, maxDailyLossSet: context.maxDailyLossSet,
     maxOpenPositionsSet: context.maxOpenPositionsSet, journalReady: context.journalReady,
     mlQualityReady: context.mlQualityReady, publicApiConnectivity: false, privateSignedApiConnectivity: false,
-    serverTimeOk: false, accountReadOk: false, liveAdapterInitialized: true,
+    serverTimeOk: false, accountReadOk: false, liveAdapterInitialized: true, privateStreamAuthenticated: false,
     orderQueryCapability: false, clientOrderIdCapability: false,
     positionPersistenceReady: context.positionPersistenceReady,
     executionPersistenceReady: context.executionPersistenceReady,
@@ -75,13 +78,16 @@ export async function runLiveSafetyCheck(context: LiveSafetyCheckContext): Promi
       checks.accountBalanceOk = probe.account.balances.some(balance => balance.total > 0);
       checks.orderQueryCapability = probe.orderQueryCapability;
       checks.clientOrderIdCapability = probe.clientOrderIdCapability;
+      checks.privateStreamAuthenticated = await context.adapter.probePrivateStreamAuthentication();
     } catch (error) {
       details.push(`Private Binance verification failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   if (!checks.apiKeyPresent || !checks.apiSecretPresent) details.push('Binance API credentials are not configured');
-  if (credentialStatus.storageMode !== 'secure') details.push(`Credential storage is ${credentialStatus.storageMode}; secure OS-backed storage is still required before real-money activation`);
+  if (!credentialStatus.storageSecure) details.push('Secure OS-backed credential storage is unavailable');
+  if (credentialStatus.legacyCredentialDetected) details.push('Legacy plaintext credential copy detected; explicit re-save is required');
+  if (!checks.privateStreamAuthenticated) details.push('Private stream authentication was not proven');
   if (!checks.tradingPermissionOk) details.push('Spot trading permission could not be proven');
   if (!checks.accountBalanceOk) details.push('No non-zero exchange balance was available for capital verification');
   if (!checks.orderQueryCapability || !checks.clientOrderIdCapability) details.push('Signed order query by clientOrderId was not proven');
@@ -90,9 +96,10 @@ export async function runLiveSafetyCheck(context: LiveSafetyCheckContext): Promi
 
   // Non-secure credential persistence is intentionally a final fail-closed condition, even if all network checks pass.
   const allChecksPassed = Object.values(checks).every(Boolean);
-  const storageSecure = credentialStatus.storageMode === 'secure';
+  const storageSecure = credentialStatus.storageSecure && credentialStatus.providerHealthy && !credentialStatus.legacyCredentialDetected;
   const passed = allChecksPassed && storageSecure;
   const blockedReason = passed ? null : !storageSecure ? 'LIVE_CREDENTIAL_STORAGE_NOT_SECURE' : 'LIVE_READINESS_CHECK_FAILED';
-  logger.info(`LIVE_READINESS_AUDIT finalLiveReadiness=${passed ? 'PASS' : 'FAIL'} blockedReason=${blockedReason ?? 'none'} publicApi=${String(checks.publicApiConnectivity)} privateApi=${String(checks.privateSignedApiConnectivity)} accountRead=${String(checks.accountReadOk)} orderQuery=${String(checks.orderQueryCapability)} unresolvedOrders=${context.unresolvedOrderCount} reconciliationIssues=${context.reconciliationIssueCount} orderSubmitted=false`);
+  logger.info(`LIVE_READINESS_CREDENTIAL_AUDIT credentialConfigured=${String(credentialStatus.configured)} credentialStorageSecure=${String(storageSecure)} legacyPlaintextSecret=NONE:${String(!credentialStatus.legacyCredentialDetected)} privateSignedApi=${String(checks.privateSignedApiConnectivity)} privateStream=${String(checks.privateStreamAuthenticated)} finalLiveReadiness=${passed ? 'PASS' : 'FAIL'}`);
+  logger.info(`LIVE_READINESS_AUDIT finalLiveReadiness=${passed ? 'PASS' : 'FAIL'} blockedReason=${blockedReason ?? 'none'} publicApi=${String(checks.publicApiConnectivity)} privateApi=${String(checks.privateSignedApiConnectivity)} accountRead=${String(checks.accountReadOk)} orderQuery=${String(checks.orderQueryCapability)} privateStream=${String(checks.privateStreamAuthenticated)} unresolvedOrders=${context.unresolvedOrderCount} reconciliationIssues=${context.reconciliationIssueCount} orderSubmitted=false`);
   return { passed, blockedReason, checks, details };
 }

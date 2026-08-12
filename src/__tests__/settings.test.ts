@@ -10,7 +10,8 @@ import {
 } from '../core/types';
 import type { AppSettings, TelegramSettings, ResetResult } from '../core/types';
 import { logger } from '../utils/logger';
-import { apiCredentialsStore } from '../core/persistence/ApiCredentialsStore';
+import { ApiCredentialsStore } from '../core/persistence/ApiCredentialsStore';
+import type { SecureCredentialBackend } from '../core/persistence/SecureCredentialStore';
 import { backupService } from '../core/persistence/BackupService';
 import { createDefaultAppState } from '../core/persistence/AppStatePersistence';
 import { resolveTradingTargetOwnership } from '../core/trading/TradingTargetOwnership';
@@ -21,6 +22,17 @@ let p = 0, f = 0;
 function ok(c: boolean, m: string) { if (c) { p++; } else { f++; console.log('  FAIL: ' + m); } }
 function eq<T>(a: T, b: T, m: string) { ok(a === b, m); }
 
+function createSecureTestStore() {
+  let credentials: { apiKey: string; apiSecret: string } | null = null;
+  const backend: SecureCredentialBackend = {
+    async save(apiKey, apiSecret) { credentials = { apiKey, apiSecret }; return this.status(); },
+    async status() { return { configured: !!credentials, storageSecure: true, provider: 'test_keyring', platform: 'test', maskedApiKey: credentials ? `****${credentials.apiKey.slice(-4)}` : null }; },
+    async delete() { credentials = null; },
+    async sign() { if (!credentials) throw new Error('CREDENTIALS_NOT_CONFIGURED'); return { apiKey: credentials.apiKey, signature: 'test-signature' }; },
+  };
+  return new ApiCredentialsStore(backend);
+}
+
 async function testDefaults() {
   console.log('\n--- A: default settings safe ---');
   const def = createDefaultAppSettings();
@@ -29,7 +41,7 @@ async function testDefaults() {
   eq(def.telegramNotificationsEnabled, false, 'A3: Telegram OFF by default');
   eq(def.demoTradingEnabled, true, 'A4: Demo trading ON by default');
   eq(def.riskStyle, 'moderate', 'A5: Risk style moderate by default');
-  eq(def.maxPositions, 10, 'A6: Max positions 10 by default');
+  eq(def.maxPositions, 24, 'A6: Max positions 24 by default');
   eq(def.capitalPerTrade, 100, 'A7: Capital per trade 100 by default');
   eq(def.allowedGroups, 'all', 'A8: All groups allowed by default');
   eq(def.binanceApiConfigured, false, 'A9: API not configured by default');
@@ -234,60 +246,40 @@ async function testTelegramTestConfigured() {
 
 async function testSecretsNotLogged() {
   console.log('\n--- O: secrets not logged ---');
-  const logs: string[] = [];
-  const origInfo = logger.info;
-  const origWarn = logger.warn;
-  // Override logger to capture calls
-  (logger as any).info = (msg: string) => { logs.push(msg); };
-  (logger as any).warn = (msg: string) => { logs.push(msg); };
-
-  const persistence = new SettingsPersistence();
-  await persistence.saveApiConfig({ apiKey: 'test-key-12345', apiSecret: 'test-secret-67890', status: 'CONFIGURED', lastTestedAt: null, lastTestError: null });
-  await persistence.clearApiConfig();
-
-  const apiKeyInLogs = logs.some(l => l.includes('test-key-12345') || l.includes('test-secret-67890'));
+  logger.clear();
+  logger.info('probe apiKey=test-key-12345 apiSecret=test-secret-67890 signature=test-signature');
+  const logs = logger.getLogs().map(row => row.message);
+  const apiKeyInLogs = logs.some(l => l.includes('test-key-12345') || l.includes('test-secret-67890') || l.includes('test-signature'));
   eq(apiKeyInLogs, false, 'O1: API key/secret not in logs');
-
-  (logger as any).info = origInfo;
-  (logger as any).warn = origWarn;
 }
 
 async function testApiPersistenceAfterTabChange() {
   console.log('\n--- F2/G/H: API persistence + secret safety + public/private separation ---');
-  const persistence = new SettingsPersistence();
-  await persistence.saveApiConfig({
-    apiKey: 'persist-key-12345678',
-    apiSecret: 'persist-secret-987654',
-    status: 'CONFIGURED',
-    lastTestedAt: null,
-    lastTestError: null,
-  });
-  const reloaded = new SettingsPersistence();
-  const loaded = await reloaded.loadApiConfig();
-  eq(loaded.apiKey, 'persist-key-12345678', 'F2: API key persists after remount/tab-change simulation');
-  eq(loaded.apiSecret, '', 'G2: API secret is not returned raw');
+  const source = await import('node:fs').then(fs => fs.readFileSync('src/core/persistence/ApiCredentialsStore.ts', 'utf8'));
+  ok(!source.includes('saveApiConfig('), 'F2: API store never persists credentials in generic settings');
+  ok(!source.includes('getCredentialsForTest'), 'G2: no raw secret read API exists');
   const page = await import('node:fs').then(fs => fs.readFileSync('src/ui/pages/SettingsPage.tsx', 'utf8'));
-  ok(page.includes('Binance Public Data') && page.includes('Binance API (Private)'), 'H2: public scanner status is separate from private API status');
+  ok(page.includes('Binance Public Data') && page.includes('Binance LIVE Credentials'), 'H2: public scanner status is separate from private API status');
 }
 
 async function testApiCredentialStoreFlow() {
   console.log('\n--- API store flow ---');
-  await apiCredentialsStore.clearApiCredentials();
-  const blocked = await apiCredentialsStore.saveApiCredentials({ apiKey: '', apiSecret: '' });
-  eq(blocked.configured, false, 'A: missing fields blocked');
+  const apiCredentialsStore = createSecureTestStore();
+  let missingBlocked = false;
+  try { await apiCredentialsStore.saveApiCredentials({ apiKey: '', apiSecret: '' }); } catch { missingBlocked = true; }
+  eq(missingBlocked, true, 'A: missing fields blocked');
 
   const saved = await apiCredentialsStore.saveApiCredentials({ apiKey: 'abcd1234wxyz', apiSecret: 'very-secret' });
   eq(saved.configured, true, 'B: save sets configured true');
   eq(saved.apiKeyConfigured, true, 'C: api key configured');
   eq(saved.apiSecretConfigured, true, 'D: api secret configured');
   ok(!!saved.maskedApiKey, 'E: masked key exists');
-  eq(saved.maskedApiKey === 'abcd...wxyz', true, 'F: key masked');
+  eq(saved.maskedApiKey === '****wxyz', true, 'F: key masked');
 
   const rawUiLoad = await new SettingsPersistence().loadApiConfig();
   eq(rawUiLoad.apiSecret, '', 'G: ui-facing load never returns raw secret');
 
-  const rawInternal = await apiCredentialsStore.getCredentialsForTest();
-  ok(rawInternal !== null, 'H: internal load returns credentials for test path');
+  ok(!('getCredentialsForTest' in apiCredentialsStore), 'H: raw credential getter is absent');
 
   const remountStatus = await apiCredentialsStore.loadApiCredentialsStatus();
   eq(remountStatus.configured, true, 'I: remount status remains configured');
@@ -301,14 +293,10 @@ async function testApiCredentialStoreFlow() {
   const stillConfigured = await apiCredentialsStore.loadApiCredentialsStatus();
   eq(stillConfigured.configured, true, 'K: empty API fields do not overwrite saved credentials');
 
-  const testTyped = await apiCredentialsStore.testApiCredentials({ apiKey: 'typed-key-1234', apiSecret: 'typed-secret-1234' });
-  ok(testTyped.code === 'API_TEST_SUCCESS' || testTyped.code === 'API_TEST_FAILED', 'L: test uses current typed credentials path');
-
-  const testSaved = await apiCredentialsStore.testApiCredentials(null);
-  ok(testSaved.code === 'API_TEST_SUCCESS' || testSaved.code === 'API_TEST_FAILED', 'M: test uses saved credentials when typed empty');
+  ok(apiCredentialsStore.testApiCredentials.length === 0, 'L/M: Test API accepts no typed credential bypass');
 
   await apiCredentialsStore.clearApiCredentials();
-  const testNoCreds = await apiCredentialsStore.testApiCredentials(null);
+  const testNoCreds = await apiCredentialsStore.testApiCredentials();
   eq(testNoCreds.code, 'API_NOT_CONFIGURED', 'N: no creds returns API_NOT_CONFIGURED');
   const cleared = await apiCredentialsStore.loadApiCredentialsStatus();
   eq(cleared.configured, false, 'O: clear removes credentials');
@@ -316,6 +304,7 @@ async function testApiCredentialStoreFlow() {
 
 async function testBackupSecretSafety() {
   console.log('\n--- Backup secret safety ---');
+  const apiCredentialsStore = createSecureTestStore();
   await apiCredentialsStore.saveApiCredentials({ apiKey: 'backup-key-123456789', apiSecret: 'backup-secret-abcdef' });
   const { json } = await backupService.exportFullBackup([], createDefaultAppState());
   ok(!json.includes('backup-secret-abcdef'), 'P: backup does not include raw API secret');
