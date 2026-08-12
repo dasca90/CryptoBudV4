@@ -94,7 +94,7 @@ export class MarketEdgeKernel {
     return this.state(symbol, event.eventTime).liquidations.push(event);
   }
 
-  calculate(symbol: string, now = Date.now(), marketBreadthBullishPct: number | null = null): MarketEdgeSnapshot | null {
+  calculate(symbol: string, now = Date.now(), marketBreadthBullishPct: number | null = null, liquidationFeedHealthy = false): MarketEdgeSnapshot | null {
     const state = this.states.get(symbol.toUpperCase());
     if (!state || this.config.mode === 'OFF') return null;
     const spot = state.spotPrices.snapshot();
@@ -120,7 +120,7 @@ export class MarketEdgeKernel {
     const liquidation30s = liquidationTotals(state.liquidations.snapshot(), 30_000, now), liquidation = liquidationTotals(state.liquidations.snapshot(), 60_000, now), liquidation5m = liquidationTotals(state.liquidations.snapshot(), 300_000, now);
     const liquidationTotal = liquidation.longUsd + liquidation.shortUsd;
     const expectedMinuteVolume = futuresFlow3m.quoteVolume / 3;
-    const liquidationIntensity = expectedMinuteVolume > 0 ? liquidationTotal / expectedMinuteVolume : null;
+    const liquidationIntensity = expectedMinuteVolume > 0 ? liquidationTotal / expectedMinuteVolume : liquidationFeedHealthy && liquidationTotal === 0 ? 0 : null;
     const liquidationPressure: MarketEdgeSnapshot['liquidationPressure'] = liquidationIntensity == null ? 'UNAVAILABLE' : liquidationIntensity >= 1 ? 'EXTREME' : liquidationIntensity >= 0.5 ? 'HIGH' : liquidationIntensity >= 0.15 ? 'MEDIUM' : 'LOW';
     const liquidationDirection: MarketEdgeSnapshot['liquidationDirection'] = liquidationTotal <= 0 ? 'NONE' : liquidation.longUsd >= liquidation.shortUsd * 2 ? 'LONG_LIQUIDATION_CASCADE' : liquidation.shortUsd >= liquidation.longUsd * 2 ? 'SHORT_LIQUIDATION_CASCADE' : 'BALANCED';
     const recentSpot = spot.filter(point => point.eventTime >= now - 60_000).map(point => point.value);
@@ -136,13 +136,13 @@ export class MarketEdgeKernel {
       futuresTradesFresh: !!state.futuresTrades.latest() && now - state.futuresTrades.latest()!.eventTime <= this.config.freshnessMs.trades,
       openInterestFresh: !!state.openInterest.latest() && now - state.openInterest.latest()!.eventTime <= this.config.freshnessMs.openInterest,
       fundingFresh: !!state.fundingRate && now - state.fundingRate.eventTime <= this.config.freshnessMs.funding,
-      liquidationFresh: !!state.liquidations.latest() && now - state.liquidations.latest()!.eventTime <= this.config.freshnessMs.liquidations,
+      liquidationFresh: liquidationFeedHealthy || (!!state.liquidations.latest() && now - state.liquidations.latest()!.eventTime <= this.config.freshnessMs.liquidations),
     };
     const availableInputs = Object.entries(freshness).filter(([, fresh]) => fresh).map(([key]) => key);
     const availableRatio = availableInputs.length / Object.keys(freshness).length;
     const warming = now - state.firstEventAt < this.config.minimumWarmupMs || spot60 == null || perp60 == null;
     const health = warming ? 'EDGE_WARMING_UP' : availableRatio >= 0.75 ? 'EDGE_HEALTHY' : availableRatio >= 0.4 ? 'EDGE_PARTIAL' : 'EDGE_DEGRADED';
-    const dataQuality = warming || availableRatio < 0.4 ? 'UNAVAILABLE' : availableRatio >= 0.75 ? 'GOOD' : 'PARTIAL';
+    const dataQuality = warming ? 'UNAVAILABLE' : availableRatio >= 0.75 ? 'GOOD' : 'PARTIAL';
     const spotOfi = orderFlowImbalance(latestSpotBook), futuresOfi = orderFlowImbalance(latestFuturesBook);
     const bookDynamics = orderBookDynamics(state.futuresBooks.snapshot(), now);
     const spreadPct = latestSpotBook?.spreadPct ?? null;
@@ -183,6 +183,33 @@ export class MarketEdgeKernel {
     let samples = 0;
     for (const state of this.states.values()) samples += state.spotPrices.size + state.perpPrices.size + state.markPrices.size + state.indexPrices.size + state.openInterest.size + state.spotTrades.size + state.futuresTrades.size + state.liquidations.size + state.spotBooks.size + state.futuresBooks.size;
     return { symbols: this.states.size, samples, estimatedBytes: samples * 96, bounded: this.states.size <= this.config.universeSize && samples <= this.states.size * 10_960 };
+  }
+
+  getPipelineDiagnostics(now = Date.now()): { spotInputSymbols: number; futuresInputSymbols: number; spotBookSymbols: number; spotTradeSymbols: number; futuresBookSymbols: number; futuresTradeSymbols: number; openInterestSymbols: number; fundingSymbols: number; spotWarmSymbols: number; futuresWarmSymbols: number; synchronizedSymbols: number; maxWindowDeltaMs: number | null; timestampUnitMismatchSymbols: number } {
+    let spotInputSymbols = 0, futuresInputSymbols = 0, spotBookSymbols = 0, spotTradeSymbols = 0, futuresBookSymbols = 0, futuresTradeSymbols = 0, openInterestSymbols = 0, fundingSymbols = 0, spotWarmSymbols = 0, futuresWarmSymbols = 0, synchronizedSymbols = 0, timestampUnitMismatchSymbols = 0;
+    let maxWindowDeltaMs: number | null = null;
+    for (const state of this.states.values()) {
+      const spotLatest = state.spotPrices.latest(), futuresLatest = state.perpPrices.latest();
+      if (spotLatest) spotInputSymbols++;
+      if (futuresLatest) futuresInputSymbols++;
+      if (state.spotBooks.latest()) spotBookSymbols++;
+      if (state.spotTrades.latest()) spotTradeSymbols++;
+      if (state.futuresBooks.latest()) futuresBookSymbols++;
+      if (state.futuresTrades.latest()) futuresTradeSymbols++;
+      if (state.openInterest.latest()) openInterestSymbols++;
+      if (state.fundingRate) fundingSymbols++;
+      const spotWarm = percentReturn(state.spotPrices.snapshot(), 60_000, now) != null;
+      const futuresWarm = percentReturn(state.perpPrices.snapshot(), 60_000, now) != null;
+      if (spotWarm) spotWarmSymbols++;
+      if (futuresWarm) futuresWarmSymbols++;
+      if (spotLatest && futuresLatest) {
+        const delta = Math.abs(spotLatest.eventTime - futuresLatest.eventTime);
+        maxWindowDeltaMs = Math.max(maxWindowDeltaMs ?? 0, delta);
+        if (delta > 24 * 60 * 60_000) timestampUnitMismatchSymbols++;
+        if (spotWarm && futuresWarm && delta <= 5_000) synchronizedSymbols++;
+      }
+    }
+    return { spotInputSymbols, futuresInputSymbols, spotBookSymbols, spotTradeSymbols, futuresBookSymbols, futuresTradeSymbols, openInterestSymbols, fundingSymbols, spotWarmSymbols, futuresWarmSymbols, synchronizedSymbols, maxWindowDeltaMs, timestampUnitMismatchSymbols };
   }
 
   clear(): void { this.states.clear(); }

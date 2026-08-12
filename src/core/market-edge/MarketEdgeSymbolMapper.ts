@@ -31,3 +31,7 @@ export function buildMarketEdgeSymbolMappings(spotInfo: Record<string, unknown>,
     })
     .filter(mapping => mapping.spotSymbol.length > 0);
 }
+
+export function buildMarketEdgeMappingsFromCanonicalSpotUniverse(spotUniverseSymbols: readonly string[], futuresInfo: Record<string, unknown>): MarketEdgeSymbolMapping[] {
+  return buildMarketEdgeSymbolMappings({ symbols: [...new Set(spotUniverseSymbols.map(symbol => symbol.toUpperCase()))].map(symbol => ({ symbol, quoteAsset: 'USDT', status: 'TRADING', isSpotTradingAllowed: true })) }, futuresInfo);
+}

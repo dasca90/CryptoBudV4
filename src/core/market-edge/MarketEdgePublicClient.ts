@@ -40,4 +40,7 @@ export class MarketEdgePublicClient {
   async getPremiumIndex(symbol: string): Promise<{ symbol: string; markPrice: string; indexPrice: string; lastFundingRate: string; time: number }> {
     return this.getJson(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${encodeURIComponent(symbol)}`, 'PUBLIC');
   }
+  async getAllPremiumIndexes(): Promise<Array<{ symbol: string; markPrice: string; indexPrice: string; lastFundingRate: string; time: number }>> {
+    return this.getJson('https://fapi.binance.com/fapi/v1/premiumIndex', 'PUBLIC');
+  }
 }

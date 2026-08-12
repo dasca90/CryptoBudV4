@@ -12,6 +12,12 @@ export function MarketEdgePanel({ state, top, selected, outcomes }: { state: Mar
       <div className="muted" style={{ fontSize: 9, marginTop: 3 }}>
         {state.health} · {state.perpetualSymbols}/{state.mappedSymbols} perpetual · High {state.highEdgeCount}
       </div>
+      {(state.health === 'EDGE_WARMING_UP' || state.health === 'EDGE_DEGRADED' || state.health === 'EDGE_OFFLINE') && (
+        <div className="muted" style={{ fontSize: 8, marginTop: 2 }} data-testid="market-edge-diagnostics">
+          Spot {state.spotWarmSymbols}/{state.spotInputSymbols} warm · Futures {state.futuresWarmSymbols}/{state.futuresInputSymbols} warm · paired {state.synchronizedSymbols}
+          {state.primaryBlocker ? ` · ${state.primaryBlocker.replaceAll('_', ' ')}` : ''}
+        </div>
+      )}
       <div style={{ display: 'grid', gap: 3, marginTop: 6 }}>
         {top.length === 0 && <div className="muted" style={{ fontSize: 9 }}>Waiting for synchronized Spot/Futures windows.</div>}
         {top.slice(0, 4).map(snapshot => (

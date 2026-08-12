@@ -51,6 +51,14 @@ export const DEFAULT_MARKET_EDGE_CONFIG: MarketEdgeConfig = {
   ],
 };
 
+export function normalizeMarketEdgeMode(value: unknown): MarketEdgeMode {
+  const canonical = String(value ?? '').trim().toUpperCase();
+  if (canonical === 'OFF') return 'OFF';
+  if (canonical === 'PRIORITY' || canonical === 'ADVISORY') return 'PRIORITY';
+  if (canonical === 'MONITOR' || canonical === 'SHADOW') return 'MONITOR';
+  return DEFAULT_MARKET_EDGE_CONFIG.mode;
+}
+
 export function normalizeMarketEdgeConfig(input: Partial<MarketEdgeConfig>): MarketEdgeConfig {
   const universeSize = normalizeScannerUniverseSize(input.universeSize);
   const detailedTopK = Math.min(universeSize, Math.max(1, Math.round(input.detailedTopK ?? DEFAULT_MARKET_EDGE_CONFIG.detailedTopK)));
@@ -59,6 +67,7 @@ export function normalizeMarketEdgeConfig(input: Partial<MarketEdgeConfig>): Mar
   return {
     ...DEFAULT_MARKET_EDGE_CONFIG,
     ...input,
+    mode: normalizeMarketEdgeMode(input.mode),
     universeSize,
     detailedTopK,
     hydratedTopK,

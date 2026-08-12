@@ -101,4 +101,18 @@ test('kernel remains warming until full windows exist and stays bounded', () => 
   assert.equal(kernel.getMemoryStats().bounded, true);
 });
 
+test('missing optional OI and trade inputs remains PARTIAL after core Spot/Perp windows warm', () => {
+  const config = normalizeMarketEdgeConfig({ universeSize: 20, minimumWarmupMs: 60_000 });
+  const kernel = new MarketEdgeKernel(config);
+  const base = 1_000_000;
+  kernel.ingestPrice('BTCUSDT', 'SPOT', 100, base);
+  kernel.ingestPrice('BTCUSDT', 'PERP', 100, base);
+  kernel.ingestPrice('BTCUSDT', 'SPOT', 101, base + 61_000);
+  kernel.ingestPrice('BTCUSDT', 'PERP', 102, base + 61_000);
+  const snapshot = kernel.calculate('BTCUSDT', base + 61_000, null, true);
+  assert.equal(snapshot?.dataQuality, 'PARTIAL');
+  assert.equal(snapshot?.liquidationIntensity, 0);
+  assert.equal(snapshot?.liquidationPressure, 'LOW');
+});
+
 console.log(`market-edge-kernel: ${passed} passed, 0 failed`);
