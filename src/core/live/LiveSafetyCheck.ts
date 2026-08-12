@@ -1,55 +1,98 @@
 import type { LiveSafetyCheckResult } from '../types';
+import type { LiveBinanceAdapter } from '../exchange/LiveBinanceAdapter';
+import { apiCredentialsStore } from '../persistence/ApiCredentialsStore';
+import { BinancePublicClient } from '../market-data/BinancePublicClient';
+import { MarketDataFeed } from '../../utils/MarketDataFeed';
+import { logger } from '../../utils/logger';
 
-export function runLiveSafetyCheck(): LiveSafetyCheckResult {
-  const checks = {
-    apiKeyPresent: false,
-    apiSecretPresent: false,
-    tradingPermissionOk: false,
-    accountBalanceOk: false,
-    marketDataFresh: true,
-    bookTickerFresh: true,
-    symbolFiltersLoaded: false,
-    minNotionalKnown: false,
-    lotSizeKnown: false,
-    stepSizeKnown: false,
-    killSwitchReady: false,
-    maxDailyLossSet: false,
-    maxOpenPositionsSet: false,
-    journalReady: true,
-    mlQualityReady: false,
-    publicApiConnectivity: false,
-    privateSignedApiConnectivity: false,
-    serverTimeOk: false,
-    accountReadOk: false,
-    liveAdapterInitialized: false,
-    orderQueryCapability: false,
-    clientOrderIdCapability: true,
-    positionPersistenceReady: true,
-    executionPersistenceReady: true,
-    exitEngineRunning: true,
-    positionMonitoringRunning: true,
-    noUnresolvedOrders: false,
-    noReconciliationIssues: false,
-    postFillAccountingReady: true,
-    restartReconciliationReady: false,
+export interface LiveSafetyCheckContext {
+  adapter: LiveBinanceAdapter;
+  unresolvedOrderCount: number;
+  reconciliationIssueCount: number;
+  positionPersistenceReady: boolean;
+  executionPersistenceReady: boolean;
+  journalReady: boolean;
+  exitEngineRunning: boolean;
+  positionMonitoringRunning: boolean;
+  postFillAccountingReady: boolean;
+  restartReconciliationReady: boolean;
+  killSwitchReady: boolean;
+  maxDailyLossSet: boolean;
+  maxOpenPositionsSet: boolean;
+  mlQualityReady: boolean;
+  probeSymbol?: string;
+}
+
+export async function runLiveSafetyCheck(context: LiveSafetyCheckContext): Promise<LiveSafetyCheckResult> {
+  const credentialStatus = await apiCredentialsStore.loadApiCredentialsStatus();
+  const checks: LiveSafetyCheckResult['checks'] = {
+    apiKeyPresent: credentialStatus.apiKeyConfigured,
+    apiSecretPresent: credentialStatus.apiSecretConfigured,
+    tradingPermissionOk: false, accountBalanceOk: false, marketDataFresh: false, bookTickerFresh: false,
+    symbolFiltersLoaded: false, minNotionalKnown: false, lotSizeKnown: false, stepSizeKnown: false,
+    killSwitchReady: context.killSwitchReady, maxDailyLossSet: context.maxDailyLossSet,
+    maxOpenPositionsSet: context.maxOpenPositionsSet, journalReady: context.journalReady,
+    mlQualityReady: context.mlQualityReady, publicApiConnectivity: false, privateSignedApiConnectivity: false,
+    serverTimeOk: false, accountReadOk: false, liveAdapterInitialized: true,
+    orderQueryCapability: false, clientOrderIdCapability: false,
+    positionPersistenceReady: context.positionPersistenceReady,
+    executionPersistenceReady: context.executionPersistenceReady,
+    exitEngineRunning: context.exitEngineRunning,
+    positionMonitoringRunning: context.positionMonitoringRunning,
+    noUnresolvedOrders: context.unresolvedOrderCount === 0,
+    noReconciliationIssues: context.reconciliationIssueCount === 0,
+    postFillAccountingReady: context.postFillAccountingReady,
+    restartReconciliationReady: context.restartReconciliationReady,
   };
-
   const details: string[] = [];
+  const probeSymbol = context.probeSymbol ?? 'BTCUSDT';
 
-  if (!checks.apiKeyPresent) details.push('Binance API key not configured');
-  if (!checks.apiSecretPresent) details.push('Binance API secret not configured');
-  if (!checks.symbolFiltersLoaded) details.push('Symbol filters (minNotional, lotSize, stepSize) not loaded from exchange');
-  if (!checks.orderQueryCapability) details.push('LIVE order query/reconciliation capability is not implemented');
-  if (!checks.restartReconciliationReady) details.push('Startup exchange reconciliation is not ready against the real Binance adapter');
-  if (!checks.noUnresolvedOrders || !checks.noReconciliationIssues) details.push('Unresolved execution/reconciliation state cannot be proven empty');
-  if (!checks.mlQualityReady) details.push('ML model quality not verified — run ML data quality evaluation first');
+  try {
+    const publicClient = new BinancePublicClient();
+    checks.publicApiConnectivity = await publicClient.ping();
+    await publicClient.getServerTime();
+    await MarketDataFeed.getInstance().fetchExchangeInfo();
+    const filters = MarketDataFeed.getInstance().getSymbolFilters(probeSymbol);
+    checks.symbolFiltersLoaded = !!filters;
+    checks.minNotionalKnown = (filters?.minNotional ?? 0) > 0;
+    checks.lotSizeKnown = (filters?.marketMinQty ?? filters?.minQty ?? 0) > 0;
+    checks.stepSizeKnown = (filters?.marketStepSize || filters?.stepSize || 0) > 0;
+    const price = await MarketDataFeed.getInstance().getPrice(probeSymbol);
+    const quality = MarketDataFeed.getInstance().getMarketDataQuality(probeSymbol);
+    checks.marketDataFresh = price.last > 0 && quality.priceFresh;
+    checks.bookTickerFresh = price.bid > 0 && price.ask > 0 && quality.bookFresh;
+  } catch (error) {
+    details.push(`Public market-data verification failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
-  const allPassed = Object.values(checks).every(Boolean);
+  if (checks.apiKeyPresent && checks.apiSecretPresent) {
+    try {
+      const probe = await context.adapter.runReadinessProbe(probeSymbol);
+      checks.serverTimeOk = probe.serverTimeOk;
+      checks.privateSignedApiConnectivity = true;
+      checks.accountReadOk = probe.account.accountReadable;
+      checks.tradingPermissionOk = probe.account.spotTradingAllowed;
+      checks.accountBalanceOk = probe.account.balances.some(balance => balance.total > 0);
+      checks.orderQueryCapability = probe.orderQueryCapability;
+      checks.clientOrderIdCapability = probe.clientOrderIdCapability;
+    } catch (error) {
+      details.push(`Private Binance verification failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
-  return {
-    passed: allPassed,
-    blockedReason: allPassed ? null : 'LIVE_API_NOT_CONFIGURED',
-    checks,
-    details,
-  };
+  if (!checks.apiKeyPresent || !checks.apiSecretPresent) details.push('Binance API credentials are not configured');
+  if (credentialStatus.storageMode !== 'secure') details.push(`Credential storage is ${credentialStatus.storageMode}; secure OS-backed storage is still required before real-money activation`);
+  if (!checks.tradingPermissionOk) details.push('Spot trading permission could not be proven');
+  if (!checks.accountBalanceOk) details.push('No non-zero exchange balance was available for capital verification');
+  if (!checks.orderQueryCapability || !checks.clientOrderIdCapability) details.push('Signed order query by clientOrderId was not proven');
+  if (!checks.noUnresolvedOrders) details.push(`Unresolved executions: ${context.unresolvedOrderCount}`);
+  if (!checks.noReconciliationIssues) details.push(`Reconciliation issues: ${context.reconciliationIssueCount}`);
+
+  // Non-secure credential persistence is intentionally a final fail-closed condition, even if all network checks pass.
+  const allChecksPassed = Object.values(checks).every(Boolean);
+  const storageSecure = credentialStatus.storageMode === 'secure';
+  const passed = allChecksPassed && storageSecure;
+  const blockedReason = passed ? null : !storageSecure ? 'LIVE_CREDENTIAL_STORAGE_NOT_SECURE' : 'LIVE_READINESS_CHECK_FAILED';
+  logger.info(`LIVE_READINESS_AUDIT finalLiveReadiness=${passed ? 'PASS' : 'FAIL'} blockedReason=${blockedReason ?? 'none'} publicApi=${String(checks.publicApiConnectivity)} privateApi=${String(checks.privateSignedApiConnectivity)} accountRead=${String(checks.accountReadOk)} orderQuery=${String(checks.orderQueryCapability)} unresolvedOrders=${context.unresolvedOrderCount} reconciliationIssues=${context.reconciliationIssueCount} orderSubmitted=false`);
+  return { passed, blockedReason, checks, details };
 }

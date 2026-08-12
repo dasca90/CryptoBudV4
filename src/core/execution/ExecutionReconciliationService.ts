@@ -5,6 +5,7 @@ import { logger } from '../../utils/logger';
 import { executionEventKey, normalizeExchangeOrderState, type ExecutionRecord } from './ExecutionLifecycle';
 import type { ExecutionPersistence } from './ExecutionPersistence';
 import type { TradingRuntimeHealth } from './TradingRuntimeHealth';
+import type { OrderResult } from '../types';
 
 export type ReconciliationClassification =
   | 'MATCHED' | 'EXCHANGE_ONLY_POSITION' | 'LOCAL_ONLY_POSITION' | 'QUANTITY_MISMATCH'
@@ -24,6 +25,8 @@ function nearlyEqual(a: number, b: number, tolerance: number): boolean {
 }
 
 export class ExecutionReconciliationService {
+  private activeReconciliationCount = 0;
+  private lastReconciliationDurationMs = 0;
   constructor(
     private readonly executions: ExecutionPersistence,
     private readonly positions: PositionManager,
@@ -33,6 +36,8 @@ export class ExecutionReconciliationService {
   ) {}
 
   async reconcilePendingOrders(): Promise<ReconciliationIssue[]> {
+    const startedAt = Date.now();
+    this.activeReconciliationCount++;
     const issues: ReconciliationIssue[] = [];
     for (const record of this.executions.getUnresolved()) {
       let resolved = record;
@@ -65,7 +70,42 @@ export class ExecutionReconciliationService {
     }
     if (issues.length > 0) this.health.requireReconciliation(issues.map(issue => issue.classification).join('|'));
     else if (this.executions.getUnresolved().length === 0) this.health.markHealthy();
-    logger.info(`STARTUP_EXCHANGE_RECONCILIATION_AUDIT executionAdapter=${this.adapter.name} pendingRecords=${this.executions.getUnresolved().length} reconciliationIssues=${issues.length} classifications=${issues.map(i => i.classification).join('|') || 'MATCHED'} newBuysAllowed=${String(issues.length === 0)} exitEngineEnabled=true invariantOk=${String(issues.length === 0)}`);
+    this.activeReconciliationCount = Math.max(0, this.activeReconciliationCount - 1);
+    this.lastReconciliationDurationMs = Date.now() - startedAt;
+    logger.info(`STARTUP_EXCHANGE_RECONCILIATION_AUDIT executionAdapter=${this.adapter.name} pendingRecords=${this.executions.getUnresolved().length} reconciliationIssues=${issues.length} classifications=${issues.map(i => i.classification).join('|') || 'MATCHED'} newBuysAllowed=${String(issues.length === 0)} exitEngineEnabled=true executionReconciliationDurationMs=${this.lastReconciliationDurationMs} activeReconciliationCount=${this.activeReconciliationCount} invariantOk=${String(issues.length === 0)}`);
+    return issues;
+  }
+
+  getPerformanceMetrics() { return { executionReconciliationDurationMs: this.lastReconciliationDurationMs, activeReconciliationCount: this.activeReconciliationCount }; }
+
+  async reconcileOrderUpdate(order: OrderResult): Promise<ReconciliationIssue[]> {
+    const record = (order.clientOrderId ? this.executions.get(order.clientOrderId) : undefined)
+      ?? (order.orderId ? this.executions.getByExchangeOrderId(order.orderId) : undefined);
+    if (!record) {
+      if (!String(order.clientOrderId ?? '').startsWith('CB6-')) {
+        logger.info(`LIVE_ORDER_RECONCILIATION_AUDIT source=private_stream symbol=${order.coin} clientOrderId=${order.clientOrderId ?? 'unknown'} exchangeOrderId=${order.orderId || 'unknown'} action=ignored_non_cryptobud_order runtimeHealthUnchanged=true`);
+        return [];
+      }
+      this.health.requireReconciliation('EXCHANGE_EXECUTION_EVENT_WITHOUT_LOCAL_INTENT');
+      logger.error(`LIVE_ORDER_RECONCILIATION_AUDIT severity=CRITICAL symbol=${order.coin} clientOrderId=${order.clientOrderId ?? 'unknown'} exchangeOrderId=${order.orderId || 'unknown'} exchangeStatus=${order.status} executedQty=${order.quantity} reconciliationRequired=true failureReason=EXCHANGE_EXECUTION_EVENT_WITHOUT_LOCAL_INTENT`);
+      return [];
+    }
+    const executedQty = Math.max(0, order.quantity);
+    const status = normalizeExchangeOrderState(order.status, executedQty);
+    const key = executionEventKey({ clientOrderId: record.clientOrderId, exchangeOrderId: order.orderId, status, executedQty, avgFillPrice: order.price });
+    const transitioned = this.executions.transition(record.clientOrderId, status, {
+      exchangeOrderId: order.orderId || record.exchangeOrderId,
+      executedQty,
+      remainingQty: Math.max(0, (order.requestedQuantity ?? record.requestedQty) - executedQty),
+      avgFillPrice: order.price,
+      lastExchangeUpdateAt: order.lastExchangeUpdateAt ?? order.timestamp,
+      reconciliationRequired: status === 'PARTIALLY_FILLED' || status === 'UNKNOWN_AFTER_TIMEOUT',
+    }, key);
+    const repaired = await this.repairLocalAccounting(transitioned.record);
+    const issues = this.compareLocal(repaired);
+    if (issues.length > 0) this.health.requireReconciliation(issues.map(issue => issue.classification).join('|'));
+    else if (this.executions.getUnresolved().length === 0) this.health.markHealthy();
+    logger.info(`LIVE_RECONCILIATION_AUDIT source=private_stream symbol=${order.coin} clientOrderId=${record.clientOrderId} exchangeOrderId=${order.orderId || 'unknown'} duplicateEventDetected=${String(transitioned.duplicate)} exchangeStatus=${status} executedQty=${executedQty} reconciliationIssues=${issues.length} invariantOk=${String(issues.length === 0)}`);
     return issues;
   }
 
@@ -73,11 +113,15 @@ export class ExecutionReconciliationService {
     const issues: ReconciliationIssue[] = [];
     const position = this.positions.getPositionBySymbol(record.symbol);
     const trades = this.journal.getTrades().filter(trade => trade.tradeId === record.tradeId);
-    if (record.executedQty > 0 && !position) issues.push(this.issue('POSITION_MISSING', record, 'exchange_executed_qty_without_local_position'));
-    if (record.executedQty === 0 && position?.clientOrderId === record.clientOrderId) issues.push(this.issue('LOCAL_ONLY_POSITION', record, 'local_position_without_exchange_execution'));
-    if (position && record.executedQty > 0 && !nearlyEqual(position.quantity, record.executedQty, 1e-12)) issues.push(this.issue('QUANTITY_MISMATCH', record, `exchange=${record.executedQty},local=${position.quantity}`));
-    if (position && record.avgFillPrice > 0 && !nearlyEqual(position.avgEntryPrice, record.avgFillPrice, Math.max(1e-12, record.avgFillPrice * 1e-8))) issues.push(this.issue('PRICE_MISMATCH', record, `exchange=${record.avgFillPrice},local=${position.avgEntryPrice}`));
-    if (record.executedQty > 0 && trades.length === 0) issues.push(this.issue('JOURNAL_MISSING', record, 'executed_exposure_without_journal_trade'));
+    if (record.side === 'BUY') {
+      if (record.executedQty > 0 && !position) issues.push(this.issue('POSITION_MISSING', record, 'exchange_executed_qty_without_local_position'));
+      if (record.executedQty === 0 && position?.clientOrderId === record.clientOrderId) issues.push(this.issue('LOCAL_ONLY_POSITION', record, 'local_position_without_exchange_execution'));
+      if (position && record.executedQty > 0 && !nearlyEqual(position.quantity, record.executedQty, 1e-12)) issues.push(this.issue('QUANTITY_MISMATCH', record, `exchange=${record.executedQty},local=${position.quantity}`));
+      if (position && record.avgFillPrice > 0 && !nearlyEqual(position.avgEntryPrice, record.avgFillPrice, Math.max(1e-12, record.avgFillPrice * 1e-8))) issues.push(this.issue('PRICE_MISMATCH', record, `exchange=${record.avgFillPrice},local=${position.avgEntryPrice}`));
+      if (record.executedQty > 0 && trades.length === 0) issues.push(this.issue('JOURNAL_MISSING', record, 'executed_exposure_without_journal_trade'));
+    } else if (record.executedQty > 0 && !record.positionAccounted) {
+      issues.push(this.issue(position ? 'QUANTITY_MISMATCH' : 'JOURNAL_MISSING', record, position ? `sell_execution_not_yet_applied_to_local_position exchangeSold=${record.executedQty} localRemaining=${position.quantity}` : 'sell_execution_without_close_journal_confirmation'));
+    }
     if (trades.length > 1) issues.push(this.issue('DUPLICATE_JOURNAL_TRADE', record, `count=${trades.length}`));
     if (record.status === 'PARTIALLY_FILLED') issues.push(this.issue('PARTIAL_FILL_PENDING', record, `remainingQty=${record.remainingQty}`));
     return issues;
@@ -85,6 +129,7 @@ export class ExecutionReconciliationService {
 
   private async repairLocalAccounting(record: ExecutionRecord): Promise<ExecutionRecord> {
     if (record.executedQty <= 0) return record;
+    if (record.side === 'SELL') return record;
     const existingPosition = this.positions.getPositionBySymbol(record.symbol);
     const existingTrade = this.journal.getTrades().find(trade => trade.tradeId === record.tradeId);
     let positionAccounted = !!existingPosition;

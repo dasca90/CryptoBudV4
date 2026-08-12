@@ -101,10 +101,16 @@ export class ExecutionPersistence {
     return row ? structuredClone(row) : undefined;
   }
 
+  getByExchangeOrderId(exchangeOrderId: string): ExecutionRecord | undefined {
+    const row = [...this.records.values()].find(value => value.exchangeOrderId === exchangeOrderId);
+    return row ? structuredClone(row) : undefined;
+  }
+
   getAll(): ExecutionRecord[] { return [...this.records.values()].map(row => structuredClone(row)); }
 
   getUnresolved(): ExecutionRecord[] {
-    return this.getAll().filter(row => row.reconciliationRequired || row.status === 'UNKNOWN_AFTER_TIMEOUT' || (row.executedQty > 0 && (!row.positionAccounted || !row.journalAccounted || !row.exitManagementAttached)));
+    return this.getAll().filter(row => row.reconciliationRequired
+      || row.status === 'SUBMITTING' || row.status === 'NEW' || row.status === 'PARTIALLY_FILLED' || row.status === 'UNKNOWN_AFTER_TIMEOUT'
+      || (row.executedQty > 0 && (!row.positionAccounted || !row.journalAccounted || !row.exitManagementAttached)));
   }
 }
-

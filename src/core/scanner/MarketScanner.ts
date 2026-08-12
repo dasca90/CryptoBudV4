@@ -186,7 +186,7 @@ export class MarketScanner {
   private diag: ScannerDiagnostics = this.emptyDiagnostics();
   private paperAutoEnabled = false;
   private paperAutoBuyFn: ((plannedCandidate: PlannedCandidate, candidate: ScannerCandidate) => Promise<PaperAutoExecutionResult>) | null = null;
-  private liveBuyFn: ((symbol: string, candidate: ScannerCandidate) => Promise<void>) | null = null;
+  private liveBuyFn: ((symbol: string, candidate: ScannerCandidate, plannedCandidate: PlannedCandidate) => Promise<void>) | null = null;
   private lastPaperAutoResult: PaperAutoExecutionResult | null = null;
   private lastLiveExecutionResult: PaperAutoExecutionResult | null = null;
   private manualStrategy: string | null = null;
@@ -573,7 +573,7 @@ export class MarketScanner {
     this.paperAutoBuyFn = fn;
     logger.info(`ACTIVE_SCANNER_CALLBACK_WIRING_AUDIT: scannerInstanceId=${this.scannerInstanceId} callback=paperAutoBuyFn present=${String(!!this.paperAutoBuyFn)} logSinkName=${MARKET_SCANNER_LOG_SINK_NAME}`);
   }
-  setLiveBuyFn(fn: ((symbol: string, candidate: ScannerCandidate) => Promise<void>) | null) { this.liveBuyFn = fn; }
+  setLiveBuyFn(fn: ((symbol: string, candidate: ScannerCandidate, plannedCandidate: PlannedCandidate) => Promise<void>) | null) { this.liveBuyFn = fn; }
   setExecutionLimits(config: {
     maxPositions: number;
     maxSelectedPerScan?: number;
@@ -862,7 +862,7 @@ export class MarketScanner {
     }
 
     const durationMs = Date.now() - startMs;
-    logger.info(`SCANNER_SCHEDULER_AUDIT: fullScannerIntervalMs=configured candidateRevalidationIntervalMs=${this.revalidationIntervalMs} fullScanInProgress=${String(this.scanInFlight)} lastRevalidationAt=${new Date().toISOString()} revalidationDurationMs=${durationMs} revalidationCycleId=${cycleId} promotedCount=${promotedCount} demotedCount=${demotedCount} reason=${reason} uiThreadBlocked=false`);
+    logger.info(`SCANNER_SCHEDULER_AUDIT: fullScannerIntervalMs=configured candidateRevalidationIntervalMs=${this.revalidationIntervalMs} fullScanInProgress=${String(this.scanInFlight)} lastRevalidationAt=${new Date().toISOString()} revalidationDurationMs=${durationMs} candidateRevalidationDurationMs=${durationMs} revalidationCycleId=${cycleId} promotedCount=${promotedCount} demotedCount=${demotedCount} reason=${reason} uiThreadBlocked=false`);
   }
 
   private tryExecuteCandidate(c: ScannerCandidate, cycleId: string): void {
@@ -3212,7 +3212,7 @@ export class MarketScanner {
               if (!submitEligibleSymbols.includes(sc.symbol)) submitEligibleSymbols.push(sc.symbol);
               try {
                 transactionAuditSymbols.push(sc.symbol);
-                await this.liveBuyFn(sc.symbol, sc);
+                await this.liveBuyFn(sc.symbol, sc, firstCandidate);
                 liveExecutionResult = { ...liveRevalResult, executed: true, adapterCalled: true, adapterResult: 'SUBMITTED' };
                 adapterCalledCount++;
                 submitAttemptedSymbols.push(sc.symbol);
@@ -4087,7 +4087,7 @@ export class MarketScanner {
     if (this.paperAutoEnabled && executionPoolSize === 0) {
       logger.info(`AUTOBOTS_COOLDOWN_DEPENDENCY_AUDIT: cooldownRemainingSec=${cooldownRemainingSec} freshCandidates=${candidates.length} buyCount=${buyCount} blocked=${!executionPlan.canExecute}`);
     }
-    logger.info(`SCANNER_SCAN_FINISH: ${snapshot.candidateCount} candidates, ${snapshot.buyCount} BUY, ${snapshot.waitCount} WAIT, ${snapshot.blockCount} BLOCK, ${snapshot.avoidCount} AVOID refPeriod=${this.scannerReferencePeriod} (${scanDurationMs}ms)`);
+    logger.info(`SCANNER_SCAN_FINISH: ${snapshot.candidateCount} candidates, ${snapshot.buyCount} BUY, ${snapshot.waitCount} WAIT, ${snapshot.blockCount} BLOCK, ${snapshot.avoidCount} AVOID refPeriod=${this.scannerReferencePeriod} scannerCycleDurationMs=${scanDurationMs} persistenceWritesPerScan=0 privateExchangeRequestsPerScan=0 (${scanDurationMs}ms)`);
     const firstCandidateMs = this.firstCandidateTime > 0 ? Math.max(0, this.firstCandidateTime - scanStartTime) : 0;
     if (this.firstCandidateTime === 0) {
       logger.info(`AUTOBOTS_STARTUP_TIMELINE_REASON: firstCandidateTime=0 reason=no_candidates_analyzed scanStartTime=${scanStartTime}`);

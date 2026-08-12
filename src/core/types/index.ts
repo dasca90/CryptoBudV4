@@ -704,6 +704,8 @@ export interface ExchangeBalance {
   asset: string;
   free: number;
   locked: number;
+  /** Canonical total when supplied by a real exchange adapter. */
+  total?: number;
 }
 
 // ── BuyRule types ────────────────────────────────────
@@ -1817,6 +1819,10 @@ export interface SymbolFilters {
   minQty: number;
   maxQty: number;
   stepSize: number;
+  /** MARKET_LOT_SIZE values; fall back to LOT_SIZE when Binance omits the filter. */
+  marketMinQty?: number;
+  marketMaxQty?: number;
+  marketStepSize?: number;
   tickSize: number;
   minPrice: number;
   maxPrice: number;

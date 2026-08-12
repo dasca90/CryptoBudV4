@@ -132,11 +132,12 @@ export const apiCredentialsStore = {
       return { ok: false, code: 'API_NOT_CONFIGURED', message: 'API credentials are not configured.' };
     }
     try {
-      const res = await fetch('https://api.binance.com/api/v3/ping', { method: 'GET' });
-      if (!res.ok) {
-        logger.info(`API_TEST_FAILED: HTTP ${res.status}`);
-        return { ok: false, code: 'API_TEST_FAILED', message: `HTTP ${res.status}` };
-      }
+      const { LiveBinanceAdapter } = await import('../exchange/LiveBinanceAdapter');
+      const adapter = new LiveBinanceAdapter(() => 'LIVE_READY', {
+        credentialsProvider: async () => resolved,
+        startPrivateStream: false,
+      });
+      await adapter.runReadinessProbe();
       logger.info('API_TEST_SUCCESS');
       return { ok: true, code: 'API_TEST_SUCCESS' };
     } catch (err) {

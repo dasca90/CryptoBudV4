@@ -115,6 +115,8 @@ export class TradingEngine {
   private runtimeHealth: TradingRuntimeHealth;
   private reconciliationService: ExecutionReconciliationService;
   private reconciliationInProgress = false;
+  private adapterEventUnsubscribers: Array<() => void> = [];
+  private targetedReconciliationTimer: ReturnType<typeof setTimeout> | null = null;
   private _accountBalance = 10000;
   private _dailyPnlUsd = 0;
   private _dailyTradeCount = 0;
@@ -199,6 +201,7 @@ export class TradingEngine {
     this.executionPersistence = new ExecutionPersistence();
     this.runtimeHealth = new TradingRuntimeHealth();
     this.reconciliationService = new ExecutionReconciliationService(this.executionPersistence, this.positionManager, this.journal, this.adapter, this.runtimeHealth);
+    this.bindAdapterExecutionEvents();
     if (this.executionPersistence.getUnresolved().length > 0) {
       this.runtimeHealth.requireReconciliation('STARTUP_UNRESOLVED_EXECUTIONS');
     }
@@ -787,11 +790,6 @@ export class TradingEngine {
     await this.reconcileExecutionState();
 
     this.tickInterval = setInterval(async () => {
-      if (this.executionPersistence.getUnresolved().length > 0 && !this.reconciliationInProgress) {
-        this.reconciliationInProgress = true;
-        try { await this.reconcileExecutionState(); }
-        finally { this.reconciliationInProgress = false; }
-      }
       await this.processDecisions();
       this.orderLockManager.cleanupStaleLocks();
     }, 5000);
@@ -1684,6 +1682,7 @@ export class TradingEngine {
         }, 'UNKNOWN_AFTER_TIMEOUT');
         this.runtimeHealth.requireReconciliation('UNKNOWN_AFTER_TIMEOUT');
         logger.error(`LIVE_ORDER_TIMEOUT_UNKNOWN_AUDIT severity=CRITICAL tradeId=${tradeId} symbol=${coin} side=${action.side} executionMode=${brain.mode} executionAdapter=${this.adapter.name} clientOrderId=${clientOrderId} exchangeOrderId=unknown requestedQty=${req.quantity} executedQty=unknown remainingQty=unknown exchangeStatus=UNKNOWN_AFTER_TIMEOUT duplicateEventDetected=false reconciliationRequired=true runtimeHealth=RECONCILIATION_REQUIRED newBuysAllowed=false exitEngineEnabled=true invariantOk=false failureReason=${submitError instanceof Error ? submitError.message : String(submitError)}`);
+        this.scheduleTargetedReconciliation(clientOrderId);
         releaseLock();
         return;
       }
@@ -2437,6 +2436,7 @@ export class TradingEngine {
         reconciliationRequired: !fillAccountingInvariantOk || postFillAnomalies.length > 0 || exchangeState === 'PARTIALLY_FILLED',
         anomalyCodes: [...postFillAnomalies, ...(!fillAccountingInvariantOk ? ['EXCHANGE_FILL_ACCOUNTING_INVARIANT_FAILED'] : [])],
       });
+      if (fillAccountingInvariantOk && postFillAnomalies.length === 0 && exchangeState === 'FILLED' && this.executionPersistence.getUnresolved().length === 0) this.runtimeHealth.markHealthy();
       logger.info(`EXCHANGE_FILL_ACCOUNTING_INVARIANT_AUDIT severity=${fillAccountingInvariantOk && postFillAnomalies.length === 0 ? 'INFO' : 'CRITICAL'} tradeId=${tradeId} symbol=${coin} side=${action.side} executionMode=${brain.mode} executionAdapter=${this.adapter.name} clientOrderId=${clientOrderId} exchangeOrderId=${result.orderId || 'unknown'} requestedQty=${req.quantity} executedQty=${executedQty} remainingQty=${remainingQty} exchangeAvgFillPrice=${result.price} localEntryPrice=${addedPosition?.avgEntryPrice ?? 'unknown'} exchangeStatus=${exchangeState} localExecutionStatus=${canonicalPosition.fillState} localPositionExists=${String(positionManagerAddSucceeded)} journalTradeExists=${String(journalRecordSucceeded)} executionRecordExists=true positionOwnershipKnown=${String(!!buySnapshot.ownerName)} strategyAtEntryKnown=${String(!!buySnapshot.selectedStrategy)} riskSnapshotPresent=${String(!!canonicalRisk)} entrySnapshotPresent=${String(!!entryConfigSnapshot)} exitManagementAttached=true duplicateEventDetected=${String(!positionUpsertCreated && !positionUpsertChanged)} idempotentUpdateApplied=true reconciliationRequired=${String(!fillAccountingInvariantOk || postFillAnomalies.length > 0 || exchangeState === 'PARTIALLY_FILLED')} runtimeHealth=${this.runtimeHealth.getSnapshot().state} newBuysAllowed=${String(this.runtimeHealth.canOpenNewBuy())} exitEngineEnabled=true invariantOk=${String(fillAccountingInvariantOk)} failureReason=${fillAccountingInvariantOk ? (postFillAnomalies.join('|') || (exchangeState === 'PARTIALLY_FILLED' ? 'PARTIAL_FILL_PENDING' : 'none')) : 'EXCHANGE_FILL_ACCOUNTING_INVARIANT_FAILED'}`);
       logger.info(`EXECUTION_TRANSACTION_AUDIT: symbol=${coin} scanId=${scannerSnapshot?.scanId ?? 'n/a'} phase=complete entryConfigSnapshotComplete=${String(!!entryConfigSnapshot)} riskSnapshotComplete=${String(!!canonicalRisk)} preRiskValidationPassed=true preRiskBlockReason=none adapterWillBeCalled=true adapterCalled=true adapterStatus=${result.status} brainApplyEntryCalled=false positionManagerAddAttempted=true positionManagerAddSucceeded=${String(positionManagerAddSucceeded)} journalRecordAttempted=true journalRecordSucceeded=${String(journalRecordSucceeded)} dailyTradeCountIncremented=${String(positionUpsertCreated)} rollbackApplied=false rollbackReason=none openPositionsBefore=${openPosSymbols.length} openPositionsAfter=${this.positionManager.getOpenPositions().length} transactionValid=${String(fillAccountingInvariantOk)}`);
       logger.info(`BUY_ORDER_LIFECYCLE_AUDIT: symbol=${coin} positionId=${tradeId} scanId=${scannerSnapshot?.scanId ?? 'n/a'} orderId=${result.orderId ?? 'n/a'} orderSide=${result.side} adapter=${this.adapter.name} adapterStatus=${result.status} submittedPrice=${req.price ?? 'market'} filledPrice=${result.price} filledQty=${result.quantity} finalOrderNotionalUsd=${(result.price * result.quantity).toFixed(8)} persistedToPositionManager=${String(positionManagerAddSucceeded)} persistedToJournal=${String(journalRecordSucceeded)} persistedOpenPosition=${String(!!brain.position)} telegramAttempted=${String(telegramAttempted)} telegramSent=${String(telegramSent)} finalStatus=OPENED`);
@@ -2590,20 +2590,55 @@ export class TradingEngine {
         quantity: finalSellQty,
         mode: brain.mode,
       };
+      const sellTradeId = `${pos.tradeId ?? coin}-exit-${decision.exitReason ?? 'EXIT'}`;
+      const sellClientOrderId = buildClientOrderId(sellTradeId, coin, 'SELL');
+      req.clientOrderId = sellClientOrderId;
+      if (!this.executionPersistence.get(sellClientOrderId)) {
+        this.executionPersistence.createIntent({
+          tradeId: sellTradeId, clientOrderId: sellClientOrderId, symbol: coin, side: 'SELL',
+          requestedQty: finalSellQty, executionMode: brain.mode, executionAdapter: this.adapter.name,
+          owner: pos.buySnapshot?.ownerName ?? 'ExitEngine', strategyAtEntry: pos.buySnapshot?.selectedStrategy ?? 'unknown',
+        });
+      }
+      this.executionPersistence.transition(sellClientOrderId, 'SUBMITTING');
 
       const unicornExit = isUnicornPositionLike(pos);
       if (unicornExit) {
         logger.info(`UNICORN_EXIT_SUBMITTED symbol=${coin} positionId=${pos.tradeId ?? 'none'} source=unicorn_hunter sharedExecutionPath=TradingEngine.executeExitWithSnapshot exitReason=${decision.exitReason ?? 'UNKNOWN'} orderSide=SELL orderQty=${finalSellQty} requestedExitPrice=${decision.exitPrice}`);
       }
-      const result = await this.adapter.submitOrder(req);
+      let result: Awaited<ReturnType<ExchangeAdapter['submitOrder']>>;
+      try {
+        result = await this.adapter.submitOrder(req);
+      } catch (submitError) {
+        this.executionPersistence.transition(sellClientOrderId, 'UNKNOWN_AFTER_TIMEOUT', { reconciliationRequired: true, anomalyCodes: ['ORDER_SUBMISSION_OUTCOME_UNKNOWN'] });
+        this.runtimeHealth.requireReconciliation('SELL_UNKNOWN_AFTER_TIMEOUT');
+        this.scheduleTargetedReconciliation(sellClientOrderId);
+        throw submitError;
+      }
+      const sellExecutedQty = Math.max(0, Number(result.quantity) || 0);
+      const sellExchangeState = normalizeExchangeOrderState(result.status, sellExecutedQty);
+      this.executionPersistence.transition(sellClientOrderId, sellExchangeState, {
+        exchangeOrderId: result.orderId || null, executedQty: sellExecutedQty,
+        remainingQty: Math.max(0, finalSellQty - sellExecutedQty), avgFillPrice: result.price,
+        lastExchangeUpdateAt: result.lastExchangeUpdateAt ?? result.timestamp,
+        reconciliationRequired: sellExchangeState === 'PARTIALLY_FILLED' || sellExchangeState === 'UNKNOWN_AFTER_TIMEOUT',
+      }, executionEventKey({ clientOrderId: sellClientOrderId, exchangeOrderId: result.orderId, status: sellExchangeState, executedQty: sellExecutedQty, avgFillPrice: result.price }));
+      if (result.status === 'partially_filled' && sellExecutedQty > 0) {
+        const localRemaining = Math.max(0, pos.quantity - sellExecutedQty);
+        this.positionManager.updatePosition(coin, { quantity: localRemaining, remainingQuantity: localRemaining, fillState: 'PARTIALLY_FILLED', reconciliationRequired: true });
+        this.runtimeHealth.requireReconciliation('PARTIAL_SELL_PENDING');
+        logger.warn(`LIVE_PARTIAL_FILL_AUDIT symbol=${coin} side=SELL clientOrderId=${sellClientOrderId} exchangeOrderId=${result.orderId} executedQty=${sellExecutedQty} remainingLocalQty=${localRemaining} exitEngineEnabled=true`);
+        releaseSellLock();
+        return;
+      }
       if (result.status !== 'filled') {
         releaseSellLock();
         logger.warn(`Exit order rejected for ${coin}`);
         return;
       }
 
-      const exitPrice = decision.exitPrice;
-      const sellQty = finalSellQty > 0 ? finalSellQty : pos.quantity;
+      const exitPrice = result.price;
+      const sellQty = sellExecutedQty;
       const pnl = (exitPrice - pos.avgEntryPrice) * sellQty;
       const pnlPct = (exitPrice - pos.avgEntryPrice) / pos.avgEntryPrice * 100;
       const durationMs = Date.now() - pos.openedAt;
@@ -2756,6 +2791,8 @@ export class TradingEngine {
           brain.applyExit();
         }
         await this.journal.deleteOpenPosition(snapshot.tradeId);
+        this.executionPersistence.update(sellClientOrderId, { positionAccounted: true, journalAccounted: true, exitManagementAttached: true, reconciliationRequired: false });
+        if (this.executionPersistence.getUnresolved().length === 0) this.runtimeHealth.markHealthy();
       }
       releaseSellLock();
       emitVisualExecutionEvent({
@@ -2772,47 +2809,6 @@ export class TradingEngine {
     } catch (e) {
       releaseSellLock();
       logger.error(`Execute exit error [${coin}]: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-
-  private async executeExit(action: ExitAction, brain: TraderBrain): Promise<void> {
-    try {
-      const price = await this.adapter.getMarketPrice(action.coin);
-      const req: OrderRequest = {
-        coin: action.coin,
-        side: action.side,
-        quantity: action.quantity,
-        mode: brain.mode,
-      };
-
-      const result = await this.adapter.submitOrder(req);
-      if (result.status === 'filled') {
-        const exitPrice = result.price;
-        const pnl = (exitPrice - action.entryPrice) * action.quantity;
-        const pnlPct = (exitPrice - action.entryPrice) / action.entryPrice * 100;
-
-        await this.journal.recordTrade({
-          tradeId: nextTradeId(),
-          coin: action.coin,
-          mode: brain.mode,
-          side: action.side,
-          adapter: this.adapter.name,
-          entryPrice: action.entryPrice,
-          exitPrice,
-          quantity: action.quantity,
-          pnl,
-          pnlPercent: pnlPct,
-          entryTime: brain.position ? new Date(brain.position.openedAt).toISOString() : new Date().toISOString(),
-          exitTime: new Date().toISOString(),
-          status: 'closed',
-          strategy: action.reason,
-        });
-
-        brain.applyExit();
-        logger.trade(`EXIT ${action.coin} @ ${exitPrice} PnL:${pnl.toFixed(2)} (${pnlPct.toFixed(2)}%)`);
-      }
-    } catch (e) {
-      logger.error(`Execute exit error [${action.coin}]: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -2834,6 +2830,10 @@ export class TradingEngine {
   getExecutionPersistence(): ExecutionPersistence { return this.executionPersistence; }
   getRuntimeHealth() { return this.runtimeHealth.getSnapshot(); }
   async reconcileExecutionState() { return this.reconciliationService.reconcilePendingOrders(); }
+  getReconciliationPerformanceMetrics() { return this.reconciliationService.getPerformanceMetrics(); }
+  async reconcileExecutionStateWithAdapter(adapter: ExchangeAdapter) {
+    return new ExecutionReconciliationService(this.executionPersistence, this.positionManager, this.journal, adapter, this.runtimeHealth).reconcilePendingOrders();
+  }
   getOrderLockManager(): OrderLockManager { return this.orderLockManager; }
 
   getAccountBalance(): number { return this._accountBalance; }
@@ -2869,11 +2869,14 @@ export class TradingEngine {
     }));
   }
 
-  setAdapter(adapter: ExchangeAdapter): void {
+  async switchAdapter(adapter: ExchangeAdapter): Promise<void> {
     const wasRunning = this.running;
-    const applyAdapter = () => {
+    if (wasRunning) await this.stop();
+    {
+      for (const unsubscribe of this.adapterEventUnsubscribers.splice(0)) unsubscribe();
       this.adapter = adapter;
       this.reconciliationService = new ExecutionReconciliationService(this.executionPersistence, this.positionManager, this.journal, adapter, this.runtimeHealth);
+      this.bindAdapterExecutionEvents();
       this.scannerBrainService = new ScannerBrainService(this.brains, adapter, this.ml, {
         btcEnabled: this.btcAnchorEnabled,
         ethEnabled: this.ethAnchorEnabled,
@@ -2886,13 +2889,42 @@ export class TradingEngine {
         newBrain.setAnchorSettings(this.btcAnchorEnabled, this.ethAnchorEnabled);
         this.brains.set(config.coin, newBrain);
       }
-      if (wasRunning) this.start();
-    };
-    if (wasRunning) void this.stop().then(applyAdapter);
-    else applyAdapter();
+    }
+    if (wasRunning) await this.start();
+  }
+
+  setAdapter(adapter: ExchangeAdapter): void {
+    void this.switchAdapter(adapter);
   }
 
   getAdapter(): ExchangeAdapter { return this.adapter; }
+
+  private bindAdapterExecutionEvents(): void {
+    const eventAdapter = this.adapter as ExchangeAdapter & {
+      onOrderUpdate?: (listener: (order: Awaited<ReturnType<ExchangeAdapter['submitOrder']>>) => void) => () => void;
+      onPrivateStreamState?: (listener: (state: string) => void) => () => void;
+    };
+    if (eventAdapter.onOrderUpdate) {
+      this.adapterEventUnsubscribers.push(eventAdapter.onOrderUpdate(order => { void this.reconciliationService.reconcileOrderUpdate(order); }));
+    }
+    if (eventAdapter.onPrivateStreamState) {
+      this.adapterEventUnsubscribers.push(eventAdapter.onPrivateStreamState(state => {
+        if (state === 'DEGRADED' || state === 'DISCONNECTED' || state === 'RECONNECTING') this.runtimeHealth.requireReconciliation(`PRIVATE_STREAM_${state}`);
+        if (state === 'CONNECTED') void this.reconcileExecutionState();
+      }));
+    }
+  }
+
+  private scheduleTargetedReconciliation(clientOrderId: string): void {
+    if (this.targetedReconciliationTimer) return;
+    this.targetedReconciliationTimer = setTimeout(async () => {
+      this.targetedReconciliationTimer = null;
+      if (!this.executionPersistence.get(clientOrderId)?.reconciliationRequired || this.reconciliationInProgress) return;
+      this.reconciliationInProgress = true;
+      try { await this.reconcileExecutionState(); }
+      finally { this.reconciliationInProgress = false; }
+    }, 1500);
+  }
   getML(): MLPredictor { return this.ml; }
 
   async setAnchorSettingsOnBrains(btcEnabled: boolean, ethEnabled: boolean): Promise<void> {

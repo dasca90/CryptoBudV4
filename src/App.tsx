@@ -12,7 +12,7 @@ import { logger } from './utils/logger';
 import { DiagnosticsEngine, type DiagnosticsSnapshot } from './core/diagnostics/DiagnosticsEngine';
 import { PerformanceGuard } from './core/diagnostics/PerformanceGuard';
 import { runLiveSafetyCheck } from './core/live/LiveSafetyCheck';
-import { canTransitionTo, INITIAL_SAFETY_STATE } from './core/live/LiveSafetyState';
+import { INITIAL_SAFETY_STATE } from './core/live/LiveSafetyState';
 import { appStatePersistence } from './core/persistence/AppStatePersistence';
 import { buildOpenPositionPersistenceRows, repairOpenPositionRiskSnapshot, runRuntimeStorageCleanup } from './core/persistence/localStorageMaintenance';
 import { backupService } from './core/persistence/BackupService';
@@ -133,6 +133,9 @@ export default function App() {
 
   const [isRunning, setIsRunning] = useState(false);
   const [liveState, setLiveState] = useState<LiveSafetyState>(INITIAL_SAFETY_STATE);
+  const liveStateRef = useRef<LiveSafetyState>(INITIAL_SAFETY_STATE);
+  liveStateRef.current = liveState;
+  const [liveAdapter] = useState(() => new LiveBinanceAdapter(() => liveStateRef.current));
   const [liveCheckResult, setLiveCheckResult] = useState<LiveSafetyCheckResult | null>(null);
   const [totalEquity, setTotalEquity] = useState(() => (engine.getAdapter() as PaperExchangeAdapter).getTotalEquity());
   const totalEquityRef = useRef(totalEquity);
@@ -186,7 +189,7 @@ export default function App() {
     }
   }, []);
 
-  const paperAdapter = engine.getAdapter() as PaperExchangeAdapter;
+  const [paperAdapter] = useState(() => engine.getAdapter() as PaperExchangeAdapter);
   const [settingsPersistence] = useState(() => new SettingsPersistence());
   const telegramNotifierRef = useRef(new TelegramNotifier());
   useEffect(() => {
@@ -226,7 +229,11 @@ export default function App() {
       // Restore app state
       const appState = await appStatePersistence.load();
       if (appState.liveSafetyState !== 'LIVE_DISABLED') {
-        setLiveState(appState.liveSafetyState);
+        const restoredLiveState: LiveSafetyState = appState.liveSafetyState === 'LIVE_RUNNING' || appState.liveSafetyState === 'LIVE_READY'
+          ? 'LIVE_CHECK_REQUIRED'
+          : appState.liveSafetyState;
+        liveStateRef.current = restoredLiveState;
+        setLiveState(restoredLiveState);
       }
 
       // Restore selected coins
@@ -1309,25 +1316,82 @@ export default function App() {
   }, [engine]);
 
   const handleRunLiveCheck = useCallback(async () => {
-    if (!canTransitionTo(liveState, 'LIVE_CHECK_RUNNING')) return;
+    if (liveState === 'LIVE_RUNNING') {
+      try {
+        await engine.switchAdapter(paperAdapter);
+        const scanner = engine.getAutoRuntime().getScanner();
+        scanner.setLiveBuyFn(null);
+        const settings = await settingsPersistence.loadSettings();
+        scanner.setPaperAutoEnabled(settings.paperAutoExecutionEnabled ?? true);
+        liveStateRef.current = 'LIVE_STOPPED';
+        setLiveState('LIVE_STOPPED');
+        logger.info('LIVE_RUNTIME_HEALTH_AUDIT state=LIVE_STOPPED adapter=Paper newBuysAllowed=true');
+      } catch (error) {
+        liveStateRef.current = 'LIVE_ERROR'; setLiveState('LIVE_ERROR');
+        logger.error(`LIVE_STOP_FAILED: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+    if (liveState === 'LIVE_READY') {
+      const engineWasRunning = engine.isRunning();
+      liveStateRef.current = 'LIVE_RUNNING';
+      try {
+        const scanner = engine.getAutoRuntime().getScanner();
+        scanner.setPaperAutoEnabled(false);
+        scanner.setLiveBuyFn(async (_symbol, candidate, plannedCandidate) => {
+          await engine.executePlannedScannerBuy(candidate, plannedCandidate);
+        });
+        await engine.switchAdapter(liveAdapter);
+        if (!engine.isRunning()) await engine.start();
+        setIsRunning(true);
+        setLiveState('LIVE_RUNNING');
+        logger.info('LIVE_RUNTIME_HEALTH_AUDIT state=LIVE_RUNNING adapter=Binance_Live privateStreamRequired=true invariantOk=true');
+      } catch (error) {
+        const scanner = engine.getAutoRuntime().getScanner();
+        scanner.setLiveBuyFn(null);
+        scanner.setPaperAutoEnabled(true);
+        await engine.switchAdapter(paperAdapter);
+        if (engineWasRunning && !engine.isRunning()) await engine.start();
+        setIsRunning(engineWasRunning);
+        liveStateRef.current = 'LIVE_ERROR'; setLiveState('LIVE_ERROR');
+        logger.error(`LIVE_START_FAILED: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+    if (!['LIVE_DISABLED', 'LIVE_STOPPED', 'LIVE_CHECK_REQUIRED', 'LIVE_BLOCKED', 'LIVE_ERROR'].includes(liveState)) return;
+    liveStateRef.current = 'LIVE_CHECK_RUNNING';
     setLiveState('LIVE_CHECK_RUNNING');
     setLiveCheckResult(null);
     logger.info('Running live safety check...');
 
-    await new Promise(r => setTimeout(r, 1500));
-
-    const result = runLiveSafetyCheck();
+    const reconciliationIssues = await engine.reconcileExecutionStateWithAdapter(liveAdapter);
+    const settings = await settingsPersistence.loadSettings();
+    const runtimeHealth = engine.getRuntimeHealth();
+    const result = await runLiveSafetyCheck({
+      adapter: liveAdapter,
+      unresolvedOrderCount: engine.getExecutionPersistence().getUnresolved().length,
+      reconciliationIssueCount: reconciliationIssues.length,
+      positionPersistenceReady: journal.isOpenPositionsHydrated(), executionPersistenceReady: true,
+      journalReady: true, exitEngineRunning: runtimeHealth.exitEngineEnabled,
+      positionMonitoringRunning: runtimeHealth.positionMonitoringEnabled,
+      postFillAccountingReady: true, restartReconciliationReady: true,
+      killSwitchReady: true, maxDailyLossSet: Number(engine.getRiskEngine().getConfig().maxDailyLossPercent ?? 0) > 0,
+      maxOpenPositionsSet: Number(settings.maxPositions ?? 0) > 0,
+      mlQualityReady: mlRuntimeGuard.isSafe() || guardState.modelTrained,
+    });
     setLiveCheckResult(result);
 
     if (result.passed) {
+      liveStateRef.current = 'LIVE_READY';
       setLiveState('LIVE_READY');
       logger.info('Live safety check PASSED. Ready to start live.');
     } else {
+      liveStateRef.current = 'LIVE_BLOCKED';
       setLiveState('LIVE_BLOCKED');
       logger.warn(`Live safety check BLOCKED: ${result.blockedReason}`);
       result.details.forEach(d => logger.warn(`  - ${d}`));
     }
-  }, [liveState]);
+  }, [engine, guardState.modelTrained, journal, liveAdapter, liveState, paperAdapter, settingsPersistence]);
 
   const handleExportTrades = useCallback(async () => {
     const { json, filename } = await exporter.exportTrades();

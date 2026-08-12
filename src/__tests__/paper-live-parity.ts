@@ -149,7 +149,7 @@ async function main() {
     await blockedAdapter.submitOrder({ coin: 'BTCUSDT', side: 'BUY', quantity: 0.001, mode: 'AUTO' });
     assert(false, 'LiveBinanceAdapter should throw LIVE_TRADING_NOT_ENABLED');
   } catch (e) {
-    assert(e instanceof Error && e.message === 'LIVE_TRADING_NOT_ENABLED', `Live adapter throws LIVE_TRADING_NOT_ENABLED (got: ${e instanceof Error ? e.message : String(e)})`);
+    assert(e instanceof Error && e.message.startsWith('LIVE_TRADING_NOT_ENABLED'), `Live adapter throws LIVE_TRADING_NOT_ENABLED (got: ${e instanceof Error ? e.message : String(e)})`);
   }
 
   // Demo adapter never throws for a valid order
@@ -159,7 +159,15 @@ async function main() {
   // ── Test 5: LIVE_READY state allows live adapter connection ──
   console.log('\n── Test 5: LIVE_READY state allows live adapter connection ──\n');
 
-  const readyAdapter = new LiveBinanceAdapter(() => 'LIVE_READY' as LiveSafetyState);
+  const readyAdapter = new LiveBinanceAdapter(() => 'LIVE_READY' as LiveSafetyState, {
+    credentialsProvider: async () => ({ apiKey: 'mock-key', apiSecret: 'mock-secret' }),
+    startPrivateStream: false,
+    fetchImpl: async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/api/v3/time') return new Response(JSON.stringify({ serverTime: Date.now() }), { status: 200 });
+      return new Response(JSON.stringify({ canTrade: true, accountType: 'SPOT', permissions: ['SPOT'], balances: [] }), { status: 200 });
+    },
+  });
   try {
     await readyAdapter.connect();
     assert(true, 'LiveBinanceAdapter.connect() succeeds in LIVE_READY state');
