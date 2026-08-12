@@ -1,6 +1,7 @@
 import { strict as assert } from 'assert';
 import { buildExecutionPlan } from '../core/scanner/ExecutionPlanner';
 import type { EntryGateOutput, ScannerCandidate, ScannerSnapshot } from '../core/types';
+import { MarketDataFeed } from '../utils/MarketDataFeed';
 
 function gateAllow(): EntryGateOutput {
   return {
@@ -173,6 +174,8 @@ function planFor(c: ScannerCandidate) {
   });
 }
 
+MarketDataFeed.getInstance().setManualPrice('SOLUSDT', 1);
+MarketDataFeed.getInstance().setManualPrice('ETHUSDT', 1);
 const mlPlan = planFor(candidate('SOLUSDT', 'ML_PREDICT_BUY'));
 assert.equal(mlPlan.selectedCandidates.length, 1);
 assert.equal(mlPlan.selectedCandidates[0].scannerAutoEntryConfigSnapshot?.source, 'ML_PREDICT_BUY');

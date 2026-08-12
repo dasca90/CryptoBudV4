@@ -127,7 +127,8 @@ async function main() {
   const snapB = await scannerB.scan('WATCHLIST');
   const blockCand = snapB.candidates.find(c => c.symbol === 'BTCUSDT');
   assert(blockCand !== undefined, 'BTCUSDT candidate exists');
-  assert(blockCand!.blockReasons.some(r => r.includes('STALE')), 'BLOCK reason includes STALE');
+  assert(!blockCand!.blockReasons.some(r => r.includes('PRICE_STALE')), 'historical price stale reason is not retained as current when canonical feed is fresh');
+  assert(blockCand!.freshnessAtEvaluation?.historicalFreshnessBlockers.includes('BLOCK_PRICE_STALE') === true, 'historical price stale reason remains available for audit');
   assert(snapB.diagnostics.blockedByStalePrice >= 1, 'Diagnostics count stale price blocks');
 
   // ── C. Scanner blocks BTC dump for alt ──

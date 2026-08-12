@@ -1147,6 +1147,9 @@ export interface ScannerCandidate {
   dataQuality?: MarketDataQualityLevel;
   priceFresh?: boolean;
   bookFresh?: boolean;
+  freshnessAtEvaluation?: import('../market-data/canonical-market-freshness').CandidateFreshnessAtEvaluation;
+  currentMarketFreshness?: import('../market-data/canonical-market-freshness').CanonicalSymbolMarketData;
+  lastMarketFreshnessRevalidatedAt?: string;
   filtersOk?: boolean;
   isTradable?: boolean;
   minNotional?: number;

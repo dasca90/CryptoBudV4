@@ -70,8 +70,8 @@ export function buildCanonicalEntryGateSnapshot(
     ? asBlocked(pickFirstReason(blockReasons, 'spread') ?? 'BLOCK_SPREAD_TOO_HIGH')
     : asPass();
 
-  const priceFreshnessResult = candidate.priceFresh === false || candidate.bookFresh === false || hasBlock('stale') || hasBlock('book_stale')
-    ? asBlocked(candidate.bookFresh === false || hasBlock('book_stale') ? (pickFirstReason(blockReasons, 'book_stale') ?? 'BLOCK_BOOK_STALE') : (pickFirstReason(blockReasons, 'stale') ?? 'BLOCK_PRICE_STALE'))
+  const priceFreshnessResult = candidate.priceFresh === false || candidate.bookFresh === false
+    ? asBlocked(candidate.bookFresh === false ? 'BLOCK_BOOK_STALE' : 'BLOCK_PRICE_STALE')
     : asPass();
 
   const tpRoomResult = !candidate.tpRoomOk || hasBlock('tp')

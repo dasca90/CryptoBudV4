@@ -2,6 +2,8 @@ import type { AutoBotsCanonicalState } from '../runtime/autobots-state';
 import type { AutoBotsFinalStrategyResolution } from './AutoStrategyRouter';
 import type { ScannerCandidate } from '../types';
 import { logger } from '../../utils/logger';
+import { MarketDataFeed } from '../../utils/MarketDataFeed';
+import { rehydrateCandidateMarketFreshness } from '../market-data/canonical-market-freshness';
 
 export type CandidateLifecycleStatus =
   | 'BUY'
@@ -881,6 +883,11 @@ export function promoteCandidateToBuyReady(candidate: ScannerCandidate, context:
 }
 
 export function revalidateCandidateForExecution(candidate: ScannerCandidate): ScannerCandidate {
+  candidate = rehydrateCandidateMarketFreshness({
+    candidate,
+    current: MarketDataFeed.getInstance().getCanonicalSymbolMarketData(candidate.symbol),
+    consumer: 'CandidateLifecycle',
+  });
   const requestedNextStatus = candidate.status === 'BUY' ? 'BUY' : candidate.status;
   return applyCandidatePromotionGuard({
     candidate,

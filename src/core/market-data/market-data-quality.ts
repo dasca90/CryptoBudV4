@@ -23,7 +23,7 @@ export function evaluateMarketDataQuality(input: MarketDataQualityInput): Market
   const warnings: string[] = [];
 
   const priceFresh = input.price > 0 && input.priceAgeMs < STALE_PRICE_MS;
-  const bookFresh = input.bidPrice > 0 && input.askPrice > 0 && input.bookAgeMs < STALE_BOOK_MS;
+  const bookFresh = input.bidPrice > 0 && input.askPrice > 0 && input.askPrice >= input.bidPrice && input.bookAgeMs < STALE_BOOK_MS;
   const spreadOk = input.spreadPct >= 0 && input.spreadPct <= MAX_SPREAD_PCT;
   const filtersOk = input.exchangeInfoAvailable && input.filters !== null && input.filters.isSpotTradingAllowed;
 

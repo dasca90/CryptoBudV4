@@ -9,6 +9,8 @@ import { logStrategyAudit } from "../../core/strategy-audit/strategy-audit-logge
 import { getExecutionAdapterDisplay, getExecutionModeDisplay } from "../execution/executionDisplay";
 import { getStalePriceAgeMs } from "../../core/market-data/market-data-quality";
 import { buildClosedFeeAccounting, buildOpenFeeEstimate } from "../../core/accounting/feeAccounting";
+import { MarketDataFeed } from "../../utils/MarketDataFeed";
+import { isMarketFreshnessBlocker, rehydrateCandidateMarketFreshness } from "../../core/market-data/canonical-market-freshness";
 
 function toDataQuality(v?: string): "GOOD" | "MEDIUM" | "BAD" | "UNKNOWN" {
   if (v === "GOOD" || v === "MEDIUM" || v === "BAD") return v;
@@ -552,6 +554,11 @@ function resolveTopCandidateTrend(candidate: ScannerCandidate): { displayedTrend
 }
 
 export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, orderLockActive = false, auditDetail: 'summary' | 'full' = 'full', decisionsBySymbol?: ReadonlyMap<string, import('../../core/scanner/executionDecision').ExecutionDecision>): TradeV4CandidateView {
+  candidate = rehydrateCandidateMarketFreshness({
+    candidate,
+    current: MarketDataFeed.getInstance().getCanonicalSymbolMarketData(candidate.symbol),
+    consumer: 'TopCandidates.SelectedCoin',
+  });
   candidate = normalizeCandidateDisplayStatus(candidate);
   const strategyAudit = buildStrategyAuditSnapshotFromCandidate(candidate);
   logStrategyAudit(strategyAudit, { detailLevel: auditDetail });
@@ -675,14 +682,17 @@ export function mapScannerCandidateToTradeV4View(candidate: ScannerCandidate, or
       const scanKey = `${(candidate as any).scanId ?? (candidate as any).scannerScanId ?? ''}:${candidate.symbol}`;
       const d = decisionsBySymbol?.get(scanKey) ?? decisionsBySymbol?.get(candidate.symbol);
       if (!d) return undefined;
+      const currentDecisionReason = isMarketFreshnessBlocker(d.finalNoBuyReason)
+        ? (candidate.currentMarketFreshness?.currentFreshnessBlocker ?? 'none')
+        : d.finalNoBuyReason;
       return {
         scanId: d.scanId,
           candidateRank: d.candidateRank,
           selectedForExecution: d.selectedForExecution,
-          finalNoBuyReason: d.finalNoBuyReason,
-          finalNoBuyReasonCode: d.finalNoBuyReasonCode,
-          finalNoBuyReasonLabel: d.finalNoBuyReasonLabel,
-          actionableNoBuyReason: d.actionableNoBuyReason,
+          finalNoBuyReason: currentDecisionReason,
+          finalNoBuyReasonCode: isMarketFreshnessBlocker(d.finalNoBuyReasonCode) ? currentDecisionReason : d.finalNoBuyReasonCode,
+          finalNoBuyReasonLabel: isMarketFreshnessBlocker(d.finalNoBuyReasonLabel) ? currentDecisionReason : d.finalNoBuyReasonLabel,
+          actionableNoBuyReason: isMarketFreshnessBlocker(d.actionableNoBuyReason) ? currentDecisionReason : d.actionableNoBuyReason,
         technicalNoBuyReason: d.technicalNoBuyReason,
         secondaryDiagnosticReasons: d.secondaryDiagnosticReasons,
         renderedUserMessage: d.renderedUserMessage,
@@ -1364,6 +1374,12 @@ export function buildTradeV4PageModel(input: {
   restoringOpenPositions?: boolean;
 }): TradeV4PageModel {
   const rawCandidates = input.scannerSnapshot?.candidates ?? [];
+  if (input.scannerSnapshot && rawCandidates.length > 0) {
+    const finishedAtMs = Date.parse(input.scannerSnapshot.finishedAt ?? input.scannerSnapshot.startedAt ?? '');
+    const scannerSnapshotAgeMs = Number.isFinite(finishedAtMs) ? Math.max(0, Date.now() - finishedAtMs) : 0;
+    const sample = MarketDataFeed.getInstance().getCanonicalSymbolMarketData(rawCandidates[0].symbol);
+    logger.throttled('INFO', `SCANNER_SNAPSHOT_VS_MARKET_FRESHNESS_AUDIT: scanId=${input.scannerSnapshot.scanId} scannerSnapshotAgeMs=${scannerSnapshotAgeMs} scannerSnapshotStale=${String(scannerSnapshotAgeMs > 60000)} canonicalPriceAgeMs=${sample.priceAgeMs} canonicalBookAgeMs=${sample.bookAgeMs} priceFresh=${String(sample.priceFresh)} bookFresh=${String(sample.bookFresh)} marketDataStale=${String(!sample.priceFresh || !sample.bookFresh)}`, `snapshot_vs_market_${input.scannerSnapshot.scanId}`, 10000);
+  }
   const planDecisions = input.scannerSnapshot?.executionPlan?.decisions;
   const decisionsBySymbol: ReadonlyMap<string, import('../../core/scanner/executionDecision').ExecutionDecision> | undefined = planDecisions
     ? new Map(planDecisions.flatMap(d => {

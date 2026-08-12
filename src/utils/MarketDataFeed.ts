@@ -29,8 +29,15 @@ export class MarketDataFeed {
     if (cached && Date.now() - cached.timestamp < 2000) return cached;
 
     const price = await this.fetchPrice(coin);
-    this.prices.set(coin, price);
+    if (this.isValidBookTicker(price)) this.prices.set(coin, price);
     return price;
+  }
+
+  private isValidBookTicker(price: MarketPrice): boolean {
+    return Number.isFinite(price.last) && price.last > 0
+      && Number.isFinite(price.bid) && price.bid > 0
+      && Number.isFinite(price.ask) && price.ask > 0
+      && price.ask >= price.bid;
   }
 
   getLastPrice(coin: string): number {
@@ -89,9 +96,11 @@ export class MarketDataFeed {
       this.intervals.set(coin, setInterval(async () => {
         try {
           const price = await this.fetchPrice(coin);
-          this.prices.set(coin, price);
-          for (const cb of this.listeners.get(coin) || []) {
-            cb(price);
+          // A failed/invalid attempt must not make a millisecond-old zero quote
+          // look like the last valid market event.
+          if (this.isValidBookTicker(price)) {
+            this.prices.set(coin, price);
+            for (const cb of this.listeners.get(coin) || []) cb(price);
           }
         } catch { /* retry next cycle */ }
       }, 3000));
@@ -185,13 +194,24 @@ export class MarketDataFeed {
   }
 
   getMarketDataQuality(symbol: string): { quality: MarketDataQualityLevel; priceFresh: boolean; bookFresh: boolean; spreadOk: boolean; filtersOk: boolean } {
+    const current = this.getCanonicalSymbolMarketData(symbol);
+    return {
+      quality: current.quality,
+      priceFresh: current.priceFresh,
+      bookFresh: current.bookFresh,
+      spreadOk: current.spreadOk,
+      filtersOk: current.filtersOk,
+    };
+  }
+
+  getCanonicalSymbolMarketData(symbol: string, now = Date.now()): import('../core/market-data/canonical-market-freshness').CanonicalSymbolMarketData {
     const p = this.prices.get(symbol);
     const price = p?.last ?? 0;
     const bid = p?.bid ?? 0;
     const ask = p?.ask ?? 0;
-    const priceAgeMs = this.getPriceAgeMs(symbol);
-    const bookAgeMs = this.getBookAgeMs(symbol);
-    const spreadPct = this.getSpreadPct(symbol);
+    const priceAgeMs = p ? Math.max(0, now - p.timestamp) : 999999;
+    const bookAgeMs = p ? Math.max(0, now - p.timestamp) : 999999;
+    const spreadPct = !p || ask <= 0 ? 999 : ((ask - bid) / ask) * 100;
     const filters = this.getSymbolFilters(symbol);
 
     const result = evaluateMarketDataQuality({
@@ -200,15 +220,33 @@ export class MarketDataFeed {
       exchangeInfoAvailable: this.exchangeInfo !== null, filters,
     });
 
-    logger.throttled('INFO', `BOOK_TICKER_FRESHNESS_THRESHOLD_AUDIT: symbol=${symbol} priceAgeMs=${priceAgeMs} bookAgeMs=${bookAgeMs} stalePriceMs=${getStalePriceAgeMs()} staleBookMs=${getStaleBookAgeMs()} sameTimestamp=${priceAgeMs === bookAgeMs ? 'true' : 'false'} priceFresh=${String(result.priceFresh)} bookFresh=${String(result.bookFresh)} blockBookStale=${String(!result.bookFresh)}`, `book_freshness_${symbol}`, 30000);
-
-    return {
+    const current = {
+      symbol,
+      price,
+      bid,
+      ask,
+      priceTimestamp: p?.timestamp ?? null,
+      bookTimestamp: p?.timestamp ?? null,
+      priceAgeMs,
+      bookAgeMs,
+      priceValid: Number.isFinite(price) && price > 0,
+      bookValid: Number.isFinite(bid) && bid > 0 && Number.isFinite(ask) && ask > 0 && ask >= bid,
       quality: result.quality,
       priceFresh: result.priceFresh,
       bookFresh: result.bookFresh,
       spreadOk: result.spreadOk,
       filtersOk: result.filtersOk,
+      source: 'MarketDataFeed.shared_bookTicker_cache' as const,
+      currentFreshnessBlocker: !result.priceFresh && !result.bookFresh
+        ? 'PRICE_NOT_FRESH / BOOK_STALE' as const
+        : !result.priceFresh
+          ? 'PRICE_NOT_FRESH' as const
+          : !result.bookFresh
+            ? 'BOOK_STALE' as const
+            : null,
     };
+    logger.throttled('INFO', `BOOK_TICKER_FRESHNESS_THRESHOLD_AUDIT: symbol=${symbol} priceAgeMs=${priceAgeMs} bookAgeMs=${bookAgeMs} stalePriceMs=${getStalePriceAgeMs()} staleBookMs=${getStaleBookAgeMs()} sameTimestamp=${priceAgeMs === bookAgeMs ? 'true' : 'false'} priceFresh=${String(result.priceFresh)} bookFresh=${String(result.bookFresh)} blockBookStale=${String(!result.bookFresh)}`, `book_freshness_${symbol}`, 30000);
+    return current;
   }
 
   destroy() {

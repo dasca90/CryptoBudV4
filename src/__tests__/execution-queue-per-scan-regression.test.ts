@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { buildExecutionPlan } from '../core/scanner/ExecutionPlanner';
 import type { EntryGateOutput, ScannerCandidate, ScannerSnapshot } from '../core/types';
+import { MarketDataFeed } from '../utils/MarketDataFeed';
 
 function gateAllow(): EntryGateOutput {
   return {
@@ -29,6 +30,7 @@ function gateAllow(): EntryGateOutput {
 }
 
 function candidate(symbol: string, overrides: Partial<ScannerCandidate> & Record<string, unknown> = {}): ScannerCandidate {
+  MarketDataFeed.getInstance().setManualPrice(symbol, 1);
   return {
     candidateId: `queue_${symbol}`,
     symbol,

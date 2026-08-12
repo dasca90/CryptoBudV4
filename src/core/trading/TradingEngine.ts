@@ -452,6 +452,8 @@ export class TradingEngine {
       return;
     }
 
+    const currentMarket = this.feed.getCanonicalSymbolMarketData(snapshot.symbol);
+    logger.info(`CANONICAL_MARKET_DATA_CONSUMER_AUDIT: symbol=${snapshot.symbol} consumer=TradingEngine.manual scanId=manual candidateId=manual price=${currentMarket.price} bid=${currentMarket.bid} ask=${currentMarket.ask} priceAgeMs=${currentMarket.priceAgeMs} bookAgeMs=${currentMarket.bookAgeMs} priceFresh=${String(currentMarket.priceFresh)} bookFresh=${String(currentMarket.bookFresh)} source=${currentMarket.source}`);
     const gateInput: EntryGateInput = {
       coin: snapshot.symbol,
       side: 'BUY',
@@ -465,7 +467,7 @@ export class TradingEngine {
       recentLoss: false,
       spreadOk: snapshot.spreadPct < 0.5,
       volumePass: !snapshot.traderBrainDecision.blockReasons.some(r => r.includes('volume')),
-      priceFresh: Date.now() - new Date(snapshot.analyzedAt).getTime() < 30000,
+      priceFresh: currentMarket.priceFresh,
       btcDumping: snapshot.traderBrainDecision.blockReasons.some(r => r.includes('btc') || r.includes('dump')),
       marketRegimeUnsafe: snapshot.traderBrainDecision.blockReasons.some(r => r.includes('regime')),
       reboundConfirmed: !snapshot.traderBrainDecision.blockReasons.some(r => r.includes('rebound')),
@@ -473,8 +475,8 @@ export class TradingEngine {
       tpRoomOk: !snapshot.traderBrainDecision.blockReasons.some(r => r.includes('tp') || r.includes('room')),
       isVeryHighRisk: snapshot.traderBrainDecision.blockReasons.some(r => r.includes('risk')),
       isLive: this.adapter.isLive,
-      marketDataOnline: this.feed.getMarketDataQuality(snapshot.symbol).quality !== 'OFFLINE',
-      bookFresh: this.feed.getMarketDataQuality(snapshot.symbol).bookFresh,
+      marketDataOnline: currentMarket.quality !== 'OFFLINE',
+      bookFresh: currentMarket.bookFresh,
       symbolTradable: this.feed.isSymbolTradable(snapshot.symbol),
     };
 
@@ -1086,7 +1088,8 @@ export class TradingEngine {
       return;
     }
 
-    const mq = this.feed.getMarketDataQuality(decision.symbol);
+    const currentMarket = this.feed.getCanonicalSymbolMarketData(decision.symbol);
+    logger.info(`CANONICAL_MARKET_DATA_CONSUMER_AUDIT: symbol=${decision.symbol} consumer=TradingEngine.auto scanId=brain candidateId=brain price=${currentMarket.price} bid=${currentMarket.bid} ask=${currentMarket.ask} priceAgeMs=${currentMarket.priceAgeMs} bookAgeMs=${currentMarket.bookAgeMs} priceFresh=${String(currentMarket.priceFresh)} bookFresh=${String(currentMarket.bookFresh)} source=${currentMarket.source}`);
     const filters = this.feed.getSymbolFilters(decision.symbol);
 
     const gateInput: EntryGateInput = {
@@ -1100,9 +1103,9 @@ export class TradingEngine {
       currentPositions: this.countOpenPositions(),
       maxPositions: 10,
       recentLoss: false,
-      spreadOk: !decision.blockReasons.some(r => r.includes('spread')) && mq.spreadOk,
+      spreadOk: !decision.blockReasons.some(r => r.includes('spread')) && currentMarket.spreadOk,
       volumePass: !decision.blockReasons.some(r => r.includes('volume')),
-      priceFresh: !decision.blockReasons.some(r => r.includes('stale') || r.includes('price')) && mq.priceFresh,
+      priceFresh: currentMarket.priceFresh,
       btcDumping: decision.blockReasons.some(r => r.includes('btc') || r.includes('dump')),
       marketRegimeUnsafe: decision.blockReasons.some(r => r.includes('regime')),
       reboundConfirmed: !decision.blockReasons.some(r => r.includes('rebound')),
@@ -1110,8 +1113,8 @@ export class TradingEngine {
       tpRoomOk: !decision.blockReasons.some(r => r.includes('tp') || r.includes('room')),
       isVeryHighRisk: decision.blockReasons.some(r => r.includes('risk') || r.includes('very_high')),
       isLive: this.adapter.isLive,
-      marketDataOnline: mq.quality !== 'OFFLINE',
-      bookFresh: mq.bookFresh,
+      marketDataOnline: currentMarket.quality !== 'OFFLINE',
+      bookFresh: currentMarket.bookFresh,
       symbolTradable: filters ? filters.isSpotTradingAllowed && filters.status === 'TRADING' : undefined,
       minNotionalOk: undefined,
       lotSizeOk: undefined,

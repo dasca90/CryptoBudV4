@@ -10,6 +10,7 @@ import { resolveTopCandidateDisplay } from '../components/trade-v4/topCandidates
 import { mapScannerCandidateToTradeV4View } from '../lib/air-scanner/tradeV4DataAdapter';
 import type { ScannerCandidate } from '../core/types';
 import type { TradeV4CandidateView } from '../components/trade-v4/types';
+import { MarketDataFeed } from '../utils/MarketDataFeed';
 
 function completeRuntimeSnapshot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -351,6 +352,7 @@ function candidate(overrides: Partial<ScannerCandidate> = {}): ScannerCandidate 
 
 // Test 14 - Trade V4 adapter keeps runtime handoff flags for TopCandidates.
 {
+  MarketDataFeed.getInstance().setManualPrice('RAWBUYUSDT', 1);
   const view = mapScannerCandidateToTradeV4View(candidate());
   assert.equal(view.runtimeSnapshotPresent, true);
   assert.equal(view.strategyDecisionPresent, true);

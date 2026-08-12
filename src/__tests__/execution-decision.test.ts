@@ -11,6 +11,7 @@ import {
   buildCandidateRuntimeSnapshot,
   buildCandidateStrategyDecisionSnapshot,
 } from '../core/scanner/CandidateLifecycle';
+import { MarketDataFeed } from '../utils/MarketDataFeed';
 
 let passed = 0;
 let failed = 0;
@@ -220,6 +221,7 @@ function baseParams(overrides: Partial<ExecutionDecisionParams> = {}): Execution
   });
 
   // Duplicate → skipped with DUPLICATE_OPEN_POSITION
+  MarketDataFeed.getInstance().setManualPrice('OPGUSDT', 1.23);
   const result = buildExecutableCandidateSet({
     scanSnapshot: snap([buyReady('OPGUSDT')]),
     runtimeState: { canAttemptScannerAutoExecution: true },
@@ -253,6 +255,8 @@ function baseParams(overrides: Partial<ExecutionDecisionParams> = {}): Execution
     candidateCount: candidates.length,     buyCount: candidates.filter(c => c.status === 'BUY').length,
     waitCount: 0, blockCount: 0, avoidCount: 0, candidates, summary: 'test', diagnostics: {} as any,
   });
+  MarketDataFeed.getInstance().setManualPrice('BTCUSDT', 1.23);
+  MarketDataFeed.getInstance().setManualPrice('ETHUSDT', 1.23);
   const result = buildExecutableCandidateSet({
     scanSnapshot: snap([buyReady('BTCUSDT'), buyReady('ETHUSDT')]),
     runtimeState: { canAttemptScannerAutoExecution: true },

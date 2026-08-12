@@ -450,7 +450,9 @@ export function buildStrategyAuditSnapshotFromCandidate(candidate: ScannerCandid
   const rawDipPct = Number.isFinite(candidate.dipPercent) ? candidate.dipPercent : null;
   const dipDepthPct = rawDipPct == null ? null : Math.abs(rawDipPct);
   const reboundPct = Number.isFinite(candidate.reboundPercent) ? candidate.reboundPercent : null;
-  const priceFresh = !candidate.blockReasons?.some((b) => b.toLowerCase().includes('stale'));
+  // Rebound freshness is a strategy property; it must never redefine current
+  // Spot price freshness. Current market freshness is rehydrated canonically.
+  const priceFresh = candidate.priceFresh !== false;
   const fallingKnifeBlocked = candidate.blockReasons?.some((b) => b.toLowerCase().includes('falling_knife')) ?? false;
   const dynamicBucket = resolveDynamicSetupBucket(candidate);
   const dynamicSetup = resolveDynamicEntrySetup(intendedStrategy, dynamicBucket);

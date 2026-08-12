@@ -312,6 +312,7 @@ async function main() {
     return { ...baseCandidate, strategyDecision, executionPrecheckSnapshot };
   };
   const parityCandidate = makeCandidate('ETHUSDT');
+  feed.setManualPrice('ETHUSDT', parityCandidate.price);
   const scannerSnapshot: ScannerSnapshot = { scanId: 'demo-live-parity', startedAt: '', finishedAt: '', status: 'COOLDOWN', universeMode: 'TOP_50', universeSize: 1, scannedCount: 1, candidateCount: 1, buyCount: 1, waitCount: 0, blockCount: 0, avoidCount: 0, candidates: [parityCandidate], summary: '', diagnostics: {} as any };
   const basePlanInput = { scannerSnapshot, executionPool: [parityCandidate], watchPool: [], nearMissPool: [], openSymbols: [], pendingOrderSymbols: [], capital: 1000, usedCapital: 0, maxPositions: 10, maxEntriesPerCycle: 1, capitalPerTrade: 100, maxSpreadPct: 0.35, decisionMode: 'unified' as const, enabledRiskGroups: { mid_caps: true } };
   const demoPlan = buildExecutionPlan({ ...basePlanInput, executionAdapter: 'paper_simulated' });

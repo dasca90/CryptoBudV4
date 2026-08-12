@@ -7,6 +7,8 @@ import { resolveAutoTargetOwnership, resolveCandidateExecutionOwnership, resolve
 import { resolveMaxSelectedPerScanConfig, type MaxSelectedPerScanSource } from '../settings/max-selected-per-scan';
 import { resolveExecutionDecision, emitCanonicalExecutionDecisionAudit, type ExecutionDecision, type ExecutionDecisionParams } from './executionDecision';
 import { assertCandidateRuntimeReady, revalidateCandidateForExecution } from './CandidateLifecycle';
+import { rehydrateCandidateMarketFreshness } from '../market-data/canonical-market-freshness';
+import { MarketDataFeed } from '../../utils/MarketDataFeed';
 import { resolveFinalNoBuyReasonPriority } from './finalNoBuyReasonPriority';
 import { normalizeUnicornFinalBlockReason } from '../unicorn/unicornExecutionBlockers';
 
@@ -170,6 +172,12 @@ export function buildExecutableCandidateSet(input: {
   const capitalOk = input.riskState.capitalPerTrade > 0 && capitalAvailable >= input.riskState.capitalPerTrade;
   const maxOpenPositionsOk = input.riskState.openSymbols.length < input.riskState.maxPositions;
   const decisions: ExecutionDecision[] = candidates.map((candidate) => {
+    candidate = rehydrateCandidateMarketFreshness({
+      candidate,
+      current: MarketDataFeed.getInstance().getCanonicalSymbolMarketData(candidate.symbol),
+      consumer: 'ExecutionPlanner',
+      scanId: input.scanSnapshot.scanId,
+    });
     const runtimeReady = assertCandidateRuntimeReady({
       candidate,
       scanId: input.scanSnapshot.scanId ?? 'unknown',
@@ -626,7 +634,13 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   let confirmationBlockedCount = 0;
   let spreadBlockedCount = 0;
 
-  const revalidatedExecutionPool = activeExecutionPool.map((c) => {
+  const revalidatedExecutionPool = activeExecutionPool.map((candidateFromPool) => {
+    const c = rehydrateCandidateMarketFreshness({
+      candidate: candidateFromPool,
+      current: MarketDataFeed.getInstance().getCanonicalSymbolMarketData(candidateFromPool.symbol),
+      consumer: 'ExecutionPlanner.selection_pool',
+      scanId: scannerSnapshot.scanId,
+    });
     const runtimeReady = assertCandidateRuntimeReady({
       candidate: c,
       scanId: scannerSnapshot.scanId ?? 'unknown',

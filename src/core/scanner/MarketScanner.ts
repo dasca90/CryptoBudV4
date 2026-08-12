@@ -9,6 +9,7 @@ import { emitExecutionPipelineStageAudit } from './executionDecision';
 import { buildExecutionModeParityAudit, getExecutionAdapterDisplay, getExecutionControllerDisplay } from '../../lib/execution/executionDisplay';
 import { revalidateCandidate } from './PaperAutoExecutionController';
 import { revalidateLiveCandidate } from './BinanceLiveExecutionController';
+import { rehydrateCandidateMarketFreshness } from '../market-data/canonical-market-freshness';
 import { computeAutoStrategy, buildAutoStrategySummary, resolveAutoBotsFinalStrategy } from './AutoStrategyRouter';
 import { EntryGate } from '../entry-gate/EntryGate';
 import { MarketDataFeed } from '../../utils/MarketDataFeed';
@@ -828,7 +829,15 @@ export class MarketScanner {
     this.revalidationCycleId++;
     const cycleId = `rev_${this.revalidationCycleId}`;
     const startMs = Date.now();
-    const candidates = this.lastSnapshot.candidates.map((c) => this.ensureCandidateRuntimeSnapshot(c, cycleId, 'scanner_revalidation_loop'));
+    const candidates = this.lastSnapshot.candidates.map((candidate) => {
+      const current = this.feed.getCanonicalSymbolMarketData(candidate.symbol);
+      const rehydrated = rehydrateCandidateMarketFreshness({ candidate, current, consumer: 'AutoBots.revalidation_loop', scanId: cycleId });
+      // Preserve the published candidate identity so the shared store observes
+      // the atomic freshness replacement without waiting for the next full scan.
+      Object.assign(candidate, rehydrated);
+      return this.ensureCandidateRuntimeSnapshot(candidate, cycleId, 'scanner_revalidation_loop');
+    });
+    this.lastSnapshot = { ...this.lastSnapshot, candidates };
     const waitCandidates = candidates.filter(c => c.status === 'WAIT' || c.status === 'BLOCK' || String(c.status).startsWith('WAIT_'));
     const buyReadyCandidates = candidates.filter(c => c.status === 'BUY');
 
@@ -1593,7 +1602,13 @@ export class MarketScanner {
     });
 
     const canonicalCandidatesRaw: ScannerCandidate[] = rankedCandidatesToAnnotate.map((candidateBeforeCanonicalGate) => {
-      const candidateWithRuntime = this.ensureCandidateRuntimeSnapshot(candidateBeforeCanonicalGate, scanId, 'scanner_canonical_entry_gate');
+      const candidateWithCurrentMarket = rehydrateCandidateMarketFreshness({
+        candidate: candidateBeforeCanonicalGate,
+        current: this.feed.getCanonicalSymbolMarketData(candidateBeforeCanonicalGate.symbol),
+        consumer: 'AutoBots.canonical_entry_gate',
+        scanId,
+      });
+      const candidateWithRuntime = this.ensureCandidateRuntimeSnapshot(candidateWithCurrentMarket, scanId, 'scanner_canonical_entry_gate');
       if (!candidateWithRuntime.entryGateDecision) return candidateWithRuntime;
       const runtimeReady = assertCandidateRuntimeReady({
         candidate: candidateWithRuntime,
@@ -1619,7 +1634,7 @@ export class MarketScanner {
         recentLoss: false,
         spreadOk: c.spreadPct < this.maxSpreadPct,
         volumePass: !c.blockReasons.some(r => r.includes('volume')),
-        priceFresh: (c.priceFresh ?? true) && c.priceAgeMs <= this.maxPriceAgeMs,
+        priceFresh: c.priceFresh === true,
         btcDumping: c.blockReasons.some(r => r.includes('btc')),
         marketRegimeUnsafe: c.blockReasons.some(r => r.includes('regime')),
         reboundConfirmed: c.reboundConfirmed,
@@ -1648,7 +1663,13 @@ export class MarketScanner {
     });
 
     const canonicalCandidates: ScannerCandidate[] = canonicalCandidatesRaw.map((candidateBeforeFinalGuard) => {
-      const candidateWithRuntime = this.ensureCandidateRuntimeSnapshot(candidateBeforeFinalGuard, scanId, 'scanner_final_guard');
+      const candidateWithCurrentMarket = rehydrateCandidateMarketFreshness({
+        candidate: candidateBeforeFinalGuard,
+        current: this.feed.getCanonicalSymbolMarketData(candidateBeforeFinalGuard.symbol),
+        consumer: 'AutoBots.final_guard',
+        scanId,
+      });
+      const candidateWithRuntime = this.ensureCandidateRuntimeSnapshot(candidateWithCurrentMarket, scanId, 'scanner_final_guard');
       const runtimeReady = assertCandidateRuntimeReady({
         candidate: candidateWithRuntime,
         scanId,
@@ -1668,7 +1689,7 @@ export class MarketScanner {
         ?? 'none';
       const executionPrecheckSnapshot = buildCandidateExecutionPrecheckSnapshot({
         candidate: c,
-        priceFresh: (c.priceFresh ?? true) && c.priceAgeMs <= this.maxPriceAgeMs,
+        priceFresh: c.priceFresh === true,
         bookFresh: mq.bookFresh,
         spreadOk: c.spreadPct < this.maxSpreadPct,
         tpRoomOk: c.tpRoomOk,
@@ -4196,12 +4217,13 @@ export class MarketScanner {
       const spreadPct = price.ask > 0 && price.bid > 0 ? ((price.ask - price.bid) / ((price.ask + price.bid) / 2)) * 100 : 0;
       const priceAgeMs = Date.now() - price.timestamp;
       const priceFreshFromAge = priceAgeMs <= this.maxPriceAgeMs;
+      const currentMarket = this.feed.getCanonicalSymbolMarketData(symbol);
       const spreadPass = spreadPct < this.maxSpreadPct;
       const estimatedSlippagePct = Number((spreadPct * 0.5).toFixed(4));
       const slippagePass = estimatedSlippagePct <= this.maxSlippagePct;
       const totalCostPct = Number((spreadPct + estimatedSlippagePct).toFixed(4));
       const totalCostPass = totalCostPct <= this.maxTotalCostPct;
-      const priceFreshPass = priceFreshFromAge;
+      const priceFreshPass = currentMarket.priceFresh;
       const isVeryHighRiskSymbol = isVeryHighRisk(symbol);
 
       // Fetch period analysis before EntryGate so momentum/rebound use actual data
@@ -4317,8 +4339,9 @@ export class MarketScanner {
         runtimeState: birthRuntimeState,
       });
       const runtimeReadyAtBirth = birthRuntimeSnapshot.invariantOk !== false;
-      const genuineHardBlockers = ['BLOCK_MARKET_DATA_OFFLINE', 'BLOCK_DATA_QUALITY_BAD', 'BLOCK_SYMBOL_NOT_TRADABLE', 'BLOCK_BOOK_STALE'];
-      const hasHardBlock = decision.blockReasons.some(r => genuineHardBlockers.some(h => r.includes(h)));
+      const genuineHardBlockers = ['BLOCK_MARKET_DATA_OFFLINE', 'BLOCK_DATA_QUALITY_BAD', 'BLOCK_SYMBOL_NOT_TRADABLE'];
+      const hasHardBlock = decision.blockReasons.some(r => genuineHardBlockers.some(h => r.includes(h)))
+        || !currentMarket.priceFresh || !currentMarket.bookFresh;
       // V3-eligible: no genuine hard block, not AVOID
       const isV3Eligible = !hasHardBlock && decision.status !== 'AVOID';
       if (isV3Eligible && runtimeReadyAtBirth) {
@@ -4346,7 +4369,7 @@ export class MarketScanner {
           confidenceSource: mlConfidence !== null ? 'TraderBrainDecision.mlAdjustedConfidence' : 'TraderBrainDecision.confidence',
           allowStrategyConfidenceFallback: true,
           volumePass: !decision.blockReasons.some(r => r.includes('volume')),
-          priceFresh: !decision.blockReasons.some(r => r.includes('stale')) && priceFreshFromAge,
+          priceFresh: currentMarket.priceFresh,
           btcDumping: decision.blockReasons.some(r => r.includes('btc')),
           marketRegimeUnsafe: decision.blockReasons.some(r => r.includes('regime')),
           reboundConfirmed: confirmationEval.reboundConfirmed,
@@ -4361,7 +4384,7 @@ export class MarketScanner {
           isVeryHighRisk: isVeryHighRiskSymbol,
           isLive: false,
           marketDataOnline: mq.quality !== 'OFFLINE',
-          bookFresh: mq.bookFresh,
+          bookFresh: currentMarket.bookFresh,
           symbolTradable: filters ? (filters.isSpotTradingAllowed && filters.status === 'TRADING') : undefined,
         };
         const entryGateStart = Date.now();
@@ -4481,6 +4504,12 @@ export class MarketScanner {
           setupMissing: [],
         },
       };
+      candidate = rehydrateCandidateMarketFreshness({
+        candidate,
+        current: currentMarket,
+        consumer: 'AutoBots.candidate_birth',
+        scanId: candidateScanId,
+      });
       const runtimeReady = assertCandidateRuntimeReady({
         candidate,
         scanId: candidateScanId,
@@ -4535,8 +4564,8 @@ export class MarketScanner {
       } as ScannerCandidate);
       const executionPrecheckSnapshot = buildCandidateExecutionPrecheckSnapshot({
         candidate,
-        priceFresh: mq.priceFresh && priceFreshFromAge,
-        bookFresh: mq.bookFresh,
+        priceFresh: currentMarket.priceFresh,
+        bookFresh: currentMarket.bookFresh,
         spreadOk: spreadPass,
         tpRoomOk: candidate.tpRoomOk !== false,
         riskGroupResolved: Boolean(riskGroup),
