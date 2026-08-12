@@ -4,6 +4,7 @@ import { tauriDb, isTauriAvailable } from './TauriBridge';
 import { logger } from '../../utils/logger';
 import { resolveMaxSelectedPerScanConfig } from '../settings/max-selected-per-scan';
 import { normalizeAutoPerformanceMode, normalizePerformanceSettings, savePerformanceSettings } from '../../lib/performance/performanceSettings';
+import { normalizeScannerUniverseSize } from '../scanner/scanner-universe-config';
 
 const SETTINGS_KEY = 'app_settings';
 const API_CONFIG_KEY = 'api_config';
@@ -107,8 +108,11 @@ export class SettingsPersistence {
       ? (settings.paperAutoExecutionEnabled === true || badInstallerDefaultAutoBotsOff)
       : true;
     const invalidAutoBotsManualStateFound = effectiveAutoBots === true && settings.strategySource === 'manual_override';
+    const scannerUniverseSize = normalizeScannerUniverseSize(settings.scannerUniverseSize, settings.maxSymbolsScanned);
     const normalized: AppSettings = {
       ...settings,
+      scannerUniverseSize,
+      maxSymbolsScanned: scannerUniverseSize,
       strategySource: invalidAutoBotsManualStateFound ? 'autobots' : (settings.strategySource ?? 'autobots'),
       paperAutoExecutionEnabled: effectiveAutoBots,
     };

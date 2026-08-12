@@ -465,6 +465,7 @@ export type TradingParametersView = {
   scannerReferencePeriod: "1h" | "4h" | "1d" | "1w";
   scannerUniverseMode: "BINANCE_TOP_250" | "TOP_100" | "TOP_50" | "TOP_20" | "WATCHLIST";
   scannerUniverseSize: number;
+  marketEdgeMode: 'OFF' | 'MONITOR' | 'PRIORITY';
   scannerFinalPoolSize: number;
   scannerCandidatePoolSize: number;
   min24hQuoteVolumeUsdt: number;

@@ -21,6 +21,9 @@ export class AutoRuntime {
   private scanIntervalMs = 15000;
   private callbacks: AutoRuntimeCallbacks | null = null;
   private brainDecideFn: BrainDecideFn | null = null;
+  private prioritySymbols = new Set<string>();
+  private priorityTimer: ReturnType<typeof setTimeout> | null = null;
+  private priorityTask: Promise<void> | null = null;
 
   constructor(ml: MLPredictor) {
     this.scanner = new MarketScanner();
@@ -58,8 +61,39 @@ export class AutoRuntime {
     this.running = false;
     this.scanLoopTask = null;
     this.scanner.stopCandidateRevalidationLoop();
+    if (this.priorityTimer) clearTimeout(this.priorityTimer);
+    this.priorityTimer = null;
+    this.prioritySymbols.clear();
     await this.scanner.stop();
     logger.info('AUTO_RUNTIME: Stopped');
+  }
+
+  requestPriorityReanalysis(symbols: string[]): void {
+    if (!this.running) return;
+    for (const symbol of symbols) {
+      if (this.prioritySymbols.size >= 3) break;
+      const canonical = String(symbol).toUpperCase();
+      if (/^[A-Z0-9]+USDT$/.test(canonical)) this.prioritySymbols.add(canonical);
+    }
+    this.schedulePriorityDrain(250);
+  }
+
+  private schedulePriorityDrain(delayMs: number): void {
+    if (this.priorityTimer || this.priorityTask || this.prioritySymbols.size === 0 || !this.running) return;
+    this.priorityTimer = setTimeout(() => {
+      this.priorityTimer = null;
+      if (!this.running || this.prioritySymbols.size === 0) return;
+      if (this.scanner.isScanRunning()) { this.schedulePriorityDrain(1_000); return; }
+      const symbols = [...this.prioritySymbols].slice(0, 3);
+      symbols.forEach(symbol => this.prioritySymbols.delete(symbol));
+      this.priorityTask = (async () => {
+        const snapshot = await this.scanner.scanPrioritySymbols(symbols);
+        if (snapshot && this.callbacks) this.callbacks.onCandidatesReady(snapshot);
+      })().catch(error => logger.warn(`EDGE_PRIORITY_REANALYSIS_FAILED reason=${error instanceof Error ? error.message : String(error)} scannerContinues=true`)).finally(() => {
+        this.priorityTask = null;
+        this.schedulePriorityDrain(250);
+      });
+    }, delayMs);
   }
 
   private async runLoop(universeMode?: UniverseMode): Promise<void> {

@@ -13,6 +13,7 @@ import { computeAutoStrategy, buildAutoStrategySummary, resolveAutoBotsFinalStra
 import { EntryGate } from '../entry-gate/EntryGate';
 import { MarketDataFeed } from '../../utils/MarketDataFeed';
 import { buildScannerUniverse, getRiskGroup, isVeryHighRisk } from './scanner-universe';
+import { DEFAULT_SCANNER_UNIVERSE_SIZE, getFullScanCooldownMs, normalizeScannerUniverseSize } from './scanner-universe-config';
 import { rankCandidates, buildSummaryMessage, getTopBlockReasons } from './candidate-ranking';
 import { logger } from '../../utils/logger';
 import { createDefaultAppSettings } from '../types';
@@ -225,13 +226,15 @@ export class MarketScanner {
   private scannerBanlist: string[] = [];
   private scannerCandidatePoolSize = 20;
   private min24hQuoteVolumeUsdt = 100000;
-  private maxSymbolsScanned = 100;
+  private maxSymbolsScanned = DEFAULT_SCANNER_UNIVERSE_SIZE;
   private scannerDiagnosticsLevel: ScannerDiagnosticsLevel = 'normal';
   private scanStageTimings: ScannerStageTimings = this.emptyStageTimings();
   private scanCacheMetrics: ScannerCacheMetrics = this.emptyCacheMetrics();
   private scanSymbolTimings: Array<{ symbol: string; ms: number; stage: string }> = [];
   private lastCandidateStatusBySymbol = new Map<string, CandidateStatus>();
   private currentScanSymbolCount = 0;
+  private lastUniverseSymbols: string[] = [];
+  private priorityScanSymbols: string[] | null = null;
   private momentumWeight = 0.55;
   private volumeSurgeWeight = 0.25;
   private breakoutWeight = 0.20;
@@ -376,7 +379,7 @@ export class MarketScanner {
   }): void {
     if (config.scannerCandidatePoolSize != null) this.scannerCandidatePoolSize = Math.max(1, config.scannerCandidatePoolSize);
     if (config.min24hQuoteVolumeUsdt != null) this.min24hQuoteVolumeUsdt = Math.max(0, config.min24hQuoteVolumeUsdt);
-    if (config.maxSymbolsScanned != null) this.maxSymbolsScanned = Math.max(1, config.maxSymbolsScanned);
+    if (config.maxSymbolsScanned != null) this.maxSymbolsScanned = normalizeScannerUniverseSize(config.maxSymbolsScanned);
     if (config.momentumWeight != null) this.momentumWeight = Math.max(0, config.momentumWeight);
     if (config.volumeSurgeWeight != null) this.volumeSurgeWeight = Math.max(0, config.volumeSurgeWeight);
     if (config.breakoutWeight != null) this.breakoutWeight = Math.max(0, config.breakoutWeight);
@@ -679,6 +682,22 @@ export class MarketScanner {
   getSnapshots(): ScannerSnapshot[] {
     return [...this.snapshots];
   }
+  getLastUniverseSymbols(): readonly string[] { return this.lastUniverseSymbols; }
+  isScanRunning(): boolean { return this.scanInFlight; }
+
+  async scanPrioritySymbols(symbols: string[]): Promise<ScannerSnapshot | null> {
+    const bounded = [...new Set(symbols.map(symbol => String(symbol).toUpperCase()).filter(symbol => /^[A-Z0-9]+USDT$/.test(symbol)))].slice(0, 3);
+    if (bounded.length === 0 || this.scanInFlight) return null;
+    this.priorityScanSymbols = bounded;
+    logger.info(`EDGE_SCANNER_INTEGRATION_AUDIT action=priority_reanalysis_start symbols=${bounded.join('|')} count=${bounded.length} directBuy=false canonicalPipeline=true`);
+    try {
+      const snapshot = await this.scan('CUSTOM');
+      logger.info(`EDGE_SCANNER_INTEGRATION_AUDIT action=priority_reanalysis_finish scanId=${snapshot.scanId} symbols=${bounded.join('|')} candidates=${snapshot.candidateCount} canonicalPipeline=true`);
+      return snapshot;
+    } finally {
+      this.priorityScanSymbols = null;
+    }
+  }
 
   private resetUnicornDailyCounterIfNeeded(): void {
     this.unicornTradesToday = 0;
@@ -762,7 +781,7 @@ export class MarketScanner {
         case 'WATCHLIST': return 10000;
         case 'TOP_20': return 15000;
         case 'TOP_50': return 20000;
-        case 'BINANCE_TOP_250': return 60000;
+        case 'BINANCE_TOP_250': return getFullScanCooldownMs(this.maxSymbolsScanned);
         default: return 15000;
       }
     })();
@@ -1204,9 +1223,11 @@ export class MarketScanner {
     const settings = createDefaultAppSettings();
     let universe;
     try {
-      universe = await buildScannerUniverse(mode, this.watchlist, {
+      const effectiveWatchlist = mode === 'CUSTOM' && this.priorityScanSymbols ? this.priorityScanSymbols : this.watchlist;
+      universe = await buildScannerUniverse(mode, effectiveWatchlist, {
         manualScannerBanlist: this.scannerBanlist.length > 0 ? this.scannerBanlist : settings.manualScannerBanlist,
         enabledRiskGroups: this.scannerRiskGroups,
+        maxSymbols: this.maxSymbolsScanned,
       });
     } catch (err) {
       logger.error(`SCANNER_UNIVERSE_BUILD_FAILED: mode=${mode} reason=${err instanceof Error ? err.message : String(err)}`);
@@ -1224,6 +1245,7 @@ export class MarketScanner {
       };
     }
     const symbols = universe.symbols;
+    if (!this.priorityScanSymbols) this.lastUniverseSymbols = [...symbols];
     this.currentScanSymbolCount = symbols.length;
     this.diag.universeBeforeFilterCount = universe.beforeFilterCount;
     this.diag.universeAfterFilterCount = universe.afterFilterCount;

@@ -10,12 +10,14 @@ import type { TraderBrainDecision, ScannerCandidate, ScannerSnapshot, ScalperCan
 import type { UIStore, TradeMode } from '../../state/ui-store';
 import { SettingsPersistence } from '../../core/persistence/SettingsPersistence';
 import { normalizeDipperRiskGroups } from '../../core/scanner/riskGroupConstants';
+import { normalizeScannerUniverseSize } from '../../core/scanner/scanner-universe-config';
 import { DEFAULT_BANNED_SYMBOLS } from '../../core/scalper/defaultBannedSymbols';
 import { createDefaultAppSettings } from '../../core/types';
 import { TradeV4Page } from '../../components/trade-v4/TradeV4Page';
 import { buildTradeV4PageModel } from '../../lib/air-scanner/tradeV4DataAdapter';
 import { getMicroScalperState } from '../../core/scalper/MicroScalperEngine';
 import type { TradeV4PageModel, TradingParametersView } from '../../components/trade-v4/types';
+import type { MarketEdgeRuntime } from '../../core/market-edge/MarketEdgeRuntime';
 
 const COMMON_COINS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT', 'XRPUSDT', 'DOGEUSDT', 'AVAXUSDT'];
 
@@ -60,6 +62,7 @@ interface Props {
   }) => void;
   positionBootRestoring?: boolean;
   closedTradesBootRestoring?: boolean;
+  marketEdgeRuntime: MarketEdgeRuntime;
 }
 
 const RISK_COLORS: Record<string, string> = {
@@ -92,7 +95,7 @@ export function TradePage({
   onArmScalper, onStartScalper, onPauseScalper, onStopScalper, onEmergencyStopScalper,
   onAnalyzeSymbol, onManualBuy, onManualSell,
   onScannerConfigChange, positionBootRestoring,
-  closedTradesBootRestoring,
+  closedTradesBootRestoring, marketEdgeRuntime,
 }: Props) {
   const { state, setTradeMode, selectSymbol } = store;
   const [customCoin, setCustomCoin] = useState('');
@@ -164,7 +167,8 @@ export function TradePage({
     },
     scannerReferencePeriod: '1h',
     scannerUniverseMode: 'BINANCE_TOP_250',
-    scannerUniverseSize: 250,
+    scannerUniverseSize: 100,
+    marketEdgeMode: 'MONITOR',
     scannerFinalPoolSize: 20,
     scannerCandidatePoolSize: 20,
     min24hQuoteVolumeUsdt: 100000,
@@ -255,7 +259,7 @@ export function TradePage({
       scanner.setScannerRankingConfig({
         scannerCandidatePoolSize: airParams.scannerCandidatePoolSize,
         min24hQuoteVolumeUsdt: airParams.min24hQuoteVolumeUsdt,
-        maxSymbolsScanned: airParams.maxSymbolsScanned,
+        maxSymbolsScanned: airParams.scannerUniverseSize,
         momentumWeight: airParams.momentumWeight,
         volumeSurgeWeight: airParams.volumeSurgeWeight,
         breakoutWeight: airParams.breakoutWeight,
@@ -280,7 +284,7 @@ export function TradePage({
         userExplicit: airParams.maxSelectedPerScanUserSet === true,
       });
     }
-  }, [airParams.strategySource, airParams.entryConfirmationMode, airParams.scannerDiagnosticsLevel, airParams.strategy, airParams.maxSpreadPct, airParams.maxSlippagePct, airParams.maxTotalEntryCostPct, airParams.maxPriceAgeMs, airParams.tp1Pct, airParams.tp2Pct, airParams.stopLossPct, airParams.dynamicTrailingEnabled, airParams.trailPullbackPct, airParams.scannerCandidatePoolSize, airParams.min24hQuoteVolumeUsdt, airParams.maxSymbolsScanned, airParams.momentumWeight, airParams.volumeSurgeWeight, airParams.breakoutWeight, airParams.newMoverBonus, airParams.enableNewMoverBonus, airParams.maxOpenPositions, airParams.maxSelectedPerScan, airParams.autoTradingCapital, airParams.capitalPerCoin, paperAutoEnabled, engine]);
+  }, [airParams.strategySource, airParams.entryConfirmationMode, airParams.scannerDiagnosticsLevel, airParams.strategy, airParams.maxSpreadPct, airParams.maxSlippagePct, airParams.maxTotalEntryCostPct, airParams.maxPriceAgeMs, airParams.tp1Pct, airParams.tp2Pct, airParams.stopLossPct, airParams.dynamicTrailingEnabled, airParams.trailPullbackPct, airParams.scannerCandidatePoolSize, airParams.min24hQuoteVolumeUsdt, airParams.scannerUniverseSize, airParams.momentumWeight, airParams.volumeSurgeWeight, airParams.breakoutWeight, airParams.newMoverBonus, airParams.enableNewMoverBonus, airParams.maxOpenPositions, airParams.maxSelectedPerScan, airParams.autoTradingCapital, airParams.capitalPerCoin, paperAutoEnabled, engine]);
 
   useEffect(() => {
     (async () => {
@@ -300,7 +304,7 @@ export function TradePage({
       });
       const scannerReferencePeriod = s.scannerReferencePeriod ?? '1h';
       const scannerUniverseMode = s.scannerUniverseMode ?? 'BINANCE_TOP_250';
-      const scannerUniverseSize = s.scannerUniverseSize ?? 250;
+      const scannerUniverseSize = normalizeScannerUniverseSize(s.scannerUniverseSize, (s as any).maxSymbolsScanned);
       const scannerFinalPoolSize = s.scannerFinalPoolSize ?? 20;
       const scannerBanlist = toCanonicalBanlist([...DEFAULT_BANNED_SYMBOLS, ...(s.scannerBanlist ?? []), ...(s.manualScannerBanlist ?? [])]);
       setAirParams((prev) => ({
@@ -324,10 +328,11 @@ export function TradePage({
         scannerReferencePeriod,
         scannerUniverseMode,
         scannerUniverseSize,
+        marketEdgeMode: (s as any).marketEdgeMode ?? 'MONITOR',
         scannerFinalPoolSize,
         scannerCandidatePoolSize: (s as any).scannerCandidatePoolSize ?? prev.scannerCandidatePoolSize,
         min24hQuoteVolumeUsdt: (s as any).min24hQuoteVolumeUsdt ?? prev.min24hQuoteVolumeUsdt,
-        maxSymbolsScanned: (s as any).maxSymbolsScanned ?? prev.maxSymbolsScanned,
+        maxSymbolsScanned: scannerUniverseSize,
         maxSelectedPerScan: (s as any).maxSelectedPerScan ?? 10,
         maxEntriesPerCycle: (s as any).maxSelectedPerScan ?? 10,
         maxSelectedPerScanUserSet: (s as any).maxSelectedPerScanUserSet === true,
@@ -411,7 +416,7 @@ export function TradePage({
     if (airParams.scannerUniverseSize < airParams.scannerFinalPoolSize) errors.push('Universe size must be >= final pool size');
     if (airParams.scannerFinalPoolSize < airParams.scannerCandidatePoolSize) errors.push('Final pool size must be >= candidate pool size');
     if (!(airParams.scannerCandidatePoolSize > 0)) errors.push('Candidate pool size must be > 0');
-    if (!(airParams.maxSymbolsScanned > 0)) errors.push('Max symbols scanned must be > 0');
+    if (!(airParams.scannerUniverseSize >= 20 && airParams.scannerUniverseSize <= 250)) errors.push('Universe size must be 20-250');
     if (!(airParams.maxSpreadPct > 0)) errors.push('Max spread must be > 0');
     const enabledGroups = Object.values(airParams.scannerRiskGroups).filter(Boolean).length;
     if (enabledGroups === 0) errors.push('At least one risk group must be enabled');
@@ -439,6 +444,7 @@ export function TradePage({
       scannerReferencePeriod: airParams.scannerReferencePeriod,
       scannerUniverseMode: airParams.scannerUniverseMode,
       scannerUniverseSize: airParams.scannerUniverseSize,
+      marketEdgeMode: airParams.marketEdgeMode,
       scannerFinalPoolSize: airParams.scannerFinalPoolSize,
       scannerBanlist: canonicalBanlist,
       manualScannerBanlist: canonicalBanlist,
@@ -470,7 +476,7 @@ export function TradePage({
       refMode: airParams.refMode as any,
       scannerCandidatePoolSize: airParams.scannerCandidatePoolSize as any,
       min24hQuoteVolumeUsdt: airParams.min24hQuoteVolumeUsdt as any,
-      maxSymbolsScanned: airParams.maxSymbolsScanned as any,
+      maxSymbolsScanned: airParams.scannerUniverseSize as any,
       momentumWeight: airParams.momentumWeight as any,
       volumeSurgeWeight: airParams.volumeSurgeWeight as any,
       breakoutWeight: airParams.breakoutWeight as any,
@@ -480,6 +486,9 @@ export function TradePage({
       manualDipperSetup: airParams.manualDipperSetup as any,
       updatedAt: new Date().toISOString(),
     } as any);
+    marketEdgeRuntime.updateConfig({ mode: airParams.marketEdgeMode, universeSize: airParams.scannerUniverseSize });
+    const runtimeUniverse = [...(engine.getAutoRuntime()?.getScanner()?.getLastUniverseSymbols?.() ?? [])];
+    if (runtimeUniverse.length > 0) void marketEdgeRuntime.updateUniverse(runtimeUniverse);
     engine.getAutoRuntime()?.getScanner()?.setPaperAutoEnabled(paperAutoEnabled);
     engine.getAutoRuntime()?.getScanner()?.setManualStrategy(!paperAutoEnabled && effectiveStrategySource === 'manual_override' ? airParams.strategy : null);
     engine.getAutoRuntime()?.getScanner()?.setTradingTargetConfig?.({
@@ -510,10 +519,10 @@ export function TradePage({
       scannerBanlist: canonicalBanlist,
     });
     logger.info(`SETTINGS_APPLY_RUNTIME_SYNC_AUDIT appliedSettings=${JSON.stringify({ maxPositions: airParams.maxOpenPositions, capitalPerCoin: airParams.capitalPerCoin, spread: airParams.maxSpreadPct, enabledGroups })} scannerConfigSynced=true riskEngineSynced=true executionPlannerSynced=true entryGateSynced=true autoBuyQueueSynced=true persistenceSynced=true`);
-    logger.info(`SETTINGS_APPLIED_EFFECTIVE_CONFIG_AUDIT tradingCapital=${airParams.autoTradingCapital} capitalPerCoin=${airParams.capitalPerCoin} maxOpenPositions=${airParams.maxOpenPositions} enabledRiskGroups=${Object.entries(airParams.scannerRiskGroups).filter(([,v]) => v).map(([k]) => k).join(',')} universeMode=${airParams.scannerUniverseMode} universeSize=${airParams.scannerUniverseSize} finalPoolSize=${airParams.scannerFinalPoolSize} candidatePoolSize=${airParams.scannerCandidatePoolSize} maxSymbolsScanned=${airParams.maxSymbolsScanned} min24hVolume=${airParams.min24hQuoteVolumeUsdt} maxSpreadPct=${airParams.maxSpreadPct} maxSlippagePct=${airParams.maxSlippagePct} maxTotalCostPct=${airParams.maxTotalEntryCostPct}`);
+    logger.info(`SETTINGS_APPLIED_EFFECTIVE_CONFIG_AUDIT tradingCapital=${airParams.autoTradingCapital} capitalPerCoin=${airParams.capitalPerCoin} maxOpenPositions=${airParams.maxOpenPositions} enabledRiskGroups=${Object.entries(airParams.scannerRiskGroups).filter(([,v]) => v).map(([k]) => k).join(',')} universeMode=${airParams.scannerUniverseMode} universeSize=${airParams.scannerUniverseSize} finalPoolSize=${airParams.scannerFinalPoolSize} candidatePoolSize=${airParams.scannerCandidatePoolSize} maxSymbolsScanned=${airParams.scannerUniverseSize} min24hVolume=${airParams.min24hQuoteVolumeUsdt} maxSpreadPct=${airParams.maxSpreadPct} maxSlippagePct=${airParams.maxSlippagePct} maxTotalCostPct=${airParams.maxTotalEntryCostPct}`);
     logger.info(`USER_SETTINGS_SAVE_SUCCESS: tradingCapital=${airParams.autoTradingCapital} capitalPerCoin=${airParams.capitalPerCoin} maxOpenPositions=${airParams.maxOpenPositions} bannedCoinsCount=${canonicalBanlist.length} source=UI`);
     logger.info(`TRADING_PARAMETERS_APPLY_AUDIT: submittedRefPeriod=${airParams.scannerReferencePeriod} submittedRefMode=${airParams.refMode} submittedRefWindow=${airParams.refWindow} submittedStrategy=${airParams.strategy} submittedStopLoss=${airParams.stopLossPct} submittedTp2=${airParams.tp2Pct} persistenceWriteSuccess=true storageTarget=${typeof (window as any).__TAURI_INTERNALS__ !== 'undefined' ? 'tauri_sqlite' : 'localStorage'} changedFields=${JSON.stringify({ scannerReferencePeriod: airParams.scannerReferencePeriod, refMode: airParams.refMode, refWindow: airParams.refWindow })}`);
-  }, [airParams, onScannerConfigChange, engine, userTradingSettingsHydrated, state.scannerRunning, paperAutoEnabled, settingsPersistence]);
+  }, [airParams, onScannerConfigChange, engine, userTradingSettingsHydrated, state.scannerRunning, paperAutoEnabled, settingsPersistence, marketEdgeRuntime]);
 
   const positionManagerOpenPositions = engine.getPositionManager().getOpenPositions();
   const positionSummary = engine.getPositionManager().getExposureSummary();
@@ -707,6 +716,7 @@ export function TradePage({
           model={airModel}
           closedTradesRestoring={!!closedTradesBootRestoring}
           parameters={airParams}
+          marketEdgeRuntime={marketEdgeRuntime}
           onChangeParameters={(next) => {
             const SAFETY_KEYS: (keyof TradingParametersView)[] = [
               'maxOpenPositions', 'maxSelectedPerScan', 'maxEntriesPerCycle', 'maxEntryGateAttemptsPerScan',

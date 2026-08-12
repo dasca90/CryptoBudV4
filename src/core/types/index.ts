@@ -1952,6 +1952,7 @@ export interface AppSettings {
   refMode: 'AUTO' | 'SMA' | 'EMA' | 'VWAP' | 'BOLLINGER';
   scannerUniverseMode: 'BINANCE_TOP_250' | 'TOP_100' | 'TOP_50' | 'TOP_20' | 'WATCHLIST';
   scannerUniverseSize: number;
+  marketEdgeMode: 'OFF' | 'MONITOR' | 'PRIORITY';
   scannerFinalPoolSize: number;
   scannerCandidatePoolSize: number;
   min24hQuoteVolumeUsdt: number;
@@ -2034,7 +2035,8 @@ export function createDefaultAppSettings(): AppSettings {
     refWindow: 'LAST_DAY',
     refMode: 'SMA',
     scannerUniverseMode: 'BINANCE_TOP_250',
-    scannerUniverseSize: 250,
+    scannerUniverseSize: 100,
+    marketEdgeMode: 'MONITOR',
     scannerFinalPoolSize: 20,
     scannerCandidatePoolSize: 20,
     min24hQuoteVolumeUsdt: 100000,

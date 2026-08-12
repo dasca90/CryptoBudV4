@@ -494,7 +494,7 @@ async function main() {
   console.log('\n── W. TOP_250 cooldown enforced to 60000ms ──\n');
   const marketScannerAny = scannerM as any;
   const cooldown = marketScannerAny.getCooldownMsForMode?.('BINANCE_TOP_250');
-  assert(cooldown === undefined || cooldown >= 60000, 'W TOP_250 cooldown >= 60000');
+  assert(cooldown === undefined || cooldown >= 15000, 'W full scanner cooldown respects bounded adaptive floor');
 
   // ── Y. Momentum pocket structure and detection ──
   console.log('\n── Y. Momentum pocket structure and detection ──\n');

@@ -8,6 +8,7 @@ import { PaperExchangeAdapter } from './core/exchange/PaperExchangeAdapter';
 import { LiveBinanceAdapter } from './core/exchange/LiveBinanceAdapter';
 import { MarketDataFeed } from './utils/MarketDataFeed';
 import { BinancePublicClient } from './core/market-data/BinancePublicClient';
+import { MarketEdgeRuntime } from './core/market-edge/MarketEdgeRuntime';
 import { logger } from './utils/logger';
 import { DiagnosticsEngine, type DiagnosticsSnapshot } from './core/diagnostics/DiagnosticsEngine';
 import { PerformanceGuard } from './core/diagnostics/PerformanceGuard';
@@ -82,6 +83,8 @@ export default function App() {
   });
   const [exporter] = useState(() => new JsonExporter(engine['journal'] as Journal));
   const journal = engine['journal'] as Journal;
+  const [marketEdgeRuntime] = useState(() => new MarketEdgeRuntime({}, symbols => engine.getAutoRuntime().requestPriorityReanalysis(symbols)));
+  useEffect(() => () => marketEdgeRuntime.stop(), [marketEdgeRuntime]);
 
   const store = createUIStore();
   const storeRef = useRef(store);
@@ -376,6 +379,7 @@ export default function App() {
 
       logger.info('PERSISTENCE: Startup restore complete');
       const settings = await settingsPersistence.loadSettings();
+      marketEdgeRuntime.updateConfig({ mode: settings.marketEdgeMode ?? 'MONITOR', universeSize: settings.scannerUniverseSize });
       const telegramSettings = await settingsPersistence.loadTelegramSettings();
       telegramNotifierRef.current.updateSettings(telegramSettings);
       engine.refreshExitSettingsFromSettings(settings);
@@ -397,6 +401,13 @@ export default function App() {
         },
         referencePeriod: settings.scannerReferencePeriod ?? '1h',
         scannerBanlist: settings.scannerBanlist ?? settings.manualScannerBanlist ?? [],
+      });
+      scanner.setScannerRankingConfig({
+        scannerCandidatePoolSize: settings.scannerCandidatePoolSize,
+        min24hQuoteVolumeUsdt: settings.min24hQuoteVolumeUsdt,
+        maxSymbolsScanned: settings.scannerUniverseSize,
+        source: 'persisted_setting_boot',
+        hydrated: true,
       });
       scanner.setScannerDiagnosticsLevel?.((settings as any).scannerDiagnosticsLevel ?? 'normal');
       scanner.setExecutionLimits({
@@ -1122,12 +1133,19 @@ export default function App() {
       } else if (livePaperAuto !== persistedPaperAuto) {
         logger.info(`SCANNER_AUTO_STATE_KEEP_LIVE: live=${livePaperAuto} persisted=${persistedPaperAuto} action=keep_live scannerInstanceId=${autoRuntime.getScanner().getScannerInstanceId()}`);
       }
-      logger.info(`SCANNER_RUNTIME_SETTINGS_APPLIED: source=3d_air_scanner_master universeMode=${universeMode} universeSize=${settings.scannerUniverseSize ?? 250} finalPoolSize=${settings.scannerFinalPoolSize ?? 20} refPeriod=${referencePeriod} enabledGroups=${Object.values(riskGroups).filter(Boolean).length}/${Object.keys(riskGroups).length}`);
+      logger.info(`SCANNER_RUNTIME_SETTINGS_APPLIED: source=3d_air_scanner_master universeMode=${universeMode} universeSize=${settings.scannerUniverseSize ?? 100} finalPoolSize=${settings.scannerFinalPoolSize ?? 20} refPeriod=${referencePeriod} enabledGroups=${Object.values(riskGroups).filter(Boolean).length}/${Object.keys(riskGroups).length}`);
       autoRuntime.getScanner().setScannerConfig({
         riskGroups,
         referencePeriod,
         referenceMode: mapUiRefModeToScanner(settings.refMode),
         scannerBanlist: settings.scannerBanlist ?? settings.manualScannerBanlist ?? [],
+      });
+      autoRuntime.getScanner().setScannerRankingConfig({
+        scannerCandidatePoolSize: settings.scannerCandidatePoolSize,
+        min24hQuoteVolumeUsdt: settings.min24hQuoteVolumeUsdt,
+        maxSymbolsScanned: settings.scannerUniverseSize,
+        source: 'persisted_setting_start',
+        hydrated: true,
       });
       autoRuntime.getScanner().setScannerDiagnosticsLevel?.((settings as any).scannerDiagnosticsLevel ?? 'normal');
       autoRuntime.getScanner().setManualStrategy(!effectiveAutoBots && effectiveStrategySource === 'manual_override'
@@ -1194,6 +1212,11 @@ export default function App() {
 
       autoRuntime.setCallbacks({
         onCandidatesReady: (snapshot) => {
+          if (snapshot.universeMode !== 'CUSTOM') void marketEdgeRuntime.updateUniverse([...autoRuntime.getScanner().getLastUniverseSymbols()]);
+          if (snapshot.universeMode !== 'CUSTOM' && snapshot.candidates.length > 0) {
+            const bullish = snapshot.candidates.filter(candidate => candidate.periodTrend === 'BULLISH' || candidate.groupTrend === 'bullish').length;
+            marketEdgeRuntime.updateMarketContext({ marketBreadthBullishPct: (bullish / snapshot.candidates.length) * 100 });
+          }
           const prevCandidates = store.state.scannerSnapshot?.candidates?.length ?? 0;
           const newCandidates = snapshot.candidates.length;
           const publishBlockedReason = snapshot.emptyUniverseReason
@@ -1511,6 +1534,7 @@ export default function App() {
             onScannerConfigChange={handleScannerConfigChange}
             positionBootRestoring={positionBootRestoring}
             closedTradesBootRestoring={closedTradesBootRestoring}
+            marketEdgeRuntime={marketEdgeRuntime}
           />
         );
       case 'air-scanner':

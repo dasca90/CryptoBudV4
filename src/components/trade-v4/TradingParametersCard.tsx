@@ -612,16 +612,24 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
         </select>
 
         <label>Universe Size</label>
-        <input type="number" value={v.scannerUniverseSize} onChange={(e) => patch("scannerUniverseSize", Math.max(1, Number(e.target.value) || 1))} min={1} step={10} style={numStyle} />
+        <input type="number" value={v.scannerUniverseSize} onChange={(e) => {
+          const size = Math.min(250, Math.max(20, Number(e.target.value) || 100));
+          patch("scannerUniverseSize", size);
+          patch("maxSymbolsScanned", size);
+        }} min={20} max={250} step={10} style={numStyle} title="Canonical scanner universe size. Applied on the next full scan without affecting open positions." />
+
+        <label title="Market Edge is separate from ML Runtime Mode.">Market Edge Mode</label>
+        <select value={v.marketEdgeMode} onChange={(e) => patch("marketEdgeMode", e.target.value as TradingParametersView["marketEdgeMode"])} title="MONITOR observes only. PRIORITY may request canonical reanalysis but never submits orders.">
+          <option value="OFF">Off</option>
+          <option value="MONITOR">Monitor</option>
+          <option value="PRIORITY">Priority</option>
+        </select>
 
         <label>Final Pool Size</label>
         <input type="number" value={v.scannerFinalPoolSize} onChange={(e) => patch("scannerFinalPoolSize", Math.max(1, Number(e.target.value) || 1))} min={1} step={5} style={numStyle} />
 
         <label>Candidate Pool Size</label>
         <input type="number" value={v.scannerCandidatePoolSize} onChange={(e) => patch("scannerCandidatePoolSize", Math.max(1, Number(e.target.value) || 1))} min={1} step={5} style={numStyle} />
-
-        <label>Max Symbols Scanned</label>
-        <input type="number" value={v.maxSymbolsScanned} onChange={(e) => patch("maxSymbolsScanned", Math.max(1, Number(e.target.value) || 1))} min={1} step={5} style={numStyle} />
 
         <label>Min 24h Volume (K$)</label>
         <input type="number" value={v.min24hQuoteVolumeUsdt} onChange={(e) => patch("min24hQuoteVolumeUsdt", Math.max(0, Number(e.target.value) || 0))} min={0} step={50000} style={numStyle} />

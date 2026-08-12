@@ -14,6 +14,8 @@ import { ExecutionInsightsCard } from "./ExecutionInsightsCard";
 import { TradingParametersCard } from "./TradingParametersCard";
 import { RecentExecutionsCard } from "./RecentExecutionsCard";
 import { MicroScalperPanel } from "./MicroScalperPanel";
+import { MarketEdgePanel } from "./MarketEdgePanel";
+import type { MarketEdgeRuntime } from "../../core/market-edge/MarketEdgeRuntime";
 import { getTabSymbol } from "../../lib/ui/uiSymbolMapper";
 import { logger } from "../../utils/logger";
 import "./trade-v4.css";
@@ -33,6 +35,7 @@ export function TradeV4Page(props: {
   model: TradeV4PageModel;
   closedTradesRestoring?: boolean;
   parameters: TradingParametersView;
+  marketEdgeRuntime: MarketEdgeRuntime;
   onChangeParameters: (next: TradingParametersView) => void;
   onApplySettings?: () => void;
   runtimeStatus?: {
@@ -59,6 +62,8 @@ export function TradeV4Page(props: {
   scannerConfigDirty?: boolean;
 }) {
   const [localSelected, setLocalSelected] = useState<string | null>(props.model.selectedSymbol ?? null);
+  const [marketEdgeState, setMarketEdgeState] = useState(() => props.marketEdgeRuntime.getState());
+  useEffect(() => props.marketEdgeRuntime.subscribe(setMarketEdgeState), [props.marketEdgeRuntime]);
   const selectedSymbol = props.model.selectedSymbol ?? localSelected;
   const renderAuditRef = useRef({ count: 0, startedAt: performance.now(), lastLoggedAt: 0 });
   const performanceHealthAuditRef = useRef(0);
@@ -196,6 +201,7 @@ export function TradeV4Page(props: {
               dipperCardState={props.model.dipperCardState}
             />
           </div>
+          <MarketEdgePanel state={marketEdgeState} top={props.marketEdgeRuntime.getTopSnapshots(4)} selected={selectedSymbol ? props.marketEdgeRuntime.getSnapshot(selectedSymbol) : null} outcomes={props.marketEdgeRuntime.getOutcomeSummary()} />
 
           <div data-testid="sidebar-scalper">
             {props.model.scalperState && (

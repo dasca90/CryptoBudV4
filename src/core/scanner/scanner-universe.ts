@@ -78,6 +78,7 @@ export async function buildScannerUniverse(
   mode: UniverseMode,
   watchlist: string[],
   options?: ScannerBanFilterOptions & {
+    maxSymbols?: number;
     enabledRiskGroups?: {
       top_caps: boolean;
       large_caps: boolean;
@@ -149,10 +150,12 @@ export async function buildScannerUniverse(
     return allowed;
   });
   const excludedByGroupCount = validSymbols.length - groupFilteredSymbols.length;
+  const maxSymbols = Math.min(250, Math.max(1, Math.round(options?.maxSymbols ?? 250)));
+  const limitedSymbols = groupFilteredSymbols.slice(0, maxSymbols);
   return {
-    symbols: groupFilteredSymbols.slice(0, 250),
+    symbols: limitedSymbols,
     beforeFilterCount: filtered.beforeCount,
-    afterFilterCount: groupFilteredSymbols.length,
+    afterFilterCount: limitedSymbols.length,
     bannedCount: filtered.bannedCount + excludedByGroupCount,
     topBanReasons: filtered.topBanReasons,
     reasonCounts: filtered.reasonCounts,

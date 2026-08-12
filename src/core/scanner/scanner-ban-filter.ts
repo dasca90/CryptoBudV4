@@ -42,7 +42,7 @@ export interface FilteredUniverseResult {
 const STABLECOIN_ASSETS = new Set([
   'USDC', 'FDUSD', 'TUSD', 'BUSD', 'DAI', 'USDP', 'USDD', 'USD1', 'USDE',
   'PYUSD', 'USTC', 'USDS', 'EURC', 'AEUR', 'RLUSD', 'XUSD',
-  'GUSD', 'LUSD', 'FRAX', 'SUSD', 'USN', 'USDJ', 'USDX', 'USDY',
+  'GUSD', 'LUSD', 'FRAX', 'SUSD', 'USN', 'USDJ', 'USDX', 'USDY', 'EURI',
 ]);
 
 const FIAT_ASSETS = new Set([
@@ -72,9 +72,8 @@ export function isScannerBannedSymbol(
   if (manualSet.has(sym) || (baseAsset && manualSet.has(baseAsset))) {
     return { banned: true, reason: 'MANUAL_BANLIST', symbol: sym, baseAsset, quoteAsset, warnings };
   }
-  const banned = isSymbolBannedForTrading(sym, baseAsset, quoteAsset, [...manualSet]);
-  if (banned.banned) {
-    return { banned: true, reason: 'MANUAL_BANLIST', symbol: sym, baseAsset, quoteAsset, warnings: [...warnings, banned.reason] };
+  if (!sym.endsWith('USDT')) {
+    return { banned: true, reason: 'NON_USDT_QUOTE', symbol: sym, baseAsset, quoteAsset, warnings };
   }
 
   if (!filters) {
@@ -119,6 +118,11 @@ export function isScannerBannedSymbol(
 
   if (baseAsset.startsWith('W') && (WRAPPED_BTC_ASSETS.has(baseAsset) || WRAPPED_ETH_ASSETS.has(baseAsset))) {
     return { banned: true, reason: 'SYNTHETIC_OR_PEGGED_ASSET', symbol: sym, baseAsset, quoteAsset, warnings };
+  }
+
+  const banned = isSymbolBannedForTrading(sym, baseAsset, quoteAsset, [...manualSet]);
+  if (banned.banned) {
+    return { banned: true, reason: 'SYNTHETIC_OR_PEGGED_ASSET', symbol: sym, baseAsset, quoteAsset, warnings: [...warnings, banned.reason] };
   }
 
   return { banned: false, reason: null, symbol: sym, baseAsset, quoteAsset, warnings };
