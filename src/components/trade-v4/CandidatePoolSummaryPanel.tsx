@@ -178,7 +178,7 @@ export function CandidatePoolSummaryPanel(props: {
     <section className="panel panel-fill" style={{ padding: '8px 10px', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
       <div className="panel-title" style={{ fontSize: 10 }}>CANDIDATE POOL / ENTRY PIPELINE</div>
       <div className="muted" data-testid="candidate-pool-source-legend" style={{ fontSize: 8, marginTop: 3 }}>
-        Source: AutoBots · 🦄 Unicorn Hunter · ML Predict
+        Source: AutoBots · ML Predict
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 6, flex: 1, minHeight: 0, overflow: 'hidden' }}>

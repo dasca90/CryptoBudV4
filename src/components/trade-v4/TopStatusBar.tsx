@@ -1,5 +1,4 @@
 ﻿import { memo } from "react";
-import type { TradeV4PageModel } from "./types";
 import { getTitleSymbol } from "../../lib/ui/uiSymbolMapper";
 import { logger } from "../../utils/logger";
 import { getExecutionModeDisplay } from "../../lib/execution/executionDisplay";
@@ -18,7 +17,6 @@ export const TopStatusBar = memo(function TopStatusBar(props: {
   onStopScanner: () => void;
   onTogglePaperAuto?: () => void;
   paperAutoEnabled?: boolean;
-  unicornHunterStatus?: TradeV4PageModel["unicornHunterRuntime"];
 }) {
   logger.throttled('INFO', `OPEN_POSITIONS_LIMIT_SOURCE: openCount=${props.openPositions} displayedMax=${props.maxPositions} sourceKey=maxOpenPositions source=user_parameters_via_TradeV4Page`, 'open_positions_limit_source', 30000);
   if (props.openPositions > props.maxPositions) {
@@ -42,12 +40,6 @@ export const TopStatusBar = memo(function TopStatusBar(props: {
       <Status label="OPEN POSITIONS" value={`${props.openPositions} / ${props.maxPositions}`} />
       <Status label="PNL TODAY" value={`${props.pnlToday >= 0 ? "+" : ""}$${props.pnlToday.toFixed(2)}`} good={props.pnlToday >= 0} />
       <Status label="DATA QUALITY" value={props.dataQuality} good={props.dataQuality === "GOOD"} />
-      <Status
-        label="🦄 UNICORN"
-        value={props.unicornHunterStatus ? props.unicornHunterStatus.status : "ERROR"}
-        good={props.unicornHunterStatus?.status === "ON" || props.unicornHunterStatus?.status === "SCANNING"}
-      />
-
       <button
         className={props.scannerRunning ? "btn btn-danger" : "btn btn-primary"}
         onClick={props.scannerRunning ? props.onStopScanner : props.onStartScanner}

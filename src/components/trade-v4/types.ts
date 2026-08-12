@@ -23,6 +23,17 @@ export type TradeV4CandidateView = {
   source: string;
   sourceLabel?: string;
   sourcePresentation?: import('../../core/notifications/trade-source').TradeSourcePresentation;
+  /** Legacy read-only payload for records persisted before V6. */
+  unicornDp?: {
+    dpConfirmed: boolean;
+    dpReason: string;
+    dipObserved: boolean;
+    reboundObserved: boolean;
+    dipPct: number;
+    requiredDipPct: number;
+    reboundPct: number;
+    requiredReboundPct: number;
+  } | null;
   riskGroup: string;
   strategy: string;
   status:
@@ -112,7 +123,6 @@ export type TradeV4CandidateView = {
   removedFromExecutionPool?: boolean;
   handoffIntegrityStatus?: 'ok' | 'failed' | 'not_applicable' | string;
   renderedUserMessage?: string | null;
-  unicornDp?: import('../../core/unicorn/UnicornHunterTypes').UnicornDpConfirmation | null;
   gateAudit?: {
     spreadPct: number;
     maxSpreadSettingFromUI: number;
@@ -483,7 +493,6 @@ export type TradingParametersView = {
   cooldownAfterBuyMs: number;
   cooldownAfterLossMs: number;
   paperAutoEnabled: boolean;
-  unicornHunter: import('../../core/unicorn/UnicornHunterTypes').UnicornHunterSettings;
   autoTradingCapital: number;
   capitalPerCoin: number;
   reinvestProfit: boolean;
@@ -598,32 +607,6 @@ export interface TradeV4NoBuyDisplay {
   finalNoBuyReason?: string;
 }
 
-export type TradeV4UnicornHunterRuntimeStatusValue = 'OFF' | 'ON' | 'SCANNING' | 'BLOCKED' | 'ERROR';
-export interface TradeV4UnicornHunterRuntimeStatus {
-  enabled: boolean;
-  mode: import('../../core/unicorn/UnicornHunterTypes').UnicornHunterSettings['mode'];
-  status: TradeV4UnicornHunterRuntimeStatusValue;
-  scannerRunning: boolean;
-  lastScanCycleId: string | null;
-  lastCycleStartedAt: number | null;
-  lastCycleCompletedAt: number | null;
-  lastCycleDurationMs: number | null;
-  lastSymbolsSeen: number;
-  lastSymbolsEvaluated: number;
-  lastCandidatesProduced: number;
-  lastBuyAllowed: boolean;
-  reasonIfSkipped: string;
-  lastUnicornCandidateSymbol: string | null;
-  lastUnicornStage: string;
-  lastUnicornBlockReason: string;
-  lastUnicornConfirmationReason: string;
-  lastUnicornExecutionDecision: string;
-  lastUnicornSubmitAttempted: boolean;
-  lastUnicornAdapterCalled: boolean;
-  lastCalledAt: number | null;
-  notWiredDetected: boolean;
-}
-
 export interface TradeV4PageModel {
   candidates: TradeV4CandidateView[];
   openPositions: TradeV4OpenPositionView[];
@@ -696,9 +679,6 @@ export interface TradeV4PageModel {
     openPositionsBefore?: number;
     openPositionsAfter?: number;
   };
-  unicornRadar?: import('../../core/unicorn/UnicornHunterTypes').UnicornRadarRow[];
-  unicornWatchlistSummary?: import('../../core/unicorn/UnicornHunterTypes').UnicornWatchlistSummary;
-  unicornHunterRuntime?: TradeV4UnicornHunterRuntimeStatus;
   autoStrategySummary?: {
     totalCandidates: number;
     conservative: number;

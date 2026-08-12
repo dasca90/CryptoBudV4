@@ -12,7 +12,6 @@ import { SettingsPersistence } from '../../core/persistence/SettingsPersistence'
 import { normalizeDipperRiskGroups } from '../../core/scanner/riskGroupConstants';
 import { DEFAULT_BANNED_SYMBOLS } from '../../core/scalper/defaultBannedSymbols';
 import { createDefaultAppSettings } from '../../core/types';
-import { createDefaultUnicornHunterSettings, normalizeUnicornHunterSettings } from '../../core/unicorn/UnicornHunterTypes';
 import { TradeV4Page } from '../../components/trade-v4/TradeV4Page';
 import { buildTradeV4PageModel } from '../../lib/air-scanner/tradeV4DataAdapter';
 import { getMicroScalperState } from '../../core/scalper/MicroScalperEngine';
@@ -194,7 +193,6 @@ export function TradePage({
     cooldownAfterBuyMs: 30000,
     cooldownAfterLossMs: 60000,
     paperAutoEnabled: false,
-    unicornHunter: createDefaultUnicornHunterSettings(),
     autoTradingCapital: 1000,
     capitalPerCoin: 100,
     reinvestProfit: false,
@@ -282,8 +280,7 @@ export function TradePage({
         userExplicit: airParams.maxSelectedPerScanUserSet === true,
       });
     }
-    scanner?.setUnicornHunterSettings?.(airParams.unicornHunter);
-  }, [airParams.strategySource, airParams.entryConfirmationMode, airParams.scannerDiagnosticsLevel, airParams.strategy, airParams.maxSpreadPct, airParams.maxSlippagePct, airParams.maxTotalEntryCostPct, airParams.maxPriceAgeMs, airParams.tp1Pct, airParams.tp2Pct, airParams.stopLossPct, airParams.dynamicTrailingEnabled, airParams.trailPullbackPct, airParams.scannerCandidatePoolSize, airParams.min24hQuoteVolumeUsdt, airParams.maxSymbolsScanned, airParams.momentumWeight, airParams.volumeSurgeWeight, airParams.breakoutWeight, airParams.newMoverBonus, airParams.enableNewMoverBonus, airParams.maxOpenPositions, airParams.maxSelectedPerScan, airParams.autoTradingCapital, airParams.capitalPerCoin, airParams.unicornHunter, paperAutoEnabled, engine]);
+  }, [airParams.strategySource, airParams.entryConfirmationMode, airParams.scannerDiagnosticsLevel, airParams.strategy, airParams.maxSpreadPct, airParams.maxSlippagePct, airParams.maxTotalEntryCostPct, airParams.maxPriceAgeMs, airParams.tp1Pct, airParams.tp2Pct, airParams.stopLossPct, airParams.dynamicTrailingEnabled, airParams.trailPullbackPct, airParams.scannerCandidatePoolSize, airParams.min24hQuoteVolumeUsdt, airParams.maxSymbolsScanned, airParams.momentumWeight, airParams.volumeSurgeWeight, airParams.breakoutWeight, airParams.newMoverBonus, airParams.enableNewMoverBonus, airParams.maxOpenPositions, airParams.maxSelectedPerScan, airParams.autoTradingCapital, airParams.capitalPerCoin, paperAutoEnabled, engine]);
 
   useEffect(() => {
     (async () => {
@@ -349,7 +346,6 @@ export function TradePage({
         maxEntriesPerCoinPerDay: (s as any).maxEntriesPerCoinPerDay ?? prev.maxEntriesPerCoinPerDay,
         cooldownAfterBuyMs: (s as any).cooldownAfterBuyMs ?? prev.cooldownAfterBuyMs,
         cooldownAfterLossMs: (s as any).cooldownAfterLossMs ?? prev.cooldownAfterLossMs,
-        unicornHunter: normalizeUnicornHunterSettings((s as any).unicornHunter),
         manualDipperSetup: {
           ...defaultManualDipperSetup,
           ...((s as any).manualDipperSetup ?? {}),
@@ -381,7 +377,6 @@ export function TradePage({
             dynamicTrailingEnabled: s.dynamicTrailingEnabled ?? false,
             trailPullbackPct: s.trailPullbackPct ?? 0.25,
           });
-          scanner.setUnicornHunterSettings?.(normalizeUnicornHunterSettings((s as any).unicornHunter));
         }
         logger.info(`AUTOBOTS_HYDRATION_RESTORE: persistedValue=${persistedAutoBots} storeValue=false chosenValue=${persistedAutoBots} reason=no_user_toggle_yet`);
       } else if (persistedAutoBots !== paperAutoEnabled) {
@@ -483,7 +478,6 @@ export function TradePage({
       enableNewMoverBonus: airParams.enableNewMoverBonus as any,
       maxOverextensionPct: airParams.maxOverextensionPct as any,
       manualDipperSetup: airParams.manualDipperSetup as any,
-      unicornHunter: normalizeUnicornHunterSettings(airParams.unicornHunter) as any,
       updatedAt: new Date().toISOString(),
     } as any);
     engine.getAutoRuntime()?.getScanner()?.setPaperAutoEnabled(paperAutoEnabled);
@@ -507,7 +501,6 @@ export function TradePage({
       uiValue: airParams.maxSelectedPerScan,
       userExplicit: airParams.maxSelectedPerScanUserSet === true,
     });
-    engine.getAutoRuntime()?.getScanner()?.setUnicornHunterSettings?.(normalizeUnicornHunterSettings(airParams.unicornHunter));
     logger.info(`MANUAL_DIPPER_SETUP_SAVE_SUCCESS: momentumMinReboundPct=${airParams.manualDipperSetup.momentumMinReboundPct} balancedMinDipPct=${airParams.manualDipperSetup.balancedMinDipPct} balancedMinReboundPct=${airParams.manualDipperSetup.balancedMinReboundPct} dipReboundMinDipPct=${airParams.manualDipperSetup.dipReboundMinDipPct} dipReboundMinReboundPct=${airParams.manualDipperSetup.dipReboundMinReboundPct} conservativeMinDipPct=${airParams.manualDipperSetup.conservativeMinDipPct} conservativeMinReboundPct=${airParams.manualDipperSetup.conservativeMinReboundPct}`);
     logger.info(`MANUAL_DIPPER_SETUP_SETTINGS_AUDIT: autoBotsOn=${String(paperAutoEnabled)} strategySource=${airParams.strategySource} source=trade_parameters`);
     onScannerConfigChange?.({
@@ -584,8 +577,6 @@ export function TradePage({
     ?? (snapshot?.candidates[0]?.dataQuality as TradeV4PageModel['dataQuality'])
     ?? 'UNKNOWN';
   const scanner = engine.getAutoRuntime()?.getScanner?.();
-  const unicornHunterRuntime = scanner?.getUnicornHunterRuntimeStatus?.();
-
   const airModel = buildTradeV4PageModel({
     scannerSnapshot: snapshot ?? null,
     positions: positionManagerOpenPositions,
@@ -609,7 +600,6 @@ export function TradePage({
     openPanelRowsCount: positionManagerOpenPositions.length,
     activeMode: state.activeTradeMode,
     restoringOpenPositions: !!positionBootRestoring,
-    unicornHunterRuntime,
   });
   const uniqueTradeIds = new Set(((engine as any)['journal']?.getTrades?.() ?? []).map((t: any) => t.tradeId));
   const totalTradeHistoryCount = ((engine as any)['journal']?.getTrades?.() ?? []).length;

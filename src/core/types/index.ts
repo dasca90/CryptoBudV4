@@ -1134,7 +1134,6 @@ export interface ScannerCandidate {
   removedFromTopCandidates?: boolean;
   removedFromExecutionPool?: boolean;
   handoffIntegrityStatus?: 'ok' | 'failed' | 'not_applicable' | string;
-  unicornDp?: import('../unicorn/UnicornHunterTypes').UnicornDpConfirmation;
   finalExecutable?: boolean;
   buyAllowed?: boolean;
   professionalGateMode?: 'advisory' | 'hard_gate' | string;
@@ -1284,8 +1283,6 @@ export interface ScannerSnapshot {
   nearMissPoolSize?: number;
   topExecutionCandidates?: string[];
   topWatchCandidates?: string[];
-  unicornRadar?: import('../unicorn/UnicornHunterTypes').UnicornRadarRow[];
-  unicornWatchlistSummary?: import('../unicorn/UnicornHunterTypes').UnicornWatchlistSummary;
   noBuySummary?: {
     executionPoolSize: number;
     watchPoolSize: number;
@@ -1838,7 +1835,6 @@ export type ApiStatus = 'NOT_CONFIGURED' | 'CONFIGURED' | 'TESTING' | 'VALID' | 
 export type RiskStyleName = 'conservative' | 'moderate' | 'aggressive';
 export type AllowedGroupsSetting = 'all' | 'blue_chip' | 'no_very_high_risk';
 export type GraphicsQualitySetting = 'low' | 'balanced' | 'high';
-export type { UnicornHunterMode, UnicornHunterSettings, UnicornRadarRow } from '../unicorn/UnicornHunterTypes';
 
 export interface TelegramSettings {
   enabled: boolean;
@@ -1947,7 +1943,6 @@ export interface AppSettings {
   maxTimeBasedExitsPerCycle: number;
   paperAutoExecutionEnabled: boolean;
   microScalperFeatureEnabled: boolean;
-  unicornHunter: import('../unicorn/UnicornHunterTypes').UnicornHunterSettings;
   graphicsQuality: GraphicsQualitySetting;
   autoPerformanceMode: boolean;
   manualDipperSetup: ManualDipperSetupSettings;
@@ -2031,30 +2026,6 @@ export function createDefaultAppSettings(): AppSettings {
     maxTimeBasedExitsPerCycle: 2,
     paperAutoExecutionEnabled: true,
     microScalperFeatureEnabled: true,
-    unicornHunter: {
-      enabled: false,
-      mode: 'watch',
-      maxUnicornBuysPerCycle: 1,
-      maxOpenUnicornPositions: 1,
-      maxUnicornTradesPerDay: 1,
-      unicornMinSecondsBetweenBuys: 30,
-      capitalPctPerTrade: 0.5,
-      minUnicornScore: 85,
-      maxListingAgeHours: 72,
-      min24hChangePct: 8,
-      min5mChangePct: 2,
-      minQuoteVolume: 100000,
-      antiAthGuardEnabled: true,
-      requirePullbackRebound: true,
-      maxDistanceToHighPct: 1.0,
-      minPullbackPct: 2.0,
-      maxPullbackPct: 8.0,
-      minReboundPct: 0.8,
-      maxSpreadPct: 0.35,
-      maxSlippagePct: 0.25,
-      cooldownAfterLossMinutes: 720,
-      cooldownAfterFailedBreakoutMinutes: 120,
-    },
     graphicsQuality: 'balanced',
     autoPerformanceMode: false,
     manualDipperSetup: {

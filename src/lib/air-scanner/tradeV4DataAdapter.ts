@@ -1362,7 +1362,6 @@ export function buildTradeV4PageModel(input: {
   openPanelRowsCount?: number;
   activeMode?: string;
   restoringOpenPositions?: boolean;
-  unicornHunterRuntime?: TradeV4PageModel['unicornHunterRuntime'];
 }): TradeV4PageModel {
   const rawCandidates = input.scannerSnapshot?.candidates ?? [];
   const planDecisions = input.scannerSnapshot?.executionPlan?.decisions;
@@ -1597,9 +1596,6 @@ export function buildTradeV4PageModel(input: {
     emptyUniverseReason: snap?.emptyUniverseReason,
     paperAutoEnabled: input.paperAutoEnabled ?? snap?.paperAutoEnabled,
     paperAutoResult: snap?.paperAutoResult,
-    unicornRadar: snap?.unicornRadar ?? [],
-    unicornWatchlistSummary: snap?.unicornWatchlistSummary,
-    unicornHunterRuntime: input.unicornHunterRuntime,
     autoStrategySummary: snap?.autoStrategySummary,
     executionPlan: snap?.executionPlan,
     btcAnchorEnabled: input.btcAnchorEnabled,

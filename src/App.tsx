@@ -1121,7 +1121,6 @@ export default function App() {
         scannerBanlist: settings.scannerBanlist ?? settings.manualScannerBanlist ?? [],
       });
       autoRuntime.getScanner().setScannerDiagnosticsLevel?.((settings as any).scannerDiagnosticsLevel ?? 'normal');
-      autoRuntime.getScanner().setUnicornHunterSettings?.((settings as any).unicornHunter);
       autoRuntime.getScanner().setManualStrategy(!effectiveAutoBots && effectiveStrategySource === 'manual_override'
         ? (settings.riskStyle === 'aggressive' ? 'momentum' : settings.riskStyle === 'conservative' ? 'conservative' : 'balanced')
         : null);

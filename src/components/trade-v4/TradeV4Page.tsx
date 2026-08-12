@@ -29,58 +29,6 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function UnicornRadarCard({ rows, summary, settings, unicornOpenCount }: { rows: TradeV4PageModel["unicornRadar"]; summary?: TradeV4PageModel["unicornWatchlistSummary"]; settings: TradingParametersView["unicornHunter"]; unicornOpenCount: number }) {
-  const data = rows ?? [];
-  const watchOnly = !settings.enabled || settings.mode === 'watch' || settings.mode === 'off';
-  const stageCounts = summary?.stageCounts
-    ? Object.entries(summary.stageCounts).filter(([, count]) => count > 0).map(([stage, count]) => `${stage}:${count}`).join(' ')
-    : '';
-  return (
-    <div className="panel panel-shell" data-testid="unicorn-radar-panel" style={{ padding: 8, minHeight: 0 }}>
-      <div className="panel-header-v4" style={{ padding: 0, marginBottom: 6 }}>
-        <div className="panel-title panel-title-v4" style={{ color: '#bc8cff' }}>UNICORN RADAR</div>
-      </div>
-      {summary && (
-        <div className="muted" style={{ fontSize: 9, marginBottom: 5 }}>
-          Enabled: {settings.enabled ? 'YES' : 'NO'} / Mode: {settings.mode.toUpperCase()} / Unicorn Positions: {unicornOpenCount} / {settings.maxOpenUnicornPositions} / Trades Today: n/a / {settings.maxUnicornTradesPerDay}
-          <br />
-          Visible {summary.visibleRowsCount} / Radar {summary.radarRowsCount} / Watch {summary.internalWatchlistCount}
-          {stageCounts ? ` - ${stageCounts}` : ''}
-        </div>
-      )}
-      {watchOnly && (
-        <div className="muted" style={{ fontSize: 10, marginBottom: 5, color: '#d29922' }}>
-          Unicorn Radar watch-only — cannot submit BUY.
-        </div>
-      )}
-      <div style={{ display: 'grid', gap: 4, maxHeight: 112, overflow: 'auto' }}>
-        {data.length === 0 ? (
-          <div className="muted" style={{ fontSize: 10 }}>OFF / watch only</div>
-        ) : data.slice(0, 6).map((row) => {
-          const dp = row.dp;
-          const dpBlocked = dp?.dpConfirmed === false && row.score >= settings.minUnicornScore;
-          const color = row.action === 'ready' ? '#3fb950' : row.action === 'watch' ? '#d29922' : '#f85149';
-          const action = row.action === 'ready'
-            ? 'READY'
-            : dpBlocked
-              ? (row.stage === 'READY_BLOCKED' ? 'READY_BLOCKED' : 'SCORE_READY_WAITING_DP')
-              : row.stage ?? ((row.reasonCode === 'ANTI_ATH_BLOCKED' || row.rawReasonCode === 'unicorn_block_ath_risk') ? 'WAIT PULLBACK' : row.action.toUpperCase());
-          const dpText = dp
-            ? ` DP ${dp.dpConfirmed ? 'OK' : dp.dpReason} dip ${dp.dipPct.toFixed(2)}/${dp.requiredDipPct} rebound ${dp.reboundPct.toFixed(2)}/${dp.requiredReboundPct}`
-            : '';
-          return (
-            <div key={`${row.symbol}-${row.reasonCode}`} style={{ display: 'grid', gridTemplateColumns: '72px minmax(0, 1fr) 152px', gap: 6, alignItems: 'center', fontSize: 10, borderLeft: `2px solid ${color}`, paddingLeft: 6 }}>
-              <strong style={{ color: '#d2a8ff' }}>{row.symbol}</strong>
-              <span className="muted">24h {row.metrics.change24hPct?.toFixed(2) ?? 'n/a'}% · Seen {row.growthSinceFirstSeenPct?.toFixed(2) ?? '0.00'}% · Score {row.score}{dpText}</span>
-              <span style={{ color, fontWeight: 700, textAlign: 'right' }}>{action}</span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 export function TradeV4Page(props: {
   model: TradeV4PageModel;
   closedTradesRestoring?: boolean;
@@ -112,20 +60,6 @@ export function TradeV4Page(props: {
 }) {
   const [localSelected, setLocalSelected] = useState<string | null>(props.model.selectedSymbol ?? null);
   const selectedSymbol = props.model.selectedSymbol ?? localSelected;
-  const unicornOpenCount = props.model.openPositions.filter((position) => {
-    const sourceText = `${position.sourceLabel ?? ''} ${position.ownerType ?? ''} ${position.candidateSource ?? ''}`.toLowerCase();
-    return sourceText.includes('unicorn');
-  }).length;
-  const unicornHunterStatus = props.model.unicornHunterRuntime?.status ?? 'ERROR';
-  const unicornHunterReason = props.model.unicornHunterRuntime?.reasonIfSkipped ?? 'runtime_status_missing';
-  const unicornBudget = props.model.executionPlan;
-  const unicornSelectedExecutableCount = unicornBudget?.unicornSelectedExecutableCount ?? 0;
-  const unicornSubmitAttemptedThisCycle = unicornBudget?.unicornSubmitAttemptedThisCycle ?? 0;
-  const unicornFinalNoSubmitReason = unicornBudget?.unicornSelectedButNotSubmittedReason
-    ?? props.model.unicornHunterRuntime?.lastUnicornBlockReason
-    ?? 'none';
-  const maxUnicornBuysPerCycle = unicornBudget?.maxUnicornBuysPerCycle ?? props.parameters.unicornHunter.maxUnicornBuysPerCycle ?? 1;
-  const unicornRuntime = props.model.unicornHunterRuntime;
   const renderAuditRef = useRef({ count: 0, startedAt: performance.now(), lastLoggedAt: 0 });
   const performanceHealthAuditRef = useRef(0);
   const lastScanAuditRef = useRef<{ at: number; scanAt: string | null }>({ at: Date.now(), scanAt: null });
@@ -216,7 +150,6 @@ export function TradeV4Page(props: {
         pnlToday={props.model.pnlToday} dataQuality={props.model.dataQuality}
         onStartScanner={props.onStartScanner} onStopScanner={props.onStopScanner}
         onTogglePaperAuto={props.onTogglePaperAuto} paperAutoEnabled={props.model.paperAutoEnabled}
-        unicornHunterStatus={props.model.unicornHunterRuntime}
       />
 
       <div className="trade-v4-body-v3">
@@ -280,10 +213,6 @@ export function TradeV4Page(props: {
             )}
           </div>
 
-          <div data-testid="sidebar-unicorn-radar">
-            <UnicornRadarCard rows={props.model.unicornRadar} summary={props.model.unicornWatchlistSummary} settings={props.parameters.unicornHunter} unicornOpenCount={unicornOpenCount} />
-          </div>
-
           <div data-testid="sidebar-trading-parameters">
             <div className="panel" style={{ padding: 8, flexShrink: 0 }}>
               <TradingParametersCard
@@ -323,15 +252,6 @@ export function TradeV4Page(props: {
                   <span>BUY {buyCount}</span>
                   <span>WAIT {waitCount}</span>
                   <span>blocked {blockCount}</span>
-                  <span>🦄 Unicorn Hunter: {unicornHunterStatus}</span>
-                  <span>unicorn reason {unicornHunterReason}</span>
-                  <span>unicorn stage {unicornRuntime?.lastUnicornStage ?? 'n/a'}</span>
-                  <span>unicorn candidate {unicornRuntime?.lastUnicornCandidateSymbol ?? 'n/a'}</span>
-                  <span>unicorn submit {unicornRuntime?.lastUnicornSubmitAttempted ? 'yes' : 'no'}</span>
-                  <span>unicorn adapter {unicornRuntime?.lastUnicornAdapterCalled ? 'yes' : 'no'}</span>
-                  <span>unicorn executable {unicornSelectedExecutableCount}</span>
-                  <span>unicorn submit/cycle {unicornSubmitAttemptedThisCycle}/{maxUnicornBuysPerCycle}</span>
-                  <span>unicorn final {unicornFinalNoSubmitReason}</span>
                   <span>last scan {props.model.lastScanAt ?? 'n/a'}</span>
                   <span>3D/WebGL inactive on Trade tab</span>
                 </div>

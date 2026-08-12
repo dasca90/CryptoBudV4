@@ -219,7 +219,5 @@ ok(scannerSrc.includes('ENTRY_CANDIDATE_DUPLICATE_FILTER_AUDIT') && scannerSrc.i
 ok(plannerSrc.includes('activeExecutionPool') && plannerSrc.includes('EXECUTION_POOL_OPEN_SYMBOL_EXCLUSION_AUDIT'), 'planner has backup open-symbol exclusion before selection');
 ok(topSrc.includes('rawBuyStatusCount=') && topSrc.includes('uiBuyReadyCount='), 'Top Candidates buy-ready counts remain derived from active displayed rows');
 ok(engineSrc.includes('for (const pos of this.positionManager.getOpenPositions())') && engineSrc.includes('EXIT_ENGINE_LIFECYCLE_AUDIT'), 'Exit Engine still evaluates PositionManager open positions');
-ok(scannerSrc.includes('UNICORN_BLOCK_DUPLICATE_POSITION') && scannerSrc.includes('FILTERED_ALREADY_OPEN_POSITION'), 'Unicorn watched/open duplicate path reports canonical blocker');
-
 console.log(`open-symbol-candidate-filter.test: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
