@@ -1,6 +1,7 @@
 import type { UniverseMode } from '../types';
 import { BinancePublicClient } from '../market-data/BinancePublicClient';
 import { filterScannerUniverse, type FilteredUniverseResult, type ScannerBanFilterOptions } from './scanner-ban-filter';
+import { DEFAULT_SCANNER_UNIVERSE_SIZE, getEffectiveScannerUniverseSize, normalizeScannerUniverseSize } from './scanner-universe-config';
 
 const TOP_20_SYMBOLS = [
   'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT',
@@ -33,6 +34,7 @@ export interface UniverseBuildResult {
   symbols: string[];
   beforeFilterCount: number;
   afterFilterCount: number;
+  eligibleUniverseAvailable: number;
   bannedCount: number;
   topBanReasons: Array<{ reason: string; count: number }>;
   reasonCounts: FilteredUniverseResult['reasonCounts'];
@@ -123,6 +125,7 @@ export async function buildScannerUniverse(
       symbols: filteredSymbols,
       beforeFilterCount: symbols.length,
       afterFilterCount: filteredSymbols.length,
+      eligibleUniverseAvailable: filteredSymbols.length,
       bannedCount: excludedByGroupCount,
       topBanReasons: [],
       reasonCounts: { ...EMPTY_REASON_COUNTS },
@@ -150,12 +153,14 @@ export async function buildScannerUniverse(
     return allowed;
   });
   const excludedByGroupCount = validSymbols.length - groupFilteredSymbols.length;
-  const maxSymbols = Math.min(250, Math.max(1, Math.round(options?.maxSymbols ?? 250)));
-  const limitedSymbols = groupFilteredSymbols.slice(0, maxSymbols);
+  const configuredUniverseSize = normalizeScannerUniverseSize(options?.maxSymbols ?? DEFAULT_SCANNER_UNIVERSE_SIZE);
+  const effectiveUniverseSize = getEffectiveScannerUniverseSize(configuredUniverseSize, groupFilteredSymbols.length);
+  const limitedSymbols = groupFilteredSymbols.slice(0, effectiveUniverseSize);
   return {
     symbols: limitedSymbols,
     beforeFilterCount: filtered.beforeCount,
     afterFilterCount: limitedSymbols.length,
+    eligibleUniverseAvailable: groupFilteredSymbols.length,
     bannedCount: filtered.bannedCount + excludedByGroupCount,
     topBanReasons: filtered.topBanReasons,
     reasonCounts: filtered.reasonCounts,

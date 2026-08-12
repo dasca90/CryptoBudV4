@@ -259,7 +259,6 @@ export function TradePage({
       scanner.setScannerRankingConfig({
         scannerCandidatePoolSize: airParams.scannerCandidatePoolSize,
         min24hQuoteVolumeUsdt: airParams.min24hQuoteVolumeUsdt,
-        maxSymbolsScanned: airParams.scannerUniverseSize,
         momentumWeight: airParams.momentumWeight,
         volumeSurgeWeight: airParams.volumeSurgeWeight,
         breakoutWeight: airParams.breakoutWeight,
@@ -284,7 +283,7 @@ export function TradePage({
         userExplicit: airParams.maxSelectedPerScanUserSet === true,
       });
     }
-  }, [airParams.strategySource, airParams.entryConfirmationMode, airParams.scannerDiagnosticsLevel, airParams.strategy, airParams.maxSpreadPct, airParams.maxSlippagePct, airParams.maxTotalEntryCostPct, airParams.maxPriceAgeMs, airParams.tp1Pct, airParams.tp2Pct, airParams.stopLossPct, airParams.dynamicTrailingEnabled, airParams.trailPullbackPct, airParams.scannerCandidatePoolSize, airParams.min24hQuoteVolumeUsdt, airParams.scannerUniverseSize, airParams.momentumWeight, airParams.volumeSurgeWeight, airParams.breakoutWeight, airParams.newMoverBonus, airParams.enableNewMoverBonus, airParams.maxOpenPositions, airParams.maxSelectedPerScan, airParams.autoTradingCapital, airParams.capitalPerCoin, paperAutoEnabled, engine]);
+  }, [airParams.strategySource, airParams.entryConfirmationMode, airParams.scannerDiagnosticsLevel, airParams.strategy, airParams.maxSpreadPct, airParams.maxSlippagePct, airParams.maxTotalEntryCostPct, airParams.maxPriceAgeMs, airParams.tp1Pct, airParams.tp2Pct, airParams.stopLossPct, airParams.dynamicTrailingEnabled, airParams.trailPullbackPct, airParams.scannerCandidatePoolSize, airParams.min24hQuoteVolumeUsdt, airParams.momentumWeight, airParams.volumeSurgeWeight, airParams.breakoutWeight, airParams.newMoverBonus, airParams.enableNewMoverBonus, airParams.maxOpenPositions, airParams.maxSelectedPerScan, airParams.autoTradingCapital, airParams.capitalPerCoin, paperAutoEnabled, engine]);
 
   useEffect(() => {
     (async () => {
@@ -413,10 +412,9 @@ export function TradePage({
     if (!(airParams.capitalPerCoin > 0)) errors.push('Capital per coin must be > 0');
     if (airParams.capitalPerCoin > airParams.autoTradingCapital) errors.push('Capital per coin cannot exceed trading capital');
     if (!(airParams.maxOpenPositions >= 1 && airParams.maxOpenPositions <= 100)) errors.push('Max open positions must be 1-100');
-    if (airParams.scannerUniverseSize < airParams.scannerFinalPoolSize) errors.push('Universe size must be >= final pool size');
     if (airParams.scannerFinalPoolSize < airParams.scannerCandidatePoolSize) errors.push('Final pool size must be >= candidate pool size');
     if (!(airParams.scannerCandidatePoolSize > 0)) errors.push('Candidate pool size must be > 0');
-    if (!(airParams.scannerUniverseSize >= 20 && airParams.scannerUniverseSize <= 250)) errors.push('Universe size must be 20-250');
+    if (!(Number.isSafeInteger(airParams.scannerUniverseSize) && airParams.scannerUniverseSize >= 1)) errors.push('Universe size must be a positive integer');
     if (!(airParams.maxSpreadPct > 0)) errors.push('Max spread must be > 0');
     const enabledGroups = Object.values(airParams.scannerRiskGroups).filter(Boolean).length;
     if (enabledGroups === 0) errors.push('At least one risk group must be enabled');
@@ -486,6 +484,8 @@ export function TradePage({
       manualDipperSetup: airParams.manualDipperSetup as any,
       updatedAt: new Date().toISOString(),
     } as any);
+    const scanner = engine.getAutoRuntime()?.getScanner?.();
+    scanner?.setScannerRankingConfig?.({ maxSymbolsScanned: airParams.scannerUniverseSize, source: 'settings_apply', hydrated: true });
     marketEdgeRuntime.updateConfig({ mode: airParams.marketEdgeMode, universeSize: airParams.scannerUniverseSize });
     const runtimeUniverse = [...(engine.getAutoRuntime()?.getScanner()?.getLastUniverseSymbols?.() ?? [])];
     if (runtimeUniverse.length > 0) void marketEdgeRuntime.updateUniverse(runtimeUniverse);

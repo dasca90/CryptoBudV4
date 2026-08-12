@@ -1,6 +1,9 @@
 import { buildScannerUniverse } from '../core/scanner/scanner-universe';
 import { filterScannerUniverse, isScannerBannedSymbol } from '../core/scanner/scanner-ban-filter';
 import { parseSymbolFilters } from '../core/market-data/symbol-filters';
+import { getEffectiveScannerUniverseSize, normalizeScannerUniverseSize, parseScannerUniverseSize, resolveScannerUniverseSizeDraft } from '../core/scanner/scanner-universe-config';
+import { readFileSync } from 'node:fs';
+import { MarketScanner } from '../core/scanner/MarketScanner';
 
 let passed = 0;
 let failed = 0;
@@ -74,7 +77,7 @@ async function main() {
     manualScannerBanlist: ['ADAUSDT'],
   });
 
-  assert(filtered.symbols.length <= 250, 'A universe max 250');
+  assert(filtered.symbols.length <= (exchangeInfo.symbols as unknown[]).length, 'A filter returns only available eligible symbols');
   assert(filtered.banned.some(b => b.symbol === 'USDCUSDT' && b.reason === 'STABLECOIN_PAIR'), 'C stablecoin pair banned');
   assert(filtered.banned.some(b => b.symbol === 'FDUSDUSDT' && b.reason === 'STABLECOIN_PAIR'), 'C stablecoin pair banned 2');
   assert(filtered.banned.some(b => b.symbol === 'RLUSDUSDT' && b.reason === 'STABLECOIN_PAIR'), 'O RLUSDUSDT banned as STABLECOIN_PAIR');
@@ -102,21 +105,43 @@ async function main() {
 
   // Build BINANCE_TOP_250 path with mocked fetch
   const originalFetch = globalThis.fetch;
+  const manyExchangeSymbols = Array.from({ length: 430 }).map((_, i) => makeExchangeSymbol(`C${i}USDT`, `C${i}`));
+  const largeExchangeInfo = { symbols: [...(exchangeInfo.symbols as Record<string, unknown>[]), ...manyExchangeSymbols] };
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes('/api/v3/exchangeInfo')) {
-      return new Response(JSON.stringify(exchangeInfo), { status: 200 });
+      return new Response(JSON.stringify(largeExchangeInfo), { status: 200 });
     }
     if (url.includes('/api/v3/ticker/24hr')) {
-      const many = Array.from({ length: 300 }).map((_, i) => ({ symbol: `C${i}USDT`, quoteVolume: String(1000 - i) }));
+      const many = Array.from({ length: 430 }).map((_, i) => ({ symbol: `C${i}USDT`, quoteVolume: String(2000 - i) }));
       const merged = [...tickers, ...many];
       return new Response(JSON.stringify(merged), { status: 200 });
     }
     return new Response('{}', { status: 200 });
   }) as typeof fetch;
 
-  const top250 = await buildScannerUniverse('BINANCE_TOP_250', [], { manualScannerBanlist: ['C1USDT'] });
-  assert(top250.symbols.length <= 250, 'A BINANCE_TOP_250 returns max 250');
+  const configured500 = await buildScannerUniverse('BINANCE_TOP_250', [], { maxSymbols: 500, manualScannerBanlist: ['C1USDT'] });
+  assert(configured500.symbols.length > 250, 'A configured 500 is not artificially capped at 250');
+  assert(configured500.symbols.length === configured500.eligibleUniverseAvailable, 'A configured 500 uses every currently eligible symbol when fewer are available');
+  const configured200 = await buildScannerUniverse('BINANCE_TOP_250', [], { maxSymbols: 200, manualScannerBanlist: ['C1USDT'] });
+  assert(configured200.symbols.length === 200, 'A configured 200 limits an eligible universe above 200');
+  const configured1000 = await buildScannerUniverse('BINANCE_TOP_250', [], { maxSymbols: 1000, manualScannerBanlist: ['C1USDT'] });
+  assert(configured1000.symbols.length === configured1000.eligibleUniverseAvailable, 'A configured 1000 remains persisted/effective only to availability');
+  assert(!configured500.symbols.includes('USDCUSDT') && !configured500.symbols.includes('WBTCUSDT'), 'A blocked assets remain excluded above size 250');
+
+  assert(normalizeScannerUniverseSize(50) === 50 && normalizeScannerUniverseSize(100) === 100 && normalizeScannerUniverseSize(150) === 150, 'R common editable values are accepted');
+  assert(normalizeScannerUniverseSize(250) === 250 && normalizeScannerUniverseSize(300) === 300 && normalizeScannerUniverseSize(400) === 400 && normalizeScannerUniverseSize(500) === 500, 'R values at and above legacy 250 are accepted exactly');
+  assert(getEffectiveScannerUniverseSize(400, 350) === 350 && getEffectiveScannerUniverseSize(200, 350) === 200 && getEffectiveScannerUniverseSize(500, 430) === 430, 'R effective size is min configured and eligible availability');
+  assert(resolveScannerUniverseSizeDraft('').draft === '' && resolveScannerUniverseSizeDraft('').value === null, 'R temporary empty input remains empty and does not restore a default');
+  assert([0, -10, 50.5, 'invalid'].every(value => parseScannerUniverseSize(value) === null), 'R invalid sizes are rejected instead of entering runtime');
+  const scanner = new MarketScanner();
+  scanner.setScannerRankingConfig({ maxSymbolsScanned: 400, source: 'test' });
+  scanner.setScannerRankingConfig({ maxSymbolsScanned: 50.5, source: 'test_invalid' });
+  assert(scanner.getRuntimeSettingsDiagnostics().configuredUniverseSize === 400, 'R invalid runtime update preserves the previous valid configured value');
+  const scannerSource = readFileSync('src/core/scanner/MarketScanner.ts', 'utf8');
+  assert(scannerSource.includes('const configuredUniverseSizeForScan = this.maxSymbolsScanned') && scannerSource.includes('maxSymbols: configuredUniverseSizeForScan'), 'R active scan captures an immutable configured-size snapshot');
+  const cardSource = readFileSync('src/components/trade-v4/TradingParametersCard.tsx', 'utf8');
+  assert(cardSource.includes('value={universeSizeDraft}') && cardSource.includes('min={1}') && !cardSource.includes('max={250}'), 'R UI keeps an editable draft with no legacy maximum');
   const onlyTopCaps = await buildScannerUniverse('TOP_50', [], {
     enabledRiskGroups: { top_caps: true, large_caps: false, mid_caps: false, high_risk: false, very_high_risk: false },
   });

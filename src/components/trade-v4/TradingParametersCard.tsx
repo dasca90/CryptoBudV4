@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { TradingParametersView } from "./types";
 import { normalizeBannedCoinInput } from "../../core/trading/banned-symbols";
 import { logger } from "../../utils/logger";
+import { resolveScannerUniverseSizeDraft } from "../../core/scanner/scanner-universe-config";
 
 const ALL_RISK_GROUPS = ['top_caps', 'large_caps', 'mid_caps', 'high_risk', 'very_high_risk'] as const;
 
@@ -76,6 +77,9 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
   const manualOverrideActive = v.strategySource === 'manual_override';
   const [applyState, setApplyState] = useState<'idle' | 'applying' | 'applied' | 'error'>('idle');
   const [dirty, setDirty] = useState(false);
+  const [universeSizeDraft, setUniverseSizeDraft] = useState(() => String(v.scannerUniverseSize));
+  const universeSizeDraftState = resolveScannerUniverseSizeDraft(universeSizeDraft);
+  useEffect(() => { setUniverseSizeDraft(String(v.scannerUniverseSize)); }, [v.scannerUniverseSize]);
   const patch = <K extends keyof TradingParametersView>(k: K, val: TradingParametersView[K]) => {
     setDirty(true);
     props.onChange({ ...v, [k]: val });
@@ -280,6 +284,7 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
             onClick={async () => {
               setApplyState('applying');
               try {
+                if (!universeSizeDraftState.valid) throw new Error('Universe size must be a positive integer');
                 await props.onApply!();
                 setDirty(false);
                 setApplyState('applied');
@@ -612,11 +617,15 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
         </select>
 
         <label>Universe Size</label>
-        <input type="number" value={v.scannerUniverseSize} onChange={(e) => {
-          const size = Math.min(250, Math.max(20, Number(e.target.value) || 100));
-          patch("scannerUniverseSize", size);
-          patch("maxSymbolsScanned", size);
-        }} min={20} max={250} step={10} style={numStyle} title="Canonical scanner universe size. Applied on the next full scan without affecting open positions." />
+        <div>
+          <input type="number" value={universeSizeDraft} onChange={(e) => {
+            const next = resolveScannerUniverseSizeDraft(e.target.value);
+            setUniverseSizeDraft(next.draft);
+            setDirty(true);
+            if (next.value != null) props.onChange({ ...v, scannerUniverseSize: next.value, maxSymbolsScanned: next.value });
+          }} min={1} step={1} aria-invalid={!universeSizeDraftState.valid} style={numStyle} title="Positive integer. Applied from the next full scan without affecting the active scan or open positions." />
+          {!universeSizeDraftState.valid && <div style={{ fontSize: 8, color: '#f85149', marginTop: 2 }}>Enter a positive whole number.</div>}
+        </div>
 
         <label title="Market Edge is separate from ML Runtime Mode.">Market Edge Mode</label>
         <select value={v.marketEdgeMode} onChange={(e) => patch("marketEdgeMode", e.target.value as TradingParametersView["marketEdgeMode"])} title="MONITOR observes only. PRIORITY may request canonical reanalysis but never submits orders.">

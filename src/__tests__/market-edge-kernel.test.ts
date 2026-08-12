@@ -12,11 +12,11 @@ function test(name: string, fn: () => void): void {
   fn(); passed++; console.log(`PASS: ${name}`);
 }
 
-test('scanner universe defaults to 100 and clamps to 20-250', () => {
+test('scanner universe defaults to 100 and accepts any positive integer without an artificial cap', () => {
   assert.equal(normalizeScannerUniverseSize(undefined), 100);
-  assert.equal(normalizeScannerUniverseSize(1), 20);
-  assert.equal(normalizeScannerUniverseSize(999), 250);
-  assert.equal(normalizeScannerUniverseSize(137.4), 137);
+  assert.equal(normalizeScannerUniverseSize(1), 1);
+  assert.equal(normalizeScannerUniverseSize(999), 999);
+  assert.equal(normalizeScannerUniverseSize(137.4), 100);
 });
 
 test('full scan cooldown responds to configured universe size', () => {

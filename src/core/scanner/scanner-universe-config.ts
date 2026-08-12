@@ -1,11 +1,23 @@
 export const DEFAULT_SCANNER_UNIVERSE_SIZE = 100;
-export const MIN_SCANNER_UNIVERSE_SIZE = 20;
-export const MAX_SCANNER_UNIVERSE_SIZE = 250;
+export const MIN_SCANNER_UNIVERSE_SIZE = 1;
+
+export function parseScannerUniverseSize(value: unknown): number | null {
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const candidate = Number(value);
+  return Number.isSafeInteger(candidate) && candidate >= MIN_SCANNER_UNIVERSE_SIZE ? candidate : null;
+}
+
+export function resolveScannerUniverseSizeDraft(raw: string): { draft: string; value: number | null; valid: boolean } {
+  const value = parseScannerUniverseSize(raw);
+  return { draft: raw, value, valid: value != null };
+}
 
 export function normalizeScannerUniverseSize(value: unknown, legacyValue?: unknown): number {
-  const candidate = Number(value ?? legacyValue ?? DEFAULT_SCANNER_UNIVERSE_SIZE);
-  if (!Number.isFinite(candidate)) return DEFAULT_SCANNER_UNIVERSE_SIZE;
-  return Math.min(MAX_SCANNER_UNIVERSE_SIZE, Math.max(MIN_SCANNER_UNIVERSE_SIZE, Math.round(candidate)));
+  return parseScannerUniverseSize(value) ?? parseScannerUniverseSize(legacyValue) ?? DEFAULT_SCANNER_UNIVERSE_SIZE;
+}
+
+export function getEffectiveScannerUniverseSize(configuredUniverseSize: unknown, eligibleUniverseAvailable: number): number {
+  return Math.min(normalizeScannerUniverseSize(configuredUniverseSize), Math.max(0, Math.floor(eligibleUniverseAvailable)));
 }
 
 export function getFullScanCooldownMs(universeSize: number): number {

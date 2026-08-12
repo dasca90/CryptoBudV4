@@ -13,7 +13,7 @@ import { computeAutoStrategy, buildAutoStrategySummary, resolveAutoBotsFinalStra
 import { EntryGate } from '../entry-gate/EntryGate';
 import { MarketDataFeed } from '../../utils/MarketDataFeed';
 import { buildScannerUniverse, getRiskGroup, isVeryHighRisk } from './scanner-universe';
-import { DEFAULT_SCANNER_UNIVERSE_SIZE, getFullScanCooldownMs, normalizeScannerUniverseSize } from './scanner-universe-config';
+import { DEFAULT_SCANNER_UNIVERSE_SIZE, getFullScanCooldownMs, parseScannerUniverseSize } from './scanner-universe-config';
 import { rankCandidates, buildSummaryMessage, getTopBlockReasons } from './candidate-ranking';
 import { logger } from '../../utils/logger';
 import { createDefaultAppSettings } from '../types';
@@ -379,7 +379,12 @@ export class MarketScanner {
   }): void {
     if (config.scannerCandidatePoolSize != null) this.scannerCandidatePoolSize = Math.max(1, config.scannerCandidatePoolSize);
     if (config.min24hQuoteVolumeUsdt != null) this.min24hQuoteVolumeUsdt = Math.max(0, config.min24hQuoteVolumeUsdt);
-    if (config.maxSymbolsScanned != null) this.maxSymbolsScanned = normalizeScannerUniverseSize(config.maxSymbolsScanned);
+    if (config.maxSymbolsScanned != null) {
+      const previousConfiguredValue = this.maxSymbolsScanned;
+      const parsedUniverseSize = parseScannerUniverseSize(config.maxSymbolsScanned);
+      if (parsedUniverseSize != null) this.maxSymbolsScanned = parsedUniverseSize;
+      logger.info(`SCANNER_UNIVERSE_SIZE_CONFIG_AUDIT: configuredUniverseSize=${parsedUniverseSize ?? config.maxSymbolsScanned} eligibleUniverseAvailable=pending_next_scan effectiveUniverseSize=pending_next_scan previousConfiguredValue=${previousConfiguredValue} source=${config.source ?? 'runtime_config'} runtimeUpdated=${String(parsedUniverseSize != null)} effectiveFromScanId=next hardcodedCapApplied=false activeScanPreserved=${String(this.scanInFlight)} invariantOk=${String(parsedUniverseSize != null)}`);
+    }
     if (config.momentumWeight != null) this.momentumWeight = Math.max(0, config.momentumWeight);
     if (config.volumeSurgeWeight != null) this.volumeSurgeWeight = Math.max(0, config.volumeSurgeWeight);
     if (config.breakoutWeight != null) this.breakoutWeight = Math.max(0, config.breakoutWeight);
@@ -435,6 +440,7 @@ export class MarketScanner {
     runtimeConfigAppliedAt: number | null;
     scannerStartedAt: number | null;
     state: ScannerState;
+    configuredUniverseSize: number;
   } {
     return {
       scannerInstanceId: this.scannerInstanceId,
@@ -450,6 +456,7 @@ export class MarketScanner {
       runtimeConfigAppliedAt: this.runtimeConfigAppliedAt,
       scannerStartedAt: this.scannerStartedAt,
       state: this.state,
+      configuredUniverseSize: this.maxSymbolsScanned,
     };
   }
 
@@ -1219,6 +1226,7 @@ export class MarketScanner {
     this.scanSymbolTimings = [];
     mlRuntimeEvents.beginActiveGuardScanCycle(this.currentScanId);
     const universeStartTime = Date.now();
+    const configuredUniverseSizeForScan = this.maxSymbolsScanned;
     logger.info(`SCANNER_UNIVERSE_BUILD_START: mode=${mode}`);
     const settings = createDefaultAppSettings();
     let universe;
@@ -1227,7 +1235,7 @@ export class MarketScanner {
       universe = await buildScannerUniverse(mode, effectiveWatchlist, {
         manualScannerBanlist: this.scannerBanlist.length > 0 ? this.scannerBanlist : settings.manualScannerBanlist,
         enabledRiskGroups: this.scannerRiskGroups,
-        maxSymbols: this.maxSymbolsScanned,
+        maxSymbols: configuredUniverseSizeForScan,
       });
     } catch (err) {
       logger.error(`SCANNER_UNIVERSE_BUILD_FAILED: mode=${mode} reason=${err instanceof Error ? err.message : String(err)}`);
@@ -1235,6 +1243,7 @@ export class MarketScanner {
         symbols: [],
         beforeFilterCount: 0,
         afterFilterCount: 0,
+        eligibleUniverseAvailable: 0,
         bannedCount: 0,
         topBanReasons: [],
         reasonCounts: {
@@ -1260,10 +1269,14 @@ export class MarketScanner {
     this.diag.topBanReasons = universe.topBanReasons;
     logger.info(`SCANNER_UNIVERSE_BUILD_SUCCESS: mode=${mode} before=${universe.beforeFilterCount} banned=${universe.bannedCount} final=${universe.afterFilterCount}`);
     logger.info(`SCANNER_UNIVERSE_FILTER_SUMMARY: ${universe.topBanReasons.map(r => `${r.reason}:${r.count}`).join(', ') || 'none'}`);
-    logger.info(`SCANNER_UNIVERSE_AUDIT: mode=${mode} totalEligibleUSDT=${universe.beforeFilterCount} totalScanned=${universe.afterFilterCount} enabledGroups=${Object.entries(this.scannerRiskGroups).filter(([,v]) => v).map(([k]) => k).join(',')} highRiskEnabled=${this.scannerRiskGroups.high_risk} veryHighRiskEnabled=${this.scannerRiskGroups.very_high_risk} banned=${universe.bannedCount} banReasons=${universe.topBanReasons.slice(0,3).map(r => `${r.reason}=${r.count}`).join('|')}`);
+    logger.info(`SCANNER_UNIVERSE_AUDIT: mode=${mode} configuredUniverseSize=${configuredUniverseSizeForScan} eligibleUniverseAvailable=${universe.eligibleUniverseAvailable} effectiveUniverseSize=${symbols.length} totalEligibleUSDT=${universe.eligibleUniverseAvailable} totalScanned=${universe.afterFilterCount} hardcodedCapApplied=false enabledGroups=${Object.entries(this.scannerRiskGroups).filter(([,v]) => v).map(([k]) => k).join(',')} highRiskEnabled=${this.scannerRiskGroups.high_risk} veryHighRiskEnabled=${this.scannerRiskGroups.very_high_risk} banned=${universe.bannedCount} banReasons=${universe.topBanReasons.slice(0,3).map(r => `${r.reason}=${r.count}`).join('|')}`);
     logger.info(`SCANNER_RISK_GROUP_FILTER_SUMMARY: enabledGroups=${Object.entries(this.scannerRiskGroups).filter(([, v]) => v).map(([k]) => k).join(',')} beforeCount=${universe.beforeFilterCount} afterCount=${universe.afterFilterCount} excludedByGroupCount=${universe.excludedByGroupCount ?? 0} excludedByGroupBreakdown=${JSON.stringify(universe.excludedByGroupBreakdown ?? {})}`);
 
     const scanId = this.currentScanId ?? nextScanId();
+    const universeSizeInvariantOk = mode === 'BINANCE_TOP_250'
+      ? symbols.length === Math.min(configuredUniverseSizeForScan, universe.eligibleUniverseAvailable)
+      : symbols.length === universe.eligibleUniverseAvailable;
+    logger.info(`SCANNER_UNIVERSE_SIZE_CONFIG_AUDIT: configuredUniverseSize=${configuredUniverseSizeForScan} eligibleUniverseAvailable=${universe.eligibleUniverseAvailable} effectiveUniverseSize=${symbols.length} previousConfiguredValue=${configuredUniverseSizeForScan} source=scan_snapshot runtimeUpdated=true effectiveFromScanId=${scanId} hardcodedCapApplied=false activeScanPreserved=true invariantOk=${String(universeSizeInvariantOk)}`);
 
     // Early return if universe is empty after filtering
     if (symbols.length === 0) {

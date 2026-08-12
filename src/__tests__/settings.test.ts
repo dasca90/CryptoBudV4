@@ -113,6 +113,7 @@ async function testPersistRestore() {
     maxPositions: 5,
     scannerReferencePeriod: '4h',
     entryConfirmationMode: 'aggressive',
+    scannerUniverseSize: 400,
     scannerRiskGroups: { top_caps: true, large_caps: false, mid_caps: true, high_risk: false, very_high_risk: false },
   };
 
@@ -124,6 +125,7 @@ async function testPersistRestore() {
   eq(loaded.maxPositions, 5, 'E3: max positions restored');
   eq(loaded.scannerReferencePeriod, '4h', 'E3b: scanner reference period restored');
   eq(loaded.entryConfirmationMode, 'aggressive', 'E3d: entry confirmation mode restored');
+  eq(loaded.scannerUniverseSize, 400, 'E3h: scanner universe size above 250 persists exactly');
   eq(loaded.scannerRiskGroups.large_caps, false, 'E3c: scanner risk group toggle restored');
   eq((loaded as any).autoTradingCapital ?? 1000, (modified as any).autoTradingCapital ?? 1000, 'E3e: trading capital restored');
   eq((loaded as any).capitalPerCoin ?? loaded.capitalPerTrade, (modified as any).capitalPerCoin ?? modified.capitalPerTrade, 'E3f: capital per coin restored');
