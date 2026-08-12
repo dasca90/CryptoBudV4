@@ -12,6 +12,9 @@ export function MarketEdgePanel({ state, top, selected, outcomes }: { state: Mar
       <div className="muted" style={{ fontSize: 9, marginTop: 3 }}>
         {state.health} · {state.perpetualSymbols}/{state.mappedSymbols} perpetual · High {state.highEdgeCount}
       </div>
+      <div className="muted" style={{ fontSize: 8, marginTop: 2 }}>
+        Groups: {state.selectedRiskGroups.map(group => group.replaceAll('_', ' ')).join(' · ')} · universe {state.mappedSymbols}/{state.sourceUniverseSize}
+      </div>
       {(state.health === 'EDGE_WARMING_UP' || state.health === 'EDGE_DEGRADED' || state.health === 'EDGE_OFFLINE') && (
         <div className="muted" style={{ fontSize: 8, marginTop: 2 }} data-testid="market-edge-diagnostics">
           Spot {state.spotWarmSymbols}/{state.spotInputSymbols} warm · Futures {state.futuresWarmSymbols}/{state.futuresInputSymbols} warm · paired {state.synchronizedSymbols}

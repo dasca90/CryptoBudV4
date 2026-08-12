@@ -4,6 +4,7 @@ import type { TradingParametersView } from "./types";
 import { normalizeBannedCoinInput } from "../../core/trading/banned-symbols";
 import { logger } from "../../utils/logger";
 import { resolveScannerUniverseSizeDraft } from "../../core/scanner/scanner-universe-config";
+import { MARKET_EDGE_RISK_GROUP_KEYS, normalizeMarketEdgeRiskGroups, type MarketEdgeRiskGroup } from "../../core/market-edge/config";
 
 const ALL_RISK_GROUPS = ['top_caps', 'large_caps', 'mid_caps', 'high_risk', 'very_high_risk'] as const;
 
@@ -89,6 +90,12 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
     props.onChange({ ...v, maxSelectedPerScan: next, maxEntriesPerCycle: next, maxSelectedPerScanUserSet: true });
   };
   const rg = ensureAllGroups(v.scannerRiskGroups as Record<string, boolean>);
+  const edgeRg = normalizeMarketEdgeRiskGroups(v.marketEdgeRiskGroups);
+  const patchEdgeRiskGroup = (group: MarketEdgeRiskGroup, enabled: boolean) => {
+    const next = { ...edgeRg, [group]: enabled };
+    if (!MARKET_EDGE_RISK_GROUP_KEYS.some(key => next[key])) return;
+    patch("marketEdgeRiskGroups", next);
+  };
 
   const [banInput, setBanInput] = useState("");
   const [advExpanded, setAdvExpanded] = useState(false);
@@ -633,6 +640,17 @@ export const TradingParametersCard = memo(function TradingParametersCard(props: 
           <option value="MONITOR">Monitor</option>
           <option value="PRIORITY">Priority</option>
         </select>
+
+        <label title="Independent Market Edge filter, intersected with the scanner universe.">Edge Markets</label>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px 7px', maxWidth: 180 }}>
+          {MARKET_EDGE_RISK_GROUP_KEYS.map(group => (
+            <label key={group} style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 8, whiteSpace: 'nowrap' }}>
+              <input type="checkbox" checked={edgeRg[group]} onChange={(event) => patchEdgeRiskGroup(group, event.target.checked)} />
+              {group === 'top_caps' ? 'Top' : group === 'large_caps' ? 'Large' : group === 'mid_caps' ? 'Mid' : group === 'high_risk' ? 'High Risk' : 'Very High'}
+            </label>
+          ))}
+          <div style={{ width: '100%', color: '#8b949e', fontSize: 7, lineHeight: '10px' }}>Default: High Risk + Very High. At least one group remains selected.</div>
+        </div>
 
         <label>Final Pool Size</label>
         <input type="number" value={v.scannerFinalPoolSize} onChange={(e) => patch("scannerFinalPoolSize", Math.max(1, Number(e.target.value) || 1))} min={1} step={5} style={numStyle} />

@@ -466,6 +466,13 @@ export type TradingParametersView = {
   scannerUniverseMode: "BINANCE_TOP_250" | "TOP_100" | "TOP_50" | "TOP_20" | "WATCHLIST";
   scannerUniverseSize: number;
   marketEdgeMode: 'OFF' | 'MONITOR' | 'PRIORITY';
+  marketEdgeRiskGroups: {
+    top_caps: boolean;
+    large_caps: boolean;
+    mid_caps: boolean;
+    high_risk: boolean;
+    very_high_risk: boolean;
+  };
   scannerFinalPoolSize: number;
   scannerCandidatePoolSize: number;
   min24hQuoteVolumeUsdt: number;

@@ -9,7 +9,7 @@ import { LiveBinanceAdapter } from './core/exchange/LiveBinanceAdapter';
 import { MarketDataFeed } from './utils/MarketDataFeed';
 import { BinancePublicClient } from './core/market-data/BinancePublicClient';
 import { MarketEdgeRuntime } from './core/market-edge/MarketEdgeRuntime';
-import { normalizeMarketEdgeMode } from './core/market-edge/config';
+import { normalizeMarketEdgeMode, normalizeMarketEdgeRiskGroups } from './core/market-edge/config';
 import { logger } from './utils/logger';
 import { DiagnosticsEngine, type DiagnosticsSnapshot } from './core/diagnostics/DiagnosticsEngine';
 import { PerformanceGuard } from './core/diagnostics/PerformanceGuard';
@@ -381,7 +381,7 @@ export default function App() {
       logger.info('PERSISTENCE: Startup restore complete');
       const settings = await settingsPersistence.loadSettings();
       const bootEdgeMode = normalizeMarketEdgeMode(settings.marketEdgeMode ?? 'MONITOR');
-      marketEdgeRuntime.updateConfig({ mode: bootEdgeMode, universeSize: settings.scannerUniverseSize });
+      marketEdgeRuntime.updateConfig({ mode: bootEdgeMode, universeSize: settings.scannerUniverseSize, riskGroups: normalizeMarketEdgeRiskGroups(settings.marketEdgeRiskGroups) });
       logger.info(`MARKET_EDGE_MODE_BINDING_AUDIT uiMode=${bootEdgeMode} persistedMode=${settings.marketEdgeMode ?? 'missing_default_monitor'} runtimeMode=${marketEdgeRuntime.getState().mode} serviceStarted=${marketEdgeRuntime.getState().runtimeStarted} workerActive=${marketEdgeRuntime.getState().workerActive} invariantOk=${String(marketEdgeRuntime.getState().mode === bootEdgeMode)}`);
       const telegramSettings = await settingsPersistence.loadTelegramSettings();
       telegramNotifierRef.current.updateSettings(telegramSettings);
@@ -1106,7 +1106,7 @@ export default function App() {
     try {
       const settings = await settingsPersistence.loadSettings();
       const requestedEdgeMode = normalizeMarketEdgeMode(settings.marketEdgeMode ?? 'MONITOR');
-      marketEdgeRuntime.updateConfig({ mode: requestedEdgeMode, universeSize: settings.scannerUniverseSize });
+      marketEdgeRuntime.updateConfig({ mode: requestedEdgeMode, universeSize: settings.scannerUniverseSize, riskGroups: normalizeMarketEdgeRiskGroups(settings.marketEdgeRiskGroups) });
       logger.info(`MARKET_EDGE_MODE_BINDING_AUDIT uiMode=${requestedEdgeMode} persistedMode=${settings.marketEdgeMode ?? 'missing_default_monitor'} runtimeMode=${marketEdgeRuntime.getState().mode} serviceStarted=${marketEdgeRuntime.getState().runtimeStarted} workerActive=${marketEdgeRuntime.getState().workerActive} invariantOk=${String(marketEdgeRuntime.getState().mode === requestedEdgeMode)}`);
       engine.refreshExitSettingsFromSettings(settings);
       const effectiveAutoBots = settings.paperAutoExecutionEnabled ?? true;

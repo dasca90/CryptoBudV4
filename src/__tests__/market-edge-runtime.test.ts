@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 
 let passed = 0;
 const test = async (name: string, fn: () => void | Promise<void>) => { await fn(); passed++; console.log(`PASS: ${name}`); };
+const allEdgeRiskGroups = { top_caps: true, large_caps: true, mid_caps: true, high_risk: true, very_high_risk: true } as const;
 
 await test('symbol mapper preserves SPOT_ONLY pairs instead of dropping them', () => {
   const spot = { symbols: [{ symbol: 'BTCUSDT', quoteAsset: 'USDT', status: 'TRADING', isSpotTradingAllowed: true }, { symbol: 'ONLYUSDT', quoteAsset: 'USDT', status: 'TRADING', isSpotTradingAllowed: true }] };
@@ -168,7 +169,7 @@ await test('Futures mapping failure degrades Edge without throwing into caller',
     getStats: () => ({ edgePublicRequestCount: 1, edgeOIRequestCount: 0, edgeRequestFailures: 1 }),
   };
   const adapter = { start() {}, stop() {}, updateDetailedSymbols() {}, updateBaselineSymbols() {}, getStats: () => ({ edgeReconnectCount: 0, edgeDroppedUpdates: 0, edgeMessagesReceived: 0, socketsOpen: 0 }) };
-  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR' }, undefined, { publicClient: failingClient as any, dataAdapter: adapter as any });
+  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR', riskGroups: allEdgeRiskGroups }, undefined, { publicClient: failingClient as any, dataAdapter: adapter as any });
   await runtime.start(['BTCUSDT']);
   assert.equal(runtime.getState().health, 'EDGE_OFFLINE');
   assert.equal(runtime.getState().failureReason, 'futures_offline');
@@ -186,7 +187,7 @@ await test('runtime initialization never refetches Spot exchangeInfo', async () 
   };
   let starts = 0;
   const adapter = { start() { starts++; }, stop() {}, updateDetailedSymbols() {}, updateBaselineSymbols() {}, getStats: () => ({ edgeReconnectCount: 0, edgeDroppedUpdates: 0, edgeMessagesReceived: 0, socketsOpen: 0, futuresConnected: false }) };
-  const runtime = new MarketEdgeRuntime({ mode: 'PRIORITY' }, undefined, { publicClient: client as any, dataAdapter: adapter as any });
+  const runtime = new MarketEdgeRuntime({ mode: 'PRIORITY', riskGroups: allEdgeRiskGroups }, undefined, { publicClient: client as any, dataAdapter: adapter as any });
   await runtime.start(['BTCUSDT']);
   assert.equal(starts, 1);
   assert.equal(runtime.getState().perpetualSymbols, 1);
@@ -204,7 +205,7 @@ await test('stop invalidates an in-flight initialization and prevents zombie tim
     getStats: () => ({ edgePublicRequestCount: 0, edgeOIRequestCount: 0, edgeRequestFailures: 0 }),
   };
   const adapter = { start() { adapterStarts++; }, stop() {}, updateDetailedSymbols() {}, updateBaselineSymbols() {}, getStats: () => ({ edgeReconnectCount: 0, edgeDroppedUpdates: 0, edgeMessagesReceived: 0, socketsOpen: 0 }) };
-  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR' }, undefined, { publicClient: client as any, dataAdapter: adapter as any });
+  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR', riskGroups: allEdgeRiskGroups }, undefined, { publicClient: client as any, dataAdapter: adapter as any });
   const starting = runtime.start(['BTCUSDT']);
   runtime.stop();
   resolveInfo({ symbols: [] });
@@ -218,7 +219,7 @@ await test('MONITOR can never request PRIORITY reanalysis', async () => {
   const info = { symbols: [{ symbol: 'BTCUSDT', quoteAsset: 'USDT', status: 'TRADING', isSpotTradingAllowed: true, contractType: 'PERPETUAL' }] };
   const client = { getSpotExchangeInfo: async () => info, getFuturesExchangeInfo: async () => info, getOpenInterest: async () => ({ symbol: 'BTCUSDT', openInterest: '100', time: Date.now() }), getStats: () => ({ edgePublicRequestCount: 0, edgeOIRequestCount: 0, edgeRequestFailures: 0 }) };
   const adapter = { start() {}, stop() {}, updateDetailedSymbols() {}, updateBaselineSymbols() {}, getStats: () => ({ edgeReconnectCount: 0, edgeDroppedUpdates: 0, edgeMessagesReceived: 0, socketsOpen: 0 }) };
-  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR', minimumWarmupMs: 0 }, () => { priorityCalls++; }, { publicClient: client as any, dataAdapter: adapter as any });
+  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR', minimumWarmupMs: 0, riskGroups: allEdgeRiskGroups }, () => { priorityCalls++; }, { publicClient: client as any, dataAdapter: adapter as any });
   await runtime.start(['BTCUSDT']);
   (runtime as any).maybeRequestPriority();
   assert.equal(priorityCalls, 0);
@@ -229,7 +230,7 @@ await test('all-market streams are filtered to the canonical scanner universe be
   const info = { symbols: [{ symbol: 'BTCUSDT', quoteAsset: 'USDT', status: 'TRADING', isSpotTradingAllowed: true, contractType: 'PERPETUAL' }] };
   const client = { getSpotExchangeInfo: async () => info, getFuturesExchangeInfo: async () => info, getOpenInterest: async () => ({ symbol: 'BTCUSDT', openInterest: '100', time: Date.now() }), getStats: () => ({ edgePublicRequestCount: 0, edgeOIRequestCount: 0, edgeRequestFailures: 0, edgePublicRequestsPerMinute: 0, edgeOIRequestsPerMinute: 0 }) };
   const adapter = { start() {}, stop() {}, updateDetailedSymbols() {}, updateBaselineSymbols() {}, getStats: () => ({ edgeReconnectCount: 0, edgeDroppedUpdates: 0, edgeMessagesReceived: 0, socketsOpen: 0, edgeWebSocketMessagesPerSecond: 0 }) };
-  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR' }, undefined, { publicClient: client as any, dataAdapter: adapter as any });
+  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR', riskGroups: allEdgeRiskGroups }, undefined, { publicClient: client as any, dataAdapter: adapter as any });
   await runtime.start(['BTCUSDT']);
   (runtime as any).onData({ type: 'PRICE', symbol: 'ETHUSDT', venue: 'SPOT', value: 10, eventTime: 1, receivedAt: 1 });
   (runtime as any).onData({ type: 'PRICE', symbol: 'BTCUSDT', venue: 'SPOT', value: 10, eventTime: 1, receivedAt: 1 });
@@ -245,7 +246,7 @@ await test('universe membership updates incrementally without restarting streams
   let starts = 0, stops = 0;
   const client = { getSpotExchangeInfo: async () => info, getFuturesExchangeInfo: async () => info, getOpenInterest: async (symbol: string) => ({ symbol, openInterest: '100', time: Date.now() }), getStats: () => ({ edgePublicRequestCount: 0, edgeOIRequestCount: 0, edgeRequestFailures: 0, edgePublicRequestsPerMinute: 0, edgeOIRequestsPerMinute: 0 }) };
   const adapter = { start() { starts++; }, stop() { stops++; }, updateDetailedSymbols() {}, updateBaselineSymbols() {}, getStats: () => ({ edgeReconnectCount: 0, edgeDroppedUpdates: 0, edgeMessagesReceived: 0, socketsOpen: 0, edgeWebSocketMessagesPerSecond: 0 }) };
-  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR' }, undefined, { publicClient: client as any, dataAdapter: adapter as any });
+  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR', riskGroups: allEdgeRiskGroups }, undefined, { publicClient: client as any, dataAdapter: adapter as any });
   await runtime.start(['BTCUSDT']);
   (runtime as any).onData({ type: 'PRICE', symbol: 'BTCUSDT', venue: 'SPOT', value: 10, eventTime: 1, receivedAt: 1 });
   await runtime.updateUniverse(['ETHUSDT']);
@@ -253,6 +254,25 @@ await test('universe membership updates incrementally without restarting streams
   assert.equal(starts, 1);
   assert.equal(stops, 0);
   assert.equal(runtime.getMemoryStats().symbols, 1);
+  runtime.stop();
+});
+
+await test('default Edge markets include only High Risk and Very High Risk symbols', async () => {
+  const symbols = ['BTCUSDT', 'DOGEUSDT', 'MEMEUSDT'];
+  const info = { symbols: symbols.map(symbol => ({ symbol, quoteAsset: 'USDT', status: 'TRADING', isSpotTradingAllowed: true, contractType: 'PERPETUAL' })) };
+  const client = { getFuturesExchangeInfo: async () => info, getOpenInterest: async (symbol: string) => ({ symbol, openInterest: '100', time: Date.now() }), getAllPremiumIndexes: async () => [], getStats: () => ({ edgePublicRequestCount: 0, edgeOIRequestCount: 0, edgeRequestFailures: 0, edgePublicRequestsPerMinute: 0, edgeOIRequestsPerMinute: 0 }) };
+  let baselineSymbols: string[] = [];
+  const adapter = { start(next: string[]) { baselineSymbols = next; }, stop() {}, updateDetailedSymbols() {}, updateBaselineSymbols(next: string[]) { baselineSymbols = next; }, getStats: () => ({ edgeReconnectCount: 0, edgeDroppedUpdates: 0, edgeMessagesReceived: 0, socketsOpen: 0, edgeWebSocketMessagesPerSecond: 0, futuresConnected: false }) };
+  const runtime = new MarketEdgeRuntime({ mode: 'MONITOR' }, undefined, { publicClient: client as any, dataAdapter: adapter as any });
+  await runtime.start(symbols);
+  assert.deepEqual(runtime.getState().selectedRiskGroups, ['high_risk', 'very_high_risk']);
+  assert.equal(runtime.getState().sourceUniverseSize, 3);
+  assert.deepEqual(baselineSymbols.sort(), ['DOGEUSDT', 'MEMEUSDT']);
+  assert.equal(runtime.getState().mappedSymbols, 2);
+  runtime.updateConfig({ riskGroups: { top_caps: true, large_caps: false, mid_caps: false, high_risk: false, very_high_risk: false } });
+  assert.deepEqual(runtime.getState().selectedRiskGroups, ['top_caps']);
+  assert.deepEqual(baselineSymbols, ['BTCUSDT']);
+  assert.equal(runtime.getState().mappedSymbols, 1);
   runtime.stop();
 });
 

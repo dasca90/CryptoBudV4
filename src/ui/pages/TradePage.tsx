@@ -18,6 +18,7 @@ import { buildTradeV4PageModel } from '../../lib/air-scanner/tradeV4DataAdapter'
 import { getMicroScalperState } from '../../core/scalper/MicroScalperEngine';
 import type { TradeV4PageModel, TradingParametersView } from '../../components/trade-v4/types';
 import type { MarketEdgeRuntime } from '../../core/market-edge/MarketEdgeRuntime';
+import { normalizeMarketEdgeRiskGroups } from '../../core/market-edge/config';
 
 const COMMON_COINS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT', 'XRPUSDT', 'DOGEUSDT', 'AVAXUSDT'];
 
@@ -169,6 +170,7 @@ export function TradePage({
     scannerUniverseMode: 'BINANCE_TOP_250',
     scannerUniverseSize: 100,
     marketEdgeMode: 'MONITOR',
+    marketEdgeRiskGroups: normalizeMarketEdgeRiskGroups(undefined),
     scannerFinalPoolSize: 20,
     scannerCandidatePoolSize: 20,
     min24hQuoteVolumeUsdt: 100000,
@@ -328,6 +330,7 @@ export function TradePage({
         scannerUniverseMode,
         scannerUniverseSize,
         marketEdgeMode: (s as any).marketEdgeMode ?? 'MONITOR',
+        marketEdgeRiskGroups: normalizeMarketEdgeRiskGroups((s as any).marketEdgeRiskGroups),
         scannerFinalPoolSize,
         scannerCandidatePoolSize: (s as any).scannerCandidatePoolSize ?? prev.scannerCandidatePoolSize,
         min24hQuoteVolumeUsdt: (s as any).min24hQuoteVolumeUsdt ?? prev.min24hQuoteVolumeUsdt,
@@ -443,6 +446,7 @@ export function TradePage({
       scannerUniverseMode: airParams.scannerUniverseMode,
       scannerUniverseSize: airParams.scannerUniverseSize,
       marketEdgeMode: airParams.marketEdgeMode,
+      marketEdgeRiskGroups: airParams.marketEdgeRiskGroups,
       scannerFinalPoolSize: airParams.scannerFinalPoolSize,
       scannerBanlist: canonicalBanlist,
       manualScannerBanlist: canonicalBanlist,
@@ -486,7 +490,7 @@ export function TradePage({
     } as any);
     const scanner = engine.getAutoRuntime()?.getScanner?.();
     scanner?.setScannerRankingConfig?.({ maxSymbolsScanned: airParams.scannerUniverseSize, source: 'settings_apply', hydrated: true });
-    marketEdgeRuntime.updateConfig({ mode: airParams.marketEdgeMode, universeSize: airParams.scannerUniverseSize });
+    marketEdgeRuntime.updateConfig({ mode: airParams.marketEdgeMode, universeSize: airParams.scannerUniverseSize, riskGroups: airParams.marketEdgeRiskGroups });
     const runtimeUniverse = [...(engine.getAutoRuntime()?.getScanner()?.getLastUniverseSymbols?.() ?? [])];
     if (runtimeUniverse.length > 0) void marketEdgeRuntime.updateUniverse(runtimeUniverse);
     engine.getAutoRuntime()?.getScanner()?.setPaperAutoEnabled(paperAutoEnabled);

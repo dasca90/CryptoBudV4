@@ -22,6 +22,9 @@ assert.ok(scanner.includes('scanPrioritySymbols') && scanner.includes("await thi
 assert.ok(autoRuntime.includes('this.prioritySymbols.size >= 3') && autoRuntime.includes('scanner.scanPrioritySymbols'), 'PRIORITY queue is bounded to three and owned by AutoRuntime');
 assert.ok(!source.includes('ScannerCandidate'), 'MONITOR snapshots do not mutate ScannerCandidate');
 assert.ok(settingsTypes.includes("marketEdgeMode: 'MONITOR'") && settingsTypes.includes('scannerUniverseSize: 100'), 'safe Market Edge and universe defaults are canonical');
+assert.ok(settingsTypes.includes('marketEdgeRiskGroups') && settingsTypes.includes('high_risk: true') && settingsTypes.includes('very_high_risk: true'), 'Market Edge defaults target High Risk and Very High Risk');
 assert.ok(settingsPersistence.includes('normalizeScannerUniverseSize(settings.scannerUniverseSize, settings.maxSymbolsScanned)'), 'legacy scanner size migrates into the canonical bounded setting');
+assert.ok(settingsPersistence.includes('normalizeMarketEdgeRiskGroups(settings.marketEdgeRiskGroups)'), 'Market Edge risk-group selection is normalized during persistence migration');
 assert.ok(settingsUi.includes('<option value="OFF">') && settingsUi.includes('<option value="MONITOR">') && settingsUi.includes('<option value="PRIORITY">'), 'Market Edge UI exposes modes distinct from ML advisory modes');
+assert.ok(settingsUi.includes('Edge Markets') && settingsUi.includes('patchEdgeRiskGroup'), 'Market Edge risk groups are independently editable in the sidebar');
 console.log(`market-edge-architecture: ${files.length} isolated files verified`);

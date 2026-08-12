@@ -5,6 +5,7 @@ import { logger } from '../../utils/logger';
 import { resolveMaxSelectedPerScanConfig } from '../settings/max-selected-per-scan';
 import { normalizeAutoPerformanceMode, normalizePerformanceSettings, savePerformanceSettings } from '../../lib/performance/performanceSettings';
 import { normalizeScannerUniverseSize } from '../scanner/scanner-universe-config';
+import { normalizeMarketEdgeRiskGroups } from '../market-edge/config';
 
 const SETTINGS_KEY = 'app_settings';
 const API_CONFIG_KEY = 'api_config';
@@ -113,6 +114,7 @@ export class SettingsPersistence {
       ...settings,
       scannerUniverseSize,
       maxSymbolsScanned: scannerUniverseSize,
+      marketEdgeRiskGroups: normalizeMarketEdgeRiskGroups(settings.marketEdgeRiskGroups),
       strategySource: invalidAutoBotsManualStateFound ? 'autobots' : (settings.strategySource ?? 'autobots'),
       paperAutoExecutionEnabled: effectiveAutoBots,
     };

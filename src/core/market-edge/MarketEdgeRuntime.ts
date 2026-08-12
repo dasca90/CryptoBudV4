@@ -5,8 +5,9 @@ import { MarketEdgeOutcomeTracker, type EdgeOutcomeSummary } from './MarketEdgeO
 import { MarketEdgePublicClient } from './MarketEdgePublicClient';
 import { MarketEdgeSnapshotStore } from './MarketEdgeSnapshotStore';
 import { buildMarketEdgeMappingsFromCanonicalSpotUniverse, type MarketEdgeSymbolMapping } from './MarketEdgeSymbolMapper';
-import { normalizeMarketEdgeConfig, normalizeMarketEdgeMode, type MarketEdgeConfig } from './config';
+import { MARKET_EDGE_RISK_GROUP_KEYS, normalizeMarketEdgeConfig, normalizeMarketEdgeMode, type MarketEdgeConfig, type MarketEdgeRiskGroup } from './config';
 import type { MarketEdgeHealth, MarketEdgeMode, MarketEdgeSnapshot } from './types';
+import { getRiskGroup } from '../scanner/scanner-universe';
 
 export interface MarketEdgeRuntimeState {
   mode: MarketEdgeMode;
@@ -32,6 +33,8 @@ export interface MarketEdgeRuntimeState {
   maxWindowDeltaMs: number | null;
   timestampUnitMismatchSymbols: number;
   primaryBlocker: string | null;
+  sourceUniverseSize: number;
+  selectedRiskGroups: MarketEdgeRiskGroup[];
 }
 
 export class MarketEdgeRuntime {
@@ -47,6 +50,7 @@ export class MarketEdgeRuntime {
   private allMappings: MarketEdgeSymbolMapping[] = [];
   private futuresInfo: Record<string, unknown> | null = null;
   private activeSymbols = new Set<string>();
+  private sourceUniverseSymbols: string[] = [];
   private universeSymbols: string[] = [];
   private calculateTimer: ReturnType<typeof setInterval> | null = null;
   private oiTimer: ReturnType<typeof setInterval> | null = null;
@@ -81,7 +85,8 @@ export class MarketEdgeRuntime {
     this.startedAt = Date.now();
     const generation = ++this.lifecycleGeneration;
     this.failureReason = null;
-    this.universeSymbols = [...new Set(spotUniverseSymbols.map(s => s.toUpperCase()))].slice(0, this.config.universeSize);
+    this.sourceUniverseSymbols = [...new Set(spotUniverseSymbols.map(s => s.toUpperCase()))].slice(0, this.config.universeSize);
+    this.universeSymbols = this.filterUniverseByRiskGroup(this.sourceUniverseSymbols);
     logger.info(`MARKET_EDGE_RUNTIME_LIFECYCLE_AUDIT created=true started=true stopped=false restartCount=${this.restartCount} activeSubscriptions=${this.listeners.size} runtimeMode=${this.config.mode}`);
     logger.info(`MARKET_EDGE_SINGLETON_INVARIANT_AUDIT runtimeInstances=${MarketEdgeRuntime.activeRuntimeInstances} activeSockets=${this.dataAdapter.getStats().socketsOpen} activeWorkers=${this.calculateTimer ? 1 : 0} invariantOk=${String(MarketEdgeRuntime.activeRuntimeInstances === 1)}`);
     try {
@@ -122,8 +127,9 @@ export class MarketEdgeRuntime {
   }
 
   async updateUniverse(spotUniverseSymbols: string[]): Promise<void> {
-    const canonical = [...new Set(spotUniverseSymbols.map(symbol => symbol.toUpperCase()))].slice(0, this.config.universeSize);
-    if (!this.running) { await this.start(canonical); return; }
+    this.sourceUniverseSymbols = [...new Set(spotUniverseSymbols.map(symbol => symbol.toUpperCase()))].slice(0, this.config.universeSize);
+    const canonical = this.filterUniverseByRiskGroup(this.sourceUniverseSymbols);
+    if (!this.running) { await this.start(this.sourceUniverseSymbols); return; }
     const previousSet = new Set(this.universeSymbols), nextSet = new Set(canonical);
     if (previousSet.size === nextSet.size && [...nextSet].every(symbol => previousSet.has(symbol))) { this.universeSymbols = canonical; return; }
     if (!this.futuresInfo) { this.stop(); await this.start(canonical); return; }
@@ -149,7 +155,7 @@ export class MarketEdgeRuntime {
     this.calculateTimer = null; this.oiTimer = null; this.retryTimer = null; this.retryAttempt = 0;
     this.dataAdapter.stop(); this.kernel.clear(); this.store.clear();
     this.activeSymbols.clear(); this.detailedSymbols = []; this.lastDetailedUpdateAt = 0;
-    this.mappings = []; this.allMappings = []; this.universeSymbols = [];
+    this.mappings = []; this.allMappings = []; this.universeSymbols = []; this.sourceUniverseSymbols = [];
     this.futuresInfo = null; this.startedAt = null;
     this.lastFuturesConnectionState = null; this.lastSynchronizedWindowAt = null;
     logger.info('MARKET_EDGE_LIFECYCLE_AUDIT action=stop cleanupOk=true');
@@ -159,10 +165,14 @@ export class MarketEdgeRuntime {
 
   updateConfig(input: Partial<MarketEdgeConfig>): void {
     const previousMode = this.config.mode;
+    const previousRiskGroups = JSON.stringify(this.config.riskGroups);
     this.config = normalizeMarketEdgeConfig({ ...this.config, ...input, mode: normalizeMarketEdgeMode(input.mode ?? this.config.mode) });
     this.kernel.updateConfig(this.config);
     this.store.setMaxSymbols(this.config.universeSize);
     if (this.config.mode === 'OFF' && this.running) this.stop();
+    else if (this.running && previousRiskGroups !== JSON.stringify(this.config.riskGroups) && this.sourceUniverseSymbols.length > 0) {
+      void this.updateUniverse(this.sourceUniverseSymbols);
+    }
     logger.info(`MARKET_EDGE_MODE_AUDIT previous=${previousMode} current=${this.config.mode} canRequestPriority=${String(this.config.mode === 'PRIORITY')} canDirectBuy=false`);
     this.emit();
   }
@@ -188,7 +198,16 @@ export class MarketEdgeRuntime {
     const health: MarketEdgeHealth = !this.running || this.failureReason ? 'EDGE_OFFLINE' : pipeline.synchronizedSymbols > 0 && top.some(row => row.health === 'EDGE_HEALTHY') ? 'EDGE_HEALTHY' : pipeline.synchronizedSymbols > 0 ? 'EDGE_PARTIAL' : warmupExpired && (!streams.futuresConnected || pipeline.futuresInputSymbols === 0) ? 'EDGE_DEGRADED' : 'EDGE_WARMING_UP';
     const primaryBlocker = this.failureReason ?? (!this.running ? (this.config.mode === 'OFF' ? 'mode_off' : 'runtime_not_started') : this.mappings.length === 0 ? 'spot_universe_or_mapping_empty' : perpetualSymbols === 0 ? 'no_mapped_perpetuals' : !streams.futuresConnected ? 'futures_transport_connecting' : pipeline.futuresInputSymbols === 0 ? 'no_valid_futures_price' : pipeline.spotInputSymbols === 0 ? 'no_valid_spot_price' : pipeline.synchronizedSymbols === 0 ? 'rolling_windows_warming' : null);
     const futuresUniverseSymbols = Array.isArray(this.futuresInfo?.symbols) ? (this.futuresInfo!.symbols as Array<Record<string, unknown>>).filter(row => String(row.status) === 'TRADING' && String(row.contractType) === 'PERPETUAL' && String(row.quoteAsset) === 'USDT').length : 0;
-    return { mode: this.config.mode, health, universeSize: this.config.universeSize, mappedSymbols: this.mappings.length, perpetualSymbols, detailedSymbols: Math.min(this.config.detailedTopK, perpetualSymbols), hydratedSymbols: pipeline.openInterestSymbols, highEdgeCount: top.filter(row => row.edgeScore >= 80).length, earlyOpportunityCount: top.filter(row => row.edgeScore >= 70 && row.edgeScore < 80).length, lastCalculatedAt: this.lastCalculatedAt, failureReason: this.failureReason, runtimeStarted: this.running, workerActive: this.calculateTimer != null, futuresUniverseSymbols, snapshotCount: top.length, ...pipeline, primaryBlocker };
+    return { mode: this.config.mode, health, universeSize: this.config.universeSize, mappedSymbols: this.mappings.length, perpetualSymbols, detailedSymbols: Math.min(this.config.detailedTopK, perpetualSymbols), hydratedSymbols: pipeline.openInterestSymbols, highEdgeCount: top.filter(row => row.edgeScore >= 80).length, earlyOpportunityCount: top.filter(row => row.edgeScore >= 70 && row.edgeScore < 80).length, lastCalculatedAt: this.lastCalculatedAt, failureReason: this.failureReason, runtimeStarted: this.running, workerActive: this.calculateTimer != null, futuresUniverseSymbols, snapshotCount: top.length, ...pipeline, primaryBlocker, sourceUniverseSize: this.sourceUniverseSymbols.length, selectedRiskGroups: MARKET_EDGE_RISK_GROUP_KEYS.filter(group => this.config.riskGroups[group]) };
+  }
+
+  private filterUniverseByRiskGroup(symbols: string[]): string[] {
+    const filtered = symbols.filter(symbol => {
+      const group = getRiskGroup(symbol) as MarketEdgeRiskGroup | null;
+      return group != null && this.config.riskGroups[group] === true;
+    });
+    logger.info(`MARKET_EDGE_RISK_GROUP_FILTER_AUDIT sourceUniverse=${symbols.length} filteredUniverse=${filtered.length} enabledGroups=${MARKET_EDGE_RISK_GROUP_KEYS.filter(group => this.config.riskGroups[group]).join('|')} excluded=${Math.max(0, symbols.length - filtered.length)} scannerUniverseAffected=false openPositionsAffected=false`);
+    return filtered;
   }
 
   private onData(event: MarketEdgeDataEvent): void {
@@ -286,7 +305,7 @@ export class MarketEdgeRuntime {
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       if (!this.running || this.config.mode === 'OFF') return;
-      const universe = [...this.universeSymbols];
+      const universe = [...this.sourceUniverseSymbols];
       this.running = false;
       MarketEdgeRuntime.activeRuntimeInstances = Math.max(0, MarketEdgeRuntime.activeRuntimeInstances - 1);
       this.restartCount++;

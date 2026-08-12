@@ -1,9 +1,32 @@
 import type { EdgeClass, MarketEdgeMode } from './types';
 import { normalizeScannerUniverseSize } from '../scanner/scanner-universe-config';
 
+export const MARKET_EDGE_RISK_GROUP_KEYS = ['top_caps', 'large_caps', 'mid_caps', 'high_risk', 'very_high_risk'] as const;
+export type MarketEdgeRiskGroup = typeof MARKET_EDGE_RISK_GROUP_KEYS[number];
+export type MarketEdgeRiskGroups = Record<MarketEdgeRiskGroup, boolean>;
+
+export const DEFAULT_MARKET_EDGE_RISK_GROUPS: MarketEdgeRiskGroups = {
+  top_caps: false,
+  large_caps: false,
+  mid_caps: false,
+  high_risk: true,
+  very_high_risk: true,
+};
+
+export function normalizeMarketEdgeRiskGroups(input: Partial<Record<MarketEdgeRiskGroup, unknown>> | null | undefined): MarketEdgeRiskGroups {
+  const normalized = Object.fromEntries(MARKET_EDGE_RISK_GROUP_KEYS.map(key => [
+    key,
+    typeof input?.[key] === 'boolean' ? input[key] : DEFAULT_MARKET_EDGE_RISK_GROUPS[key],
+  ])) as MarketEdgeRiskGroups;
+  return MARKET_EDGE_RISK_GROUP_KEYS.some(key => normalized[key])
+    ? normalized
+    : { ...DEFAULT_MARKET_EDGE_RISK_GROUPS };
+}
+
 export interface MarketEdgeConfig {
   mode: MarketEdgeMode;
   universeSize: number;
+  riskGroups: MarketEdgeRiskGroups;
   detailedTopK: number;
   hydratedTopK: number;
   priorityTopK: number;
@@ -34,6 +57,7 @@ export interface MarketEdgeConfig {
 export const DEFAULT_MARKET_EDGE_CONFIG: MarketEdgeConfig = {
   mode: 'MONITOR',
   universeSize: 100,
+  riskGroups: { ...DEFAULT_MARKET_EDGE_RISK_GROUPS },
   detailedTopK: 25,
   hydratedTopK: 8,
   priorityTopK: 3,
@@ -69,6 +93,7 @@ export function normalizeMarketEdgeConfig(input: Partial<MarketEdgeConfig>): Mar
     ...input,
     mode: normalizeMarketEdgeMode(input.mode),
     universeSize,
+    riskGroups: normalizeMarketEdgeRiskGroups(input.riskGroups),
     detailedTopK,
     hydratedTopK,
     priorityTopK,
