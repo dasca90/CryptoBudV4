@@ -46,6 +46,23 @@ await test('public client uses only public GET market-data endpoints and account
   assert.ok(urls.every(url => !/order|account|position|leverage/i.test(new URL(url).pathname)));
 });
 
+await test('public client preserves the browser receiver for native fetch', async () => {
+  const originalFetch = globalThis.fetch;
+  let receiver: unknown = null;
+  globalThis.fetch = (function (this: unknown) {
+    receiver = this;
+    return Promise.resolve(new Response(JSON.stringify({ symbols: [] }), { status: 200 }));
+  }) as typeof fetch;
+  try {
+    const client = new MarketEdgePublicClient();
+    await client.getFuturesExchangeInfo();
+    assert.equal(receiver, globalThis);
+    assert.equal(client.getStats().edgeRequestFailures, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 await test('stream adapter normalizes public trades, depth, mark/index/funding and drops malformed updates', () => {
   const events: MarketEdgeDataEvent[] = [];
   const adapter = new MarketEdgeDataAdapter(event => events.push(event), null);

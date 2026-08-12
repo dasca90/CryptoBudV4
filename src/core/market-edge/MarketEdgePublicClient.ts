@@ -9,7 +9,14 @@ export interface EdgeRequestStats {
 export class MarketEdgePublicClient {
   private readonly stats = { edgePublicRequestCount: 0, edgeOIRequestCount: 0, edgeRequestFailures: 0 };
   private readonly startedAt = Date.now();
-  constructor(private readonly fetchFn: typeof fetch = fetch) {}
+  private readonly fetchFn: typeof fetch;
+
+  constructor(fetchFn?: typeof fetch) {
+    // WebView2's native Window.fetch requires Window as its receiver. Keeping the
+    // unbound function and later calling it as this.fetchFn changes that receiver
+    // to MarketEdgePublicClient and fails with "Illegal invocation".
+    this.fetchFn = fetchFn ?? globalThis.fetch.bind(globalThis);
+  }
 
   private async getJson<T>(url: string, kind: 'PUBLIC' | 'OI'): Promise<T> {
     this.stats.edgePublicRequestCount++;
