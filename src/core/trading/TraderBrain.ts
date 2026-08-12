@@ -394,7 +394,7 @@ export class TraderBrain {
     }
 
     const prediction = this.ml.predict(this.coin);
-    if (mlRuntimeGuard.canTriggerSell() && this.mode === 'AUTO' && prediction && prediction.prediction === 'SELL' && pnlPercent > 0) {
+    if (mlRuntimeGuard.canTriggerSell() && this.mode === 'AUTO' && prediction?.prediction === 'SELL' && pnlPercent > 0) {
       shouldExit = true;
       reason = 'ml_reversal';
     }

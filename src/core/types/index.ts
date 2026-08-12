@@ -100,6 +100,21 @@ export interface LiveSafetyCheckResult {
     maxOpenPositionsSet: boolean;
     journalReady: boolean;
     mlQualityReady: boolean;
+    publicApiConnectivity: boolean;
+    privateSignedApiConnectivity: boolean;
+    serverTimeOk: boolean;
+    accountReadOk: boolean;
+    liveAdapterInitialized: boolean;
+    orderQueryCapability: boolean;
+    clientOrderIdCapability: boolean;
+    positionPersistenceReady: boolean;
+    executionPersistenceReady: boolean;
+    exitEngineRunning: boolean;
+    positionMonitoringRunning: boolean;
+    noUnresolvedOrders: boolean;
+    noReconciliationIssues: boolean;
+    postFillAccountingReady: boolean;
+    restartReconciliationReady: boolean;
   };
   details: string[];
 }
@@ -118,16 +133,25 @@ export interface OrderRequest {
   quantity: number;
   price?: number;
   mode: TradingMode;
+  /** Required for LIVE idempotency. Paper accepts it for parity. */
+  clientOrderId?: string;
 }
 
 export interface OrderResult {
   orderId: string;
+  clientOrderId?: string;
   coin: string;
   side: OrderSide;
+  /** Executed quantity reported by the adapter (cumulative for an order). */
   quantity: number;
+  requestedQuantity?: number;
+  remainingQuantity?: number;
   price: number;
-  status: 'filled' | 'rejected' | 'cancelled';
+  status: 'new' | 'partially_filled' | 'filled' | 'rejected' | 'cancelled' | 'expired' | 'unknown_after_timeout';
   timestamp: number;
+  lastExchangeUpdateAt?: number;
+  feeAmount?: number;
+  feeAsset?: string;
   error?: string;
 }
 
@@ -294,6 +318,14 @@ export interface Position {
   feeRate?: number;
   feeSource?: string;
   operatorName?: string;
+  clientOrderId?: string;
+  exchangeOrderId?: string;
+  requestedQuantity?: number;
+  remainingQuantity?: number;
+  fillState?: 'PARTIALLY_FILLED' | 'FILLED';
+  executionAdapter?: string;
+  reconciliationRequired?: boolean;
+  postFillAnomalies?: string[];
 }
 
 export type MLDataQuality = 'GOOD' | 'MEDIUM' | 'BAD';
@@ -462,6 +494,9 @@ export interface TradeRecord {
   mode: TradingMode;
   side: OrderSide;
   adapter: string;
+  clientOrderId?: string;
+  exchangeOrderId?: string;
+  executionAdapter?: string;
   entryPrice: number;
   exitPrice?: number;
   quantity: number;
@@ -495,6 +530,11 @@ export interface BuySnapshot {
   symbol: string;
   mode: TradingMode;
   adapter: string;
+  clientOrderId?: string;
+  exchangeOrderId?: string | null;
+  actualQty?: number;
+  actualAverageFillPrice?: number;
+  executionAdapter?: string;
   riskGroup: string | null;
   selectedStrategy: string;
   selectedPlaybook: string | null;

@@ -4,7 +4,8 @@ import { mlRuntimeEvents } from './ml-runtime-events';
 import { logger } from '../../utils/logger';
 
 let _mode: MlRuntimeMode;
-let _mlExitsEnabled = loadMLRuntimeMlExitsEnabled();
+// V6: ExitEngine is the only canonical automated SELL owner.
+let _mlExitsEnabled = false;
 
 function loadPersistedMode(): MlRuntimeMode {
   const stored = loadMLRuntimeMode();
@@ -42,7 +43,7 @@ export const mlRuntimeGuard = {
   },
 
   canTriggerSell(): boolean {
-    return _mode === 'active_guarded' && _mlExitsEnabled;
+    return false;
   },
 
   areMlExitsEnabled(): boolean {
@@ -50,10 +51,9 @@ export const mlRuntimeGuard = {
   },
 
   setMlExitsEnabled(enabled: boolean): void {
-    if (_mlExitsEnabled === enabled) return;
-    _mlExitsEnabled = enabled;
-    saveMLRuntimeMlExitsEnabled(enabled);
-    logger.warn(`ML_RUNTIME_ML_EXITS_SETTING_CHANGED enabled=${String(enabled)} mode=${_mode} canTriggerSell=${String(_mode === 'active_guarded' && _mlExitsEnabled)}`);
+    _mlExitsEnabled = false;
+    saveMLRuntimeMlExitsEnabled(false);
+    if (enabled) logger.warn(`ML_RUNTIME_ML_SELL_RETIRED requested=true applied=false canonicalSellOwner=ExitEngine`);
   },
 
   canMutateDecision(): boolean {

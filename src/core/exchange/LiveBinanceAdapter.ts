@@ -60,6 +60,10 @@ export class LiveBinanceAdapter implements ExchangeAdapter {
     return [];
   }
 
+  async getOrder(_coin: string, _exchangeOrderId?: string, _clientOrderId?: string): Promise<OrderResult | null> {
+    throw new Error('LIVE_ORDER_QUERY_NOT_IMPLEMENTED');
+  }
+
   async getAccountInfo(): Promise<{ canTrade: boolean; isLive: boolean }> {
     return { canTrade: this.connected, isLive: true };
   }

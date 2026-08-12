@@ -48,6 +48,37 @@ export class PositionManager {
     this.emit('add', symbol);
   }
 
+  /**
+   * Idempotent accounting boundary for cumulative exchange BUY updates.
+   * A repeated update for the same clientOrderId is a no-op; a larger cumulative
+   * executed quantity updates the one canonical position instead of creating a lot.
+   */
+  upsertExecutionPosition(symbol: string, incoming: Position): { position: Position; created: boolean; changed: boolean } {
+    const existing = this.positions.get(symbol);
+    if (!existing) {
+      this.addPosition(symbol, incoming);
+      return { position: incoming, created: true, changed: true };
+    }
+    if (!incoming.clientOrderId || existing.clientOrderId !== incoming.clientOrderId) {
+      throw new Error(`POSITION_EXECUTION_IDENTITY_CONFLICT:${symbol}`);
+    }
+    const quantityTolerance = Math.max(1e-12, Math.max(existing.quantity, incoming.quantity) * 1e-10);
+    if (incoming.quantity + quantityTolerance < existing.quantity) {
+      throw new Error(`NON_MONOTONIC_EXECUTED_QUANTITY:${symbol}`);
+    }
+    const qtyChanged = Math.abs(incoming.quantity - existing.quantity) > quantityTolerance;
+    const priceTolerance = Math.max(1e-12, Math.max(existing.avgEntryPrice, incoming.avgEntryPrice) * 1e-10);
+    const priceChanged = Math.abs(incoming.avgEntryPrice - existing.avgEntryPrice) > priceTolerance;
+    if (!qtyChanged && !priceChanged && existing.fillState === incoming.fillState) {
+      logger.info(`LIVE_ORDER_DUPLICATE_EVENT_AUDIT tradeId=${incoming.tradeId ?? 'unknown'} symbol=${symbol} clientOrderId=${incoming.clientOrderId} exchangeOrderId=${incoming.exchangeOrderId ?? 'unknown'} executedQty=${incoming.quantity} duplicateEventDetected=true idempotentUpdateApplied=true invariantOk=true`);
+      return { position: existing, created: false, changed: false };
+    }
+    Object.assign(existing, incoming, { openedAt: existing.openedAt });
+    logger.info(`LIVE_ORDER_EXECUTION_UPDATE_AUDIT tradeId=${existing.tradeId ?? 'unknown'} symbol=${symbol} clientOrderId=${existing.clientOrderId} exchangeOrderId=${existing.exchangeOrderId ?? 'unknown'} executedQty=${existing.quantity} remainingQty=${existing.remainingQuantity ?? 0} exchangeStatus=${existing.fillState} duplicateEventDetected=false idempotentUpdateApplied=true invariantOk=true`);
+    this.emit('execution_upsert', symbol);
+    return { position: existing, created: false, changed: true };
+  }
+
   updatePosition(symbol: string, patch: Partial<Position>): void {
     const existing = this.positions.get(symbol);
     if (!existing) return;

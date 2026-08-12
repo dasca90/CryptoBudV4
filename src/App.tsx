@@ -608,6 +608,7 @@ export default function App() {
       setPublicDataRefreshing(false);
       setPositionBootRestoring(false);
       setClosedTradesBootRestoring(false);
+      await engine.reconcileExecutionState();
       logger.info(`PERSISTENCE_HYDRATION_COMPLETE: openPositionsLoaded=${engine.getPositionManager().getOpenPositions().length} closedTradesLoaded=${journal.getClosedTrades().length} journalTradesLoaded=${journal.getClosedTrades().length} mlRecordsLoaded=0 settingsLoaded=true attemptedEmptyOverwrite=false emptyOverwriteBlocked=true sourceUsed=${typeof window !== 'undefined' ? 'localStorage' : 'tauri'} storageKey=cryptobud_v4 backupKey=cryptobud_v4_critical resetMarkerPresent=false resetMarkerConsumed=false`);
       logger.info(`POSITION_PERSISTENCE_BOOT_COMPLETE: mode=demo storageKey=open_positions persistedOpenCount=${savedPositions.length} positionManagerOpenCount=${engine.getPositionManager().getOpenPositions().length} uiOpenRowsCount=${engine.getPositionManager().getOpenPositions().length} restoredSymbols=${engine.getPositionManager().getOpenPositions().map(p => p.coin).join('|') || 'none'} resetMetaDetected=false resetApplied=false reason=complete`);
       {
@@ -1370,11 +1371,6 @@ export default function App() {
     setGuardState(mlRuntimeGuard.getGuardState(brain !== null, brain?.enabled ?? false));
   }, [brain]);
 
-  const handleMlExitsEnabledChange = useCallback((enabled: boolean) => {
-    mlRuntimeGuard.setMlExitsEnabled(enabled);
-    setGuardState(mlRuntimeGuard.getGuardState(brain !== null, brain?.enabled ?? false));
-  }, [brain]);
-
   const handleMlPredictBuySettingsChange = useCallback((nextSettings: MLPredictBuySettings) => {
     setMlPredictBuySettings(nextSettings);
     saveMLPredictBuySettings(nextSettings);
@@ -1437,7 +1433,6 @@ export default function App() {
             guardState={guardState}
             events={mlEvents}
             onRuntimeModeChange={handleRuntimeModeChange}
-            onMlExitsEnabledChange={handleMlExitsEnabledChange}
             mlPredictBuySettings={mlPredictBuySettings}
             onMlPredictBuySettingsChange={handleMlPredictBuySettingsChange}
             activeExecutionMode={engine.getAdapter().isLive ? 'Live' : 'Demo'}

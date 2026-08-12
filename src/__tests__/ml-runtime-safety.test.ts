@@ -209,7 +209,7 @@ console.log('\n--- 2: Mode change persists ---');
   assertEqual(loaded2, 'off', '2d: persisted mode is off');
 
   mlRuntimeGuard.setMlExitsEnabled(true);
-  assertEqual(loadMLRuntimeMlExitsEnabled(), true, '2e: ML exit permission persists as enabled');
+  assertEqual(loadMLRuntimeMlExitsEnabled(), false, '2e: retired ML SELL permission remains disabled');
   mlRuntimeGuard.setMlExitsEnabled(false);
   assertEqual(loadMLRuntimeMlExitsEnabled(), false, '2f: ML exit permission persists as disabled');
 
@@ -342,7 +342,7 @@ console.log('\n--- 6: active_guarded downgrade only ---');
   assert(mlRuntimeGuard.canForceBuy() === false, '6g: canForceBuy still false in active_guarded');
   assert(mlRuntimeGuard.canForceUpgrade() === false, '6h: canForceUpgrade still false in active_guarded');
   mlRuntimeGuard.setMlExitsEnabled(true);
-  assert(mlRuntimeGuard.canTriggerSell(), '6i: active_guarded can trigger sell only when ML exits setting is ON');
+  assert(!mlRuntimeGuard.canTriggerSell(), '6i: V6 keeps ML SELL retired even when legacy setter requests ON');
 
   // Simulate active downgrade
   mlRuntimeEvents.recordActiveDowngrade({
@@ -428,7 +428,7 @@ console.log('\n--- 8: ML cannot trigger SELL without active_guarded + explicit M
   mlRuntimeGuard.setMlExitsEnabled(false);
   assert(!mlRuntimeGuard.canTriggerSell(), '8d: cannot trigger sell in active_guarded while ML exits are disabled');
   mlRuntimeGuard.setMlExitsEnabled(true);
-  assert(mlRuntimeGuard.canTriggerSell(), '8e: can trigger sell only in active_guarded with ML exits enabled');
+  assert(!mlRuntimeGuard.canTriggerSell(), '8e: ExitEngine remains canonical SELL owner in active_guarded');
   mlRuntimeGuard.setMlExitsEnabled(false);
   mlRuntimeGuard.setMode('shadow_only');
 }
@@ -461,7 +461,7 @@ console.log('\n--- 9: ML exit setting defaults safe for new/old persisted state 
   mlRuntimeGuard.setMlExitsEnabled(false);
 }
 
-console.log('\n--- 10: TraderBrain legacy ml_reversal is gated ---');
+console.log('\n--- 10: TraderBrain legacy ml_reversal is retired ---');
 {
   const shadowSell = evaluateLegacyMlReversal('shadow_only', true);
   assertEqual(shadowSell.type, 'NOOP', '10a: shadow mode + ML SELL prediction does not create sell');
@@ -476,8 +476,8 @@ console.log('\n--- 10: TraderBrain legacy ml_reversal is gated ---');
   assertEqual((activeOffSell as any).reason, 'hold', '10f: active_guarded with ML exits disabled holds');
 
   const activeOnSell = evaluateLegacyMlReversal('active_guarded', true);
-  assertEqual(activeOnSell.type, 'EXIT', '10g: legacy TraderBrain ml_reversal can only create EXIT when active_guarded + mlExitsEnabled=true');
-  assertEqual((activeOnSell as any).reason, 'ml_reversal', '10h: legacy ML exit reason remains ml_reversal in private legacy path');
+  assertEqual(activeOnSell.type, 'NOOP', '10g: legacy TraderBrain ml_reversal cannot create EXIT in V6');
+  assertEqual((activeOnSell as any).reason, 'hold', '10h: ML SELL prediction remains HOLD; ExitEngine owns exits');
 
   mlRuntimeGuard.setMode('shadow_only');
   mlRuntimeGuard.setMlExitsEnabled(false);

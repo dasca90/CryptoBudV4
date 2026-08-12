@@ -14,6 +14,8 @@ export interface ExchangeAdapter {
 
   getBalances(): Promise<ExchangeBalance[]>;
   getOpenOrders(coin?: string): Promise<OrderResult[]>;
+  /** Query by stable order identity after timeout/restart. Required for LIVE readiness. */
+  getOrder?(coin: string, exchangeOrderId?: string, clientOrderId?: string): Promise<OrderResult | null>;
 
   getAccountInfo(): Promise<{ canTrade: boolean; isLive: boolean }>;
 }

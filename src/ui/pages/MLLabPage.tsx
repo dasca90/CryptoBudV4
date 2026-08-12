@@ -22,7 +22,6 @@ interface Props {
   guardState: MlRuntimeGuardState;
   events: MlRuntimeEvent[];
   onRuntimeModeChange: (mode: MlRuntimeMode) => void;
-  onMlExitsEnabledChange: (enabled: boolean) => void;
   mlPredictBuySettings: MLPredictBuySettings;
   onMlPredictBuySettingsChange: (settings: MLPredictBuySettings) => void;
   activeExecutionMode: 'Demo' | 'Live';
@@ -35,7 +34,7 @@ const MODE_OPTIONS: { key: MlRuntimeMode; label: string; desc: string }[] = [
   { key: 'off', label: 'Off', desc: 'ML loaded but does not affect trading.' },
   { key: 'shadow_only', label: 'Shadow Only', desc: 'ML runs and records what it would do, but does not affect trading.' },
   { key: 'advisory_only', label: 'Advisory Only', desc: 'ML gives visible advice, but cannot change trading decisions.' },
-  { key: 'active_guarded', label: 'Active Guarded', desc: 'ML can downgrade entries. ML exits require the separate ML Exit Enabled setting. ML cannot force BUY.' },
+  { key: 'active_guarded', label: 'Active Guarded', desc: 'ML can downgrade entries. Automated SELL remains owned exclusively by ExitEngine.' },
 ];
 
 const MODE_STYLE: Record<MlRuntimeMode, { bg: string; border: string; text: string }> = {
@@ -69,7 +68,7 @@ function eventRowBg(ev: MlRuntimeEvent): string {
 export function MLLabPage({
   journal, onExportML, onExportTraining, onExportAdvisory, onExportExcluded,
   equityHistory, brain, onBrainUpdate, importedRows, onImportedRowsUpdate,
-  guardState, events, onRuntimeModeChange, onMlExitsEnabledChange,
+  guardState, events, onRuntimeModeChange,
   mlPredictBuySettings, onMlPredictBuySettingsChange,
   activeExecutionMode, activeExecutionAdapter,
 }: Props) {
@@ -234,10 +233,10 @@ export function MLLabPage({
   const badImported = importedRows.filter(r => r.dataQuality === 'BAD').length;
 
   const recentEvents = events.slice(-25).reverse();
-  const { mode, brainLoaded, modelTrained, counters, mlExitsEnabled } = guardState;
+  const { mode, brainLoaded, modelTrained, counters } = guardState;
   const modeStyle = MODE_STYLE[mode] ?? MODE_STYLE.shadow_only;
   const isSafe = mode !== 'active_guarded';
-  const canTriggerSell = mode === 'active_guarded' && mlExitsEnabled;
+  const canTriggerSell = false;
 
   const modeLabel = MODE_OPTIONS.find(o => o.key === mode)?.label ?? 'Shadow Only';
   const rowsUsed = brain?.trainingRowCount ?? 0;
@@ -566,18 +565,8 @@ export function MLLabPage({
           <div style={{ fontSize: 10, color: '#8b949e', marginTop: 4 }}>
             {MODE_OPTIONS.find(o => o.key === mode)?.desc}
           </div>
-          <label className={`ml-exit-toggle ${mlExitsEnabled ? 'ml-exit-toggle--on' : 'ml-exit-toggle--off'}`} style={{ marginTop: 8 }}>
-            <span className="ml-safety-label">ML Exit Enabled</span>
-            <span className="ml-exit-toggle-state">{mlExitsEnabled ? 'ON' : 'OFF'}</span>
-            <input
-              type="checkbox"
-              checked={mlExitsEnabled}
-              onChange={(event) => onMlExitsEnabledChange(event.currentTarget.checked)}
-              aria-label="Enable ML guarded exits"
-            />
-          </label>
-          <div style={{ fontSize: 10, color: mlExitsEnabled ? '#d29922' : '#3fb950', marginTop: 4 }}>
-            {mlExitsEnabled ? 'ML exit permission is ON, but only Active Guard can use it.' : 'ML exit permission is OFF. ML cannot trigger SELL.'}
+          <div style={{ fontSize: 10, color: '#3fb950', marginTop: 8 }}>
+            ML SELL retired in V6. ExitEngine owns Stop Loss, TP1, Trailing, timed exits and manual close.
           </div>
         </div>
 
@@ -655,7 +644,7 @@ export function MLLabPage({
                 </div>
                 <div className="ml-counter-item">
                   <span className="ml-counter-value" style={{ color: '#bc8cff' }}>{counters.mlExitTriggers}</span>
-                  <span className="ml-counter-label">ML Exits</span>
+                  <span className="ml-counter-label">Legacy ML Exits (retired)</span>
                 </div>
                 <div className="ml-counter-item">
                   <span className="ml-counter-value" style={{ color: '#8b949e' }}>{counters.blockedMutations}</span>
