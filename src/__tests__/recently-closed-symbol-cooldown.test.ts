@@ -6,6 +6,7 @@ let failed = 0;
 const ok = (cond: boolean, label: string) => cond ? passed++ : (failed++, console.error(`FAIL: ${label}`));
 
 const scannerSrc = readFileSync(path.resolve(process.cwd(), 'src/core/scanner/MarketScanner.ts'), 'utf8');
+const plannerSrc = readFileSync(path.resolve(process.cwd(), 'src/core/scanner/ExecutionPlanner.ts'), 'utf8');
 const appSrc = readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
 
 // 1. Recently closed symbol cooldown infrastructure exists
@@ -16,20 +17,18 @@ ok(scannerSrc.includes('recentlyClosedSymbols'), 'MarketScanner has recentlyClos
 ok(scannerSrc.includes('recordClose(data:'), 'MarketScanner has recordClose method');
 ok(scannerSrc.includes('RECENTLY_CLOSED_SYMBOL_RECORDED'), 'recordClose emits recorded audit');
 
-// 3. Cooldown check blocks candidates in finalExecutionPool filter
-ok(scannerSrc.includes('RECENTLY_CLOSED_SYMBOL_BLOCKED'), 'MarketScanner emits RECENTLY_CLOSED_SYMBOL_BLOCKED');
-ok(scannerSrc.includes('candidateWouldOtherwiseBuy=true'), 'blocked audit notes candidate would otherwise buy');
+// 3. Canonical symbol eligibility blocks before ranking/queue selection
+ok(plannerSrc.includes('evaluateSymbolExecutionEligibility'), 'ExecutionPlanner owns canonical symbol eligibility');
+ok(plannerSrc.includes('SYMBOL_REENTRY_ELIGIBILITY_AUDIT'), 'planner emits explicit re-entry audit');
 
 // 4. Cooldown fields logged: symbol, closedAt, cooldownUntil, remainingMs, previousPnlPct, previousExitReason
-ok(scannerSrc.includes('previousPnlPct=${cd.pnlPct.toFixed(2)}'), 'blocked audit exposes previousPnlPct');
-ok(scannerSrc.includes('previousPnlUsd=${cd.pnlUsd.toFixed(2)}'), 'blocked audit exposes previousPnlUsd');
-ok(scannerSrc.includes('previousExitReason=${cd.exitReason}'), 'blocked audit exposes previousExitReason');
-ok(scannerSrc.includes('previousStrategy=${cd.strategy}'), 'blocked audit exposes previousStrategy');
-ok(scannerSrc.includes('remainingMs=${remainingMs}'), 'blocked audit exposes remainingMs');
+ok(plannerSrc.includes('previousPnl=${reentryState?.pnlPct'), 'eligibility audit exposes previous PnL');
+ok(plannerSrc.includes('previousCloseReason=${reentryState?.exitReason'), 'eligibility audit exposes close reason');
+ok(plannerSrc.includes('cooldownRemainingMs=${eligibility.cooldownRemainingMs}'), 'eligibility audit exposes remaining time');
 
 // 5. Cooldown summary log exists
-ok(scannerSrc.includes('RECENTLY_CLOSED_SYMBOL_COOLDOWN_SUMMARY'), 'scanner emits cooldown summary');
-ok(scannerSrc.includes('cooldownBlocked=${cooldownBlockedCount}'), 'post-router update includes cooldownBlocked count');
+ok(plannerSrc.includes('EXECUTION_QUEUE_ELIGIBILITY_AUDIT'), 'planner emits cooldown/recovery queue summary');
+ok(plannerSrc.includes('symbolCooldownBlockedCount'), 'queue summary includes cooldown count');
 
 // 6. App.tsx wires recordClose from onTradeClosed
 ok(appSrc.includes("engine.getAutoRuntime()?.getScanner()?.recordClose("), 'App.tsx calls recordClose from onTradeClosed callback');

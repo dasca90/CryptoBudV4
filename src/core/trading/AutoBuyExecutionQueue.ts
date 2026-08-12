@@ -195,7 +195,8 @@ export const autoBuyQueue = {
     const lastBuyAt = module === 'global' ? state.lastBuyAt : state.lastBuyAtByModule[module] ?? 0;
     const requiredCooldownMs = cooldownMsForModule(module);
     if (remaining > 0) {
-      logger.info(`AUTO_BUY_COOLDOWN_BLOCKED symbol=${symbol} module=${module} lastAutoBuyAt=${lastBuyAt} elapsedMs=${Date.now() - lastBuyAt} requiredCooldownMs=${requiredCooldownMs} nextAllowedBuyAt=${new Date(Date.now() + remaining).toISOString()} reason=min_seconds_between_auto_buys`);
+      const reason = module === 'global' ? 'GLOBAL_BUY_PACING_ACTIVE' : 'MODULE_BUY_PACING_ACTIVE';
+      logger.info(`AUTO_BUY_PACING_BLOCKED symbol=${symbol} module=${module} lastAutoBuyAt=${lastBuyAt} elapsedMs=${Date.now() - lastBuyAt} requiredPacingMs=${requiredCooldownMs} nextAllowedBuyAt=${new Date(Date.now() + remaining).toISOString()} reason=${reason}`);
       return { blocked: true, remainingMs: remaining };
     }
     return { blocked: false, remainingMs: 0 };

@@ -1143,6 +1143,7 @@ export interface ScannerCandidate {
   mlBadEntryRisk: boolean;
   mlWinProbability: number;
   rank?: number;
+  executionEligibility?: import('../scanner/symbolExecutionEligibility').CandidateExecutionEligibility;
   rawScore?: number;
   dataQuality?: MarketDataQualityLevel;
   priceFresh?: boolean;
@@ -1380,6 +1381,11 @@ export interface ScannerSnapshot {
     blockedByDuplicateCount?: number;
     blockedByRiskCount?: number;
     blockedByOpenPositionLimitCount?: number;
+    symbolEligibleCount?: number;
+    symbolCooldownBlockedCount?: number;
+    recoveryBlockedCount?: number;
+    alreadyOpenBlockedCount?: number;
+    pendingBuyBlockedCount?: number;
     maxExecutionQueuePerScan?: number;
     executionQueueAcceptedCount?: number;
     deferredByQueueLimitCount?: number;
@@ -1567,6 +1573,14 @@ export interface ExecutionPlan {
   queueAcceptedSymbols?: string[];
   deferredByQueueLimitSymbols?: string[];
   queueRejectedReasons?: string[];
+  buyReadyCount?: number;
+  symbolEligibleCount?: number;
+  symbolCooldownBlockedCount?: number;
+  recoveryBlockedCount?: number;
+  alreadyOpenBlockedCount?: number;
+  pendingBuyBlockedCount?: number;
+  queueEligibleCount?: number;
+  queueEligibleSymbols?: string[];
   maxAutoBotsBuysPerCycle?: number;
   maxUnicornBuysPerCycle?: number;
   autoBotsSelectedThisCycle?: number;

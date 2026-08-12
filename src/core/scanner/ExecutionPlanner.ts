@@ -11,6 +11,7 @@ import { rehydrateCandidateMarketFreshness } from '../market-data/canonical-mark
 import { MarketDataFeed } from '../../utils/MarketDataFeed';
 import { resolveFinalNoBuyReasonPriority } from './finalNoBuyReasonPriority';
 import { normalizeUnicornFinalBlockReason } from '../unicorn/unicornExecutionBlockers';
+import { evaluateSymbolExecutionEligibility, type SymbolReentryState } from './symbolExecutionEligibility';
 
 export const MAX_EXECUTION_QUEUE_PER_SCAN = 10;
 
@@ -39,6 +40,8 @@ export interface ExecutionPlannerInput {
   executionAdapter: 'paper_simulated' | 'binance_live';
   enabledRiskGroups: Record<string, boolean>;
   runtimeCanAttemptAutoExecution?: boolean;
+  symbolReentryStateBySymbol?: ReadonlyMap<string, SymbolReentryState>;
+  globalPacingRemainingMs?: number;
 }
 
 export type CanonicalExecutableCandidate = ExecutionDecision;
@@ -546,10 +549,28 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   logger.info(`CAPITAL_PER_COIN_ORDER_SIZE_AUDIT: symbol=none mode=${executionAdapter === 'paper_simulated' ? 'demo' : 'live'} userTradingCapital=${capital} userCapitalPerCoin=${capitalPerTrade} persistedCapitalPerCoin=${capitalPerTrade} resolvedCapitalPerCoin=${capitalPerTrade} finalOrderNotionalUsd=0 qty=0 entryPrice=0 availableCapital=${capital} usedCapitalBefore=${usedCapital} usedCapitalAfter=${usedCapital} adjustmentReason=planner_limits source=persisted`);
   const normalizePlannerSymbol = (symbol: unknown): string => String(symbol ?? '').trim().toUpperCase();
   const openSymbolSet = new Set(openSymbols.map(normalizePlannerSymbol).filter(Boolean));
+  const pendingSymbolSet = new Set(pendingOrderSymbols.map(normalizePlannerSymbol).filter(Boolean));
+  const symbolEligibilityBySymbol = new Map<string, ReturnType<typeof evaluateSymbolExecutionEligibility>>();
+  const symbolBlockedCandidates: Array<{ candidate: ScannerCandidate; reason: string }> = [];
   const activeExecutionPool = executionPool.filter((candidate) => {
-    const wasOpenPosition = openSymbolSet.has(normalizePlannerSymbol(candidate.symbol));
-    if (wasOpenPosition) {
-      logger.info(`EXECUTION_POOL_OPEN_SYMBOL_EXCLUSION_AUDIT: openSymbols=${openSymbols.join('|') || 'none'} candidateSymbol=${candidate.symbol} wasOpenPosition=true removedFromTopCandidates=true removedFromExecutionPool=true reason=FILTERED_ALREADY_OPEN_POSITION source=PositionManager`);
+    const normalizedSymbol = normalizePlannerSymbol(candidate.symbol);
+    const eligibility = evaluateSymbolExecutionEligibility({
+      candidate,
+      openSymbols: openSymbolSet,
+      pendingBuySymbols: pendingSymbolSet,
+      reentryState: input.symbolReentryStateBySymbol?.get(normalizedSymbol),
+      maxSpreadPct,
+    });
+    candidate.executionEligibility = eligibility;
+    symbolEligibilityBySymbol.set(normalizedSymbol, eligibility);
+    const reentryState = input.symbolReentryStateBySymbol?.get(normalizedSymbol);
+    logger.info(`SYMBOL_REENTRY_ELIGIBILITY_AUDIT: symbol=${candidate.symbol} candidateId=${candidate.candidateId ?? 'none'} scanId=${scannerSnapshot.scanId ?? 'unknown'} previousTradeFound=${String(Boolean(reentryState))} previousCloseReason=${reentryState?.exitReason ?? 'none'} previousPnl=${reentryState?.pnlPct ?? 'n/a'} lastBuyAt=n/a lastSellAt=${reentryState?.closedAt ?? 'n/a'} cooldownUntil=${reentryState?.cooldownUntil ?? 'none'} cooldownRemainingMs=${eligibility.cooldownRemainingMs} recoveryRequired=${String(eligibility.recoveryRequired)} recoverySatisfied=${String(eligibility.recoverySatisfied)} symbolEligible=${String(eligibility.symbolEligible)} blockReason=${eligibility.symbolBlockReason ?? 'none'}`);
+    if (!eligibility.symbolEligible) {
+      const reason = eligibility.symbolBlockReason ?? 'SYMBOL_EXECUTION_INELIGIBLE';
+      symbolBlockedCandidates.push({ candidate, reason });
+      if (reason === 'SYMBOL_ALREADY_OPEN') {
+        logger.info(`EXECUTION_POOL_OPEN_SYMBOL_EXCLUSION_AUDIT: openSymbols=${openSymbols.join('|') || 'none'} candidateSymbol=${candidate.symbol} wasOpenPosition=true removedFromTopCandidates=true removedFromExecutionPool=true reason=FILTERED_ALREADY_OPEN_POSITION canonicalReason=SYMBOL_ALREADY_OPEN source=PositionManager`);
+      }
       return false;
     }
     return true;
@@ -566,7 +587,7 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
       return !wasOpenPosition;
     }),
   };
-  const filteredAlreadyOpenCount = executionPool.length - activeExecutionPool.length;
+  const filteredAlreadyOpenCount = symbolBlockedCandidates.filter((row) => row.reason === 'SYMBOL_ALREADY_OPEN').length;
   const filteredAlreadyOpenCandidates = executionPool
     .filter((candidate) => openSymbolSet.has(normalizePlannerSymbol(candidate.symbol)));
   const filteredAlreadyOpenSymbols = filteredAlreadyOpenCandidates.map((candidate) => candidate.symbol);
@@ -611,18 +632,16 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   const sourceBreakdown = { AutoBots: 0, UnicornHunter: 0 };
   let autoBotsSelectedThisCycle = 0;
   let unicornSelectedThisCycle = 0;
-  if (filteredAlreadyOpenCount > 0) {
-    noBuyReasons.push('FILTERED_ALREADY_OPEN_POSITION');
-    skippedReasons.push('FILTERED_ALREADY_OPEN_POSITION');
-    for (const candidate of filteredAlreadyOpenCandidates) {
-      const finalNoBuyReason = isUnicornCandidateLike(candidate)
-        ? normalizeUnicornNoBuyReason('FILTERED_ALREADY_OPEN_POSITION')
-        : 'FILTERED_ALREADY_OPEN_POSITION';
+  if (symbolBlockedCandidates.length > 0) {
+    for (const { candidate, reason } of symbolBlockedCandidates) {
+      const finalNoBuyReason = isUnicornCandidateLike(candidate) ? normalizeUnicornNoBuyReason(reason) : reason;
+      if (!noBuyReasons.includes(finalNoBuyReason)) noBuyReasons.push(finalNoBuyReason);
+      if (!skippedReasons.includes(finalNoBuyReason)) skippedReasons.push(finalNoBuyReason);
       skippedCandidates.push({
         symbol: candidate.symbol,
-        status: 'FILTERED_ALREADY_OPEN_POSITION',
-        reason: 'FILTERED_ALREADY_OPEN_POSITION',
-        gate: 'PositionManager',
+        status: reason,
+        reason,
+        gate: 'SymbolExecutionEligibility',
         isRetryable: true,
         finalNoBuyReason,
       });
@@ -656,7 +675,7 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   });
   const scoredExecutionPool = revalidatedExecutionPool.map(c => ({ candidate: c, score: computeExecutionScore(c) }));
   scoredExecutionPool.sort((a, b) => b.score - a.score);
-  logger.info(`EXECUTION_SELECTION_LIMIT_AUDIT: totalPoolCandidates=${activeExecutionPool.length} evaluatedCandidates=${scoredExecutionPool.length} blockedByRealSafety=0 blockedByDuplicatePosition=${filteredAlreadyOpenCount} blockedByPendingOrder=0 blockedByMaxOpenPositions=${availableSlots <= 0 ? activeExecutionPool.length : 0} blockedByCapital=${capitalLimitedSlots <= 0 ? activeExecutionPool.length : 0} blockedBySpread=0 blockedByTpRoom=0 blockedByPriceStale=0 selectionLimitApplied=${String(selectionLimit < activeExecutionPool.length)} maxSelectedPerScan=${maxSelectedPerScan} maxAutoBotsSelectedPerScan=${maxAutoBotsSelectedPerScan} maxUnicornSelectedPerScan=${maxUnicornSelectedPerScan} effectiveSelectionLimit=${selectionLimit}`);
+  logger.info(`EXECUTION_SELECTION_LIMIT_AUDIT: totalPoolCandidates=${executionPool.length} evaluatedCandidates=${scoredExecutionPool.length} blockedByRealSafety=${symbolBlockedCandidates.length} blockedByDuplicatePosition=${filteredAlreadyOpenCount} blockedByPendingOrder=${symbolBlockedCandidates.filter((row) => row.reason === 'SYMBOL_PENDING_BUY').length} blockedByMaxOpenPositions=${availableSlots <= 0 ? activeExecutionPool.length : 0} blockedByCapital=${capitalLimitedSlots <= 0 ? activeExecutionPool.length : 0} blockedBySpread=0 blockedByTpRoom=0 blockedByPriceStale=0 selectionLimitApplied=${String(selectionLimit < activeExecutionPool.length)} maxSelectedPerScan=${maxSelectedPerScan} maxAutoBotsSelectedPerScan=${maxAutoBotsSelectedPerScan} maxUnicornSelectedPerScan=${maxUnicornSelectedPerScan} effectiveSelectionLimit=${selectionLimit}`);
 
   // Group-aware round-robin reordering: interleave candidates from each risk group
   // so selection diversifies across groups instead of picking global top-N
@@ -1313,6 +1332,10 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   const projectedCapitalAtRisk = usedCapital + projectedCapitalRequired;
   const safetyLimitApplied = selectionLimit < activeExecutionPool.length;
   const queueRejectedCount = queueDeferredSymbols.length;
+  const symbolCooldownBlockedCount = symbolBlockedCandidates.filter((row) => row.reason === 'SYMBOL_REENTRY_COOLDOWN_ACTIVE').length;
+  const recoveryBlockedCount = symbolBlockedCandidates.filter((row) => row.reason === 'SYMBOL_RECOVERY_REQUIRED').length;
+  const alreadyOpenBlockedCount = symbolBlockedCandidates.filter((row) => row.reason === 'SYMBOL_ALREADY_OPEN').length;
+  const pendingBuyBlockedCount = symbolBlockedCandidates.filter((row) => row.reason === 'SYMBOL_PENDING_BUY').length;
   const autoBotsCandidates = activeExecutionPool.filter((candidate) => !isUnicornCandidateLike(candidate)).length;
   const unicornCandidates = activeExecutionPool.filter((candidate) => isUnicornCandidateLike(candidate)).length;
   const validHandoffCandidates = handoffValidSymbols.length;
@@ -1325,8 +1348,17 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
   const unicornPriorityRank = unicornPriorityRankIndex >= 0 ? unicornPriorityRankIndex + 1 : 'none';
   const queueInvariantOk = queueAcceptedCount <= maxExecutionQueuePerScan
     && queueRejectedCount === queueDeferredSymbols.length
-    && queueDeferredSymbols.length === queueRejectedReasons.length
-    && handoffValidSymbols.length === queueAcceptedCount + queueDeferredSymbols.length;
+    && queueDeferredSymbols.length === queueRejectedReasons.length;
+  const forbiddenQueueSymbols = queueAcceptedSymbols.filter((symbol) => {
+    const eligibility = symbolEligibilityBySymbol.get(normalizePlannerSymbol(symbol));
+    return !eligibility?.symbolEligible || eligibility.symbolBlockReason != null;
+  });
+  const symbolEligibilityInvariantOk = forbiddenQueueSymbols.length === 0;
+  const globalPacingRemainingMs = Math.max(0, Number(input.globalPacingRemainingMs ?? 0));
+  logger.info(`EXECUTION_QUEUE_ELIGIBILITY_AUDIT: scanId=${scannerSnapshot?.scanId ?? 'unknown'} buyReadyCount=${executionPool.length} symbolEligibleCount=${activeExecutionPool.length} symbolCooldownBlockedCount=${symbolCooldownBlockedCount} recoveryBlockedCount=${recoveryBlockedCount} alreadyOpenBlockedCount=${alreadyOpenBlockedCount} pendingBuyBlockedCount=${pendingBuyBlockedCount} queueEligibleCount=${activeExecutionPool.length} queueSelectedCount=${queueAcceptedCount} deferredCapacityCount=${queueDeferredSymbols.length}`);
+  logger.info(`EXECUTION_QUEUE_COMPOSITION_AUDIT: scanId=${scannerSnapshot?.scanId ?? 'unknown'} selected=${queueAcceptedSymbols.map((symbol, index) => `${symbol}:rank=${index + 1}:queueEligible=true:symbolBlockReason=none`).join('|') || 'none'} globalPacingActive=${String(globalPacingRemainingMs > 0)}`);
+  logger.info(`EXECUTION_QUEUE_SYMBOL_ELIGIBILITY_INVARIANT: severity=${symbolEligibilityInvariantOk ? 'INFO' : 'ERROR'} scanId=${scannerSnapshot?.scanId ?? 'unknown'} queueSize=${queueAcceptedCount} forbiddenSymbols=${forbiddenQueueSymbols.join('|') || 'none'} invariantOk=${String(symbolEligibilityInvariantOk)}`);
+  logger.info(`QUEUE_CAPACITY_USED_ONLY_BY_EXECUTABLE_SYMBOLS_INVARIANT: scanId=${scannerSnapshot?.scanId ?? 'unknown'} queueCapacity=${maxExecutionQueuePerScan} symbolEligibleCount=${activeExecutionPool.length} queueSelectedCount=${queueAcceptedCount} invariantOk=${String(queueAcceptedCount <= Math.min(maxExecutionQueuePerScan, activeExecutionPool.length))}`);
   logger.info(
     `EXECUTION_QUEUE_CAP_AUDIT: ` +
     `scanId=${scannerSnapshot?.scanId ?? 'unknown'} ` +
@@ -1387,6 +1419,14 @@ export function buildExecutionPlan(input: ExecutionPlannerInput): ExecutionPlan 
     queueAcceptedSymbols,
     deferredByQueueLimitSymbols: queueDeferredSymbols,
     queueRejectedReasons: [...new Set(queueRejectedReasons)],
+    buyReadyCount: executionPool.length,
+    symbolEligibleCount: activeExecutionPool.length,
+    symbolCooldownBlockedCount,
+    recoveryBlockedCount,
+    alreadyOpenBlockedCount,
+    pendingBuyBlockedCount,
+    queueEligibleCount: activeExecutionPool.length,
+    queueEligibleSymbols: activeExecutionPool.map((candidate) => candidate.symbol),
     maxUnicornBuysPerCycle: maxUnicornSelectedPerScan,
     maxAutoBotsBuysPerCycle: maxAutoBotsSelectedPerScan,
     unicornSelectedThisCycle,

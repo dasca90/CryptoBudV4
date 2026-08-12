@@ -6,6 +6,7 @@ let failed = 0;
 const ok = (cond: boolean, label: string) => cond ? passed++ : (failed++, console.error(`FAIL: ${label}`));
 
 const scannerSrc = readFileSync(path.resolve(process.cwd(), 'src/core/scanner/MarketScanner.ts'), 'utf8');
+const plannerSrc = readFileSync(path.resolve(process.cwd(), 'src/core/scanner/ExecutionPlanner.ts'), 'utf8');
 
 // 1. Loss cooldown is separate from normal cooldown
 ok(scannerSrc.includes('lossCooldownMs'), 'MarketScanner has lossCooldownMs config');
@@ -26,8 +27,8 @@ ok(scannerSrc.includes('isLoss=${String(isLoss)}'), 'recordClose audit exposes i
 // 5. Different cooldown for profit vs loss trades
 ok(scannerSrc.includes('const cooldownMs = isLoss ? this.lossCooldownMs : this.recentlyClosedCooldownMs;'), 'recordClose selects cooldown based on loss');
 
-// 6. RECENTLY_CLOSED_SYMBOL_BLOCKED logs previousPnlPct (reveals loss magnitude for diagnostics)
-ok(scannerSrc.includes('previousPnlPct=${cd.pnlPct.toFixed(2)}'), 'blocked audit shows previousPnlPct for loss diagnostics');
+// 6. Loss recovery has a distinct pre-queue reason
+ok(plannerSrc.includes('SYMBOL_RECOVERY_REQUIRED'), 'loss recovery is distinct from symbol cooldown and global pacing');
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

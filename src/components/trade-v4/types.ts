@@ -575,6 +575,11 @@ export interface TradeV4NoBuyDisplay {
   blockedByDuplicateCount?: number;
   blockedByRiskCount?: number;
   blockedByOpenPositionLimitCount?: number;
+  symbolEligibleCount?: number;
+  symbolCooldownBlockedCount?: number;
+  recoveryBlockedCount?: number;
+  alreadyOpenBlockedCount?: number;
+  pendingBuyBlockedCount?: number;
   maxExecutionQueuePerScan?: number;
   executionQueueAcceptedCount?: number;
   deferredByQueueLimitCount?: number;

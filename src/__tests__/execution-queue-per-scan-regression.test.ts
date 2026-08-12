@@ -248,4 +248,68 @@ function plan(candidates: ScannerCandidate[], overrides: Record<string, unknown>
   assert.equal(result.queueAcceptedSymbols?.includes('UNICORNREADYUSDT'), true, 'READY Unicorn enters the queue despite AutoBots volume');
 }
 
+{
+  const now = Date.now();
+  const blocked = Array.from({ length: 5 }, (_, index) => candidate(`CD${index + 1}USDT`, { rank: index + 1, rawScore: 200 - index }));
+  const eligible = Array.from({ length: 10 }, (_, index) => candidate(`EL${index + 1}USDT`, { rank: index + 6, rawScore: 100 - index }));
+  const reentry = new Map(blocked.map((row) => [row.symbol, { closedAt: now - 1_000, pnlPct: 1, pnlUsd: 1, exitReason: 'TP1', strategy: 'balanced', cooldownUntil: now + 60_000 }]));
+  const result = plan([...blocked, ...eligible], { symbolReentryStateBySymbol: reentry });
+  assert.equal(result.queueAcceptedCount, 10, 'cooldown symbols do not consume the ten queue slots');
+  assert.deepEqual(result.queueAcceptedSymbols, eligible.map((row) => row.symbol), 'queue is filled only with eligible symbols');
+  assert.equal(result.symbolCooldownBlockedCount, 5, 'cooldown blocks are reported separately');
+}
+
+{
+  const now = Date.now();
+  const blocked = Array.from({ length: 10 }, (_, index) => candidate(`CAPCD${index + 1}USDT`, { rawScore: 300 - index }));
+  const eligible = Array.from({ length: 20 }, (_, index) => candidate(`CAPEL${index + 1}USDT`, { rawScore: 200 - index }));
+  const reentry = new Map(blocked.map((row) => [row.symbol, { closedAt: now, pnlPct: 1, pnlUsd: 1, exitReason: 'TP1', strategy: 'balanced', cooldownUntil: now + 60_000 }]));
+  const result = plan([...blocked, ...eligible], { symbolReentryStateBySymbol: reentry });
+  assert.equal(result.queueAcceptedCount, 10, 'best ten of twenty eligible enter the queue');
+  assert.equal(result.deferredByQueueLimitCount, 10, 'only eligible overflow is deferred by capacity');
+  assert.equal(result.skippedCandidates.filter((row) => row.finalNoBuyReason === 'SYMBOL_REENTRY_COOLDOWN_ACTIVE').length, 10, 'cooldown candidates are not capacity-deferred');
+}
+
+{
+  const now = Date.now();
+  const loss = candidate('LOSSRECOVERYUSDT', { reboundConfirmed: false, momentumConfirmed: false, volumeRel: 0.1, rawScore: 999 });
+  const good = candidate('RECOVERYBACKFILLUSDT', { rawScore: 10 });
+  const result = plan([loss, good], { symbolReentryStateBySymbol: new Map([[loss.symbol, { closedAt: now - 60_000, pnlPct: -2, pnlUsd: -2, exitReason: 'STOP_LOSS', strategy: 'balanced', cooldownUntil: now - 1 }]]) });
+  assert.equal(result.queueAcceptedSymbols?.includes(loss.symbol), false, 'loss without recovery is excluded before ranking');
+  assert.equal(result.queueAcceptedSymbols?.includes(good.symbol), true, 'next eligible candidate receives the released slot');
+  assert.equal(result.recoveryBlockedCount, 1, 'loss recovery has its own counter');
+}
+
+{
+  const rows = [candidate('OPENUSDT'), candidate('PENDINGUSDT'), candidate('FREEUSDT')];
+  const result = plan(rows, { openSymbols: ['OPENUSDT'], pendingOrderSymbols: ['PENDINGUSDT'] });
+  assert.deepEqual(result.queueAcceptedSymbols, ['FREEUSDT'], 'open and pending symbols cannot occupy queue slots');
+  assert.equal(result.alreadyOpenBlockedCount, 1, 'open symbol count is explicit');
+  assert.equal(result.pendingBuyBlockedCount, 1, 'pending BUY count is explicit');
+}
+
+{
+  const now = Date.now();
+  const row = candidate('EXPIREUSDT');
+  const active = plan([row], { scanId: 'scan_100', symbolReentryStateBySymbol: new Map([[row.symbol, { closedAt: now, pnlPct: 1, pnlUsd: 1, exitReason: 'TP1', strategy: 'balanced', cooldownUntil: now + 60_000 }]]) });
+  const expired = plan([candidate('EXPIREUSDT')], { scanId: 'scan_101', symbolReentryStateBySymbol: new Map([[row.symbol, { closedAt: now - 120_000, pnlPct: 1, pnlUsd: 1, exitReason: 'TP1', strategy: 'balanced', cooldownUntil: now - 1 }]]) });
+  assert.equal(active.queueAcceptedCount, 0, 'active symbol cooldown blocks scan N');
+  assert.equal(expired.queueAcceptedCount, 1, 'expired cooldown is recomputed and released on scan N+1');
+}
+
+{
+  const rows = Array.from({ length: 10 }, (_, index) => candidate(`PACE${index + 1}USDT`, { rawScore: 100 - index }));
+  const result = plan(rows, { globalPacingRemainingMs: 20_000 });
+  assert.equal(result.queueAcceptedCount, 10, 'global pacing does not empty or shrink the ranked queue');
+  assert.equal(result.symbolCooldownBlockedCount, 0, 'global pacing does not become symbol cooldown');
+}
+
+{
+  const rows = Array.from({ length: 4 }, (_, index) => candidate(`CYCLE${index + 1}USDT`, { rawScore: 100 - index }));
+  const result = plan(rows, { maxSelectedPerScan: 1, maxEntriesPerCycle: 1 });
+  assert.equal(result.selectedCandidates.length, 1, 'per-cycle selection limit remains enforced');
+  assert.equal(result.skippedCandidates.filter((row) => row.finalNoBuyReason === 'MAX_NEW_BUYS_PER_CYCLE_REACHED').length, 3, 'per-cycle limit has its own canonical reason');
+  assert.equal(result.skippedCandidates.some((row) => row.finalNoBuyReason === 'GLOBAL_BUY_PACING_ACTIVE'), false, 'per-cycle capacity is not mislabeled as pacing');
+}
+
 console.log('execution-queue-per-scan-regression: all assertions passed');

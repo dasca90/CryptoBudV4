@@ -30,6 +30,11 @@ export function CandidatePoolSummaryPanel(props: {
     queueAcceptedSymbols?: string[];
     deferredByQueueLimitSymbols?: string[];
     queueRejectedReasons?: string[];
+    symbolEligibleCount?: number;
+    symbolCooldownBlockedCount?: number;
+    recoveryBlockedCount?: number;
+    alreadyOpenBlockedCount?: number;
+    pendingBuyBlockedCount?: number;
     autoBotsSubmitAttemptedThisCycle?: number;
     unicornSubmitAttemptedThisCycle?: number;
     globalSubmitAttemptedThisCycle?: number;
@@ -50,7 +55,6 @@ export function CandidatePoolSummaryPanel(props: {
   const actionableBuyCountNow = pool?.actionableBuyCountNow ?? props.candidates.filter(c => c.status === 'BUY' && c.finalExecutable === true && c.buyAllowed === true).length;
   const blockedByPacingCount = pool?.blockedByPacingCount ?? 0;
   const blockedByCooldownCount = pool?.blockedByCooldownCount ?? 0;
-  const blockedByPacingOrCooldownCount = Math.max(blockedByPacingCount, blockedByCooldownCount);
   const maxExecutionQueuePerScan = pool?.maxExecutionQueuePerScan ?? props.executionPlan?.maxExecutionQueuePerScan ?? 10;
   const deferredByQueueLimitCount = pool?.deferredByQueueLimitCount
     ?? props.executionPlan?.deferredByQueueLimitCount
@@ -59,9 +63,13 @@ export function CandidatePoolSummaryPanel(props: {
   const executionQueueAcceptedCount = pool?.executionQueueAcceptedCount
     ?? props.executionPlan?.queueAcceptedCount
     ?? Math.min(maxExecutionQueuePerScan, detectedBuyCandidateCount);
+  const symbolEligibleCount = pool?.symbolEligibleCount ?? props.executionPlan?.symbolEligibleCount ?? executionQueueAcceptedCount;
+  const recoveryBlockedCount = pool?.recoveryBlockedCount ?? props.executionPlan?.recoveryBlockedCount ?? 0;
+  const alreadyOpenBlockedCount = pool?.alreadyOpenBlockedCount ?? props.executionPlan?.alreadyOpenBlockedCount ?? 0;
+  const pendingBuyBlockedCount = pool?.pendingBuyBlockedCount ?? props.executionPlan?.pendingBuyBlockedCount ?? 0;
   const submittedThisCycleCount = pool?.submitAttemptedCount ?? 0;
   const nextQueueRetry = deferredByQueueLimitCount > 0 ? (pool?.nextQueueRetry ?? 'next scan') : 'none';
-  const buyPacingActive = pool?.buyPacingActive === true || pool?.buyCooldownActive === true || (pool?.selectedButNotSubmittedReasons ?? []).includes('BUY_PACING_OR_COOLDOWN_ACTIVE');
+  const buyPacingActive = pool?.buyPacingActive === true || (pool?.selectedButNotSubmittedReasons ?? []).includes('GLOBAL_BUY_PACING_ACTIVE');
   const nextBuyAllowedLabel = (() => {
     const ms = pool?.msUntilNextBuyAllowed;
     if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) return `${Math.ceil(ms / 1000)}s`;
@@ -73,7 +81,7 @@ export function CandidatePoolSummaryPanel(props: {
   })();
   const candidatePoolInvariantOk = actionableBuyCountNow <= detectedBuyCandidateCount
     && executionQueueAcceptedCount <= maxExecutionQueuePerScan
-    && (!buyPacingActive || blockedByPacingOrCooldownCount > 0 || detectedBuyCandidateCount === 0);
+    && symbolEligibleCount <= detectedBuyCandidateCount;
   const pipelineQueueAccepted = props.executionPlan?.queueAcceptedCount ?? executionQueueAcceptedCount;
   const pipelineDeferredCount = props.executionPlan?.deferredByQueueLimitCount ?? deferredByQueueLimitCount;
   const queueParityMismatch = pipelineQueueAccepted !== executionQueueAcceptedCount || pipelineDeferredCount !== deferredByQueueLimitCount;
@@ -185,6 +193,7 @@ export function CandidatePoolSummaryPanel(props: {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4, fontSize: 10, overflow: 'hidden auto' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 4 }}>
             <PoolBox label="BUY candidates" value={String(detectedBuyCandidateCount)} color="#58a6ff" />
+            <PoolBox label="Symbol eligible" value={String(symbolEligibleCount)} color={symbolEligibleCount > 0 ? "#3fb950" : "#8b949e"} />
             <PoolBox label="Execution queue" value={`${executionQueueAcceptedCount} / ${maxExecutionQueuePerScan}`} color={executionQueueAcceptedCount >= maxExecutionQueuePerScan ? "#d29922" : "#3fb950"} />
             <PoolBox label="Actionable now" value={String(actionableBuyCountNow)} color={actionableBuyCountNow > 0 ? "#3fb950" : "#f85149"} />
             <PoolBox label="Submitted" value={`${submittedThisCycleCount}/${Math.max(1, actionableBuyCountNow)}`} color={submittedThisCycleCount > 0 ? "#3fb950" : "#8b949e"} />
@@ -198,7 +207,11 @@ export function CandidatePoolSummaryPanel(props: {
             <PoolBox label="Global queue" value={`${executionQueueAcceptedCount}/${maxExecutionQueuePerScan}`} color={executionQueueAcceptedCount >= maxExecutionQueuePerScan ? "#d29922" : "#58a6ff"} />
             <PoolBox label="Deferred queue" value={String(deferredByQueueLimitCount)} color={deferredByQueueLimitCount > 0 ? "#d29922" : "#8b949e"} />
             <PoolBox label="Next retry" value={nextQueueRetry} color={deferredByQueueLimitCount > 0 ? "#d29922" : "#8b949e"} />
-            <PoolBox label="Blocked pacing" value={String(blockedByPacingOrCooldownCount)} color={blockedByPacingOrCooldownCount > 0 ? "#d29922" : "#8b949e"} />
+            <PoolBox label="Global pacing" value={buyPacingActive ? 'ACTIVE' : 'READY'} color={buyPacingActive ? "#d29922" : "#3fb950"} />
+            <PoolBox label="Re-entry cooldown" value={String(blockedByCooldownCount)} color={blockedByCooldownCount > 0 ? "#d29922" : "#8b949e"} />
+            <PoolBox label="Recovery required" value={String(recoveryBlockedCount)} color={recoveryBlockedCount > 0 ? "#d29922" : "#8b949e"} />
+            <PoolBox label="Already open" value={String(alreadyOpenBlockedCount)} color={alreadyOpenBlockedCount > 0 ? "#d29922" : "#8b949e"} />
+            <PoolBox label="Pending BUY" value={String(pendingBuyBlockedCount)} color={pendingBuyBlockedCount > 0 ? "#d29922" : "#8b949e"} />
             <PoolBox label="Next buy" value={nextBuyAllowedLabel} color={buyPacingActive ? "#d29922" : "#3fb950"} />
             <PoolBox label="Exec Pool" value={hasPoolData ? String(props.executionPoolSize) : 'n/a'} color="#58a6ff" />
             <PoolBox label="Watch Pool" value={hasPoolData ? String(props.watchPoolSize) : 'n/a'} color="#d29922" />
@@ -211,7 +224,7 @@ export function CandidatePoolSummaryPanel(props: {
 
           {buyPacingActive && detectedBuyCandidateCount > 0 && actionableBuyCountNow === 0 && (
             <div style={{ background: 'rgba(210,153,34,0.10)', border: '1px solid rgba(210,153,34,0.24)', borderRadius: 4, padding: '4px 6px', marginTop: 2, fontSize: 8, color: '#d29922', lineHeight: '12px' }}>
-              BUY_PACING_OR_COOLDOWN_ACTIVE: {detectedBuyCandidateCount} BUY candidates detected, {actionableBuyCountNow} actionable now. Next buy allowed: {nextBuyAllowedLabel}.
+              GLOBAL_BUY_PACING_ACTIVE: queue remains ranked. Next BUY allowed: {nextBuyAllowedLabel}.
             </div>
           )}
 

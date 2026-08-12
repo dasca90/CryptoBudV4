@@ -68,31 +68,29 @@ export function buildCandidatePoolActionabilityCounts(
     .map(([symbol, reason]) => [symbol, String(reason ?? '')] as const)
     .filter(([, reason]) => reason.length > 0);
   const pacingReasonSymbols = reasonEntries
-    .filter(([, reason]) => reasonIncludes(reason, ['pacing', 'rate_limit', 'spacing', 'max_new_buys_per_cycle']))
+    .filter(([, reason]) => reasonIncludes(reason, ['global_buy_pacing', 'rate_limit', 'spacing']))
     .map(([symbol]) => symbol);
   const cooldownReasonSymbols = reasonEntries
-    .filter(([, reason]) => reasonIncludes(reason, ['cooldown']))
+    .filter(([, reason]) => reasonIncludes(reason, ['symbol_reentry_cooldown']))
     .map(([symbol]) => symbol);
   const pacingState = input.pacingState ?? {};
   const buyPacingActive = Boolean(pacingState.buyPacingActive)
-    || selectedButNotSubmittedReasons.some((reason) => reasonIncludes(reason, ['pacing', 'rate_limit', 'spacing', 'buy_pacing', 'max_new_buys_per_cycle']))
+    || selectedButNotSubmittedReasons.some((reason) => reasonIncludes(reason, ['global_buy_pacing', 'rate_limit', 'spacing']))
     || pacingReasonSymbols.length > 0;
   const buyCooldownActive = Boolean(pacingState.buyCooldownActive)
-    || selectedButNotSubmittedReasons.some((reason) => reasonIncludes(reason, ['cooldown']))
+    || selectedButNotSubmittedReasons.some((reason) => reasonIncludes(reason, ['symbol_reentry_cooldown']))
     || cooldownReasonSymbols.length > 0;
   const allDetectedBlockedByPacing = buyCandidateSymbols.length > 0
     && submitAttemptedSymbols.length === 0
     && submitEligibleSymbols.length === 0
-    && (buyPacingActive || buyCooldownActive || selectedButNotSubmittedReasons.includes('BUY_PACING_OR_COOLDOWN_ACTIVE'));
+    && buyPacingActive;
   const blockedByPacingCount = allDetectedBlockedByPacing
     ? buyCandidateSymbols.length
     : unique([...pacingReasonSymbols, ...(buyPacingActive ? selectedButNotSubmittedSymbols : [])]).length;
-  const blockedByCooldownCount = allDetectedBlockedByPacing && buyCooldownActive
-    ? buyCandidateSymbols.length
-    : unique([...cooldownReasonSymbols, ...(buyCooldownActive ? selectedButNotSubmittedSymbols : [])]).length;
+  const blockedByCooldownCount = unique(cooldownReasonSymbols).length;
   const actionableBuyCountNow = submitEligibleSymbols.length;
   const buyPacingReason = pacingState.buyPacingReason
-    ?? (buyCooldownActive ? 'BUY_PACING_OR_COOLDOWN_ACTIVE' : buyPacingActive ? 'BUY_PACING_OR_COOLDOWN_ACTIVE' : 'none');
+    ?? (buyPacingActive ? 'GLOBAL_BUY_PACING_ACTIVE' : buyCooldownActive ? 'SYMBOL_REENTRY_COOLDOWN_ACTIVE' : 'none');
   const invariantOk = actionableBuyCountNow <= buyCandidateSymbols.length
     && (input.blockedByBudgetCount ?? 0) >= 0
     && (input.blockedByDuplicateCount ?? 0) >= 0

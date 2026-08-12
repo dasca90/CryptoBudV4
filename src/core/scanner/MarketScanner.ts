@@ -49,6 +49,7 @@ import {
 } from './CandidateLifecycle';
 import { buildSelectedToExecutionHandoffAccounting } from './selectedToExecutionHandoffAccounting';
 import { buildCandidatePoolActionabilityCounts } from './candidatePoolActionability';
+import { evaluateSymbolExecutionEligibility } from './symbolExecutionEligibility';
 import { normalizeUnicornFinalBlockReason } from '../unicorn/unicornExecutionBlockers';
 
 
@@ -320,6 +321,7 @@ export class MarketScanner {
 
   recordClose(data: { symbol: string; pnlPct: number; pnlUsd: number; exitReason: string; strategy?: string }): void {
     const now = Date.now();
+    const symbol = data.symbol.trim().toUpperCase();
     const isLoss = data.pnlPct < 0;
     const cooldownMs = isLoss ? this.lossCooldownMs : this.recentlyClosedCooldownMs;
     const cooldownUntil = now + cooldownMs;
@@ -331,12 +333,12 @@ export class MarketScanner {
       strategy: data.strategy ?? 'unknown',
       cooldownUntil,
     };
-    this.recentlyClosedSymbols.set(data.symbol, entry);
-    logger.info(`RECENTLY_CLOSED_SYMBOL_RECORDED: symbol=${data.symbol} pnlPct=${data.pnlPct.toFixed(2)} pnlUsd=${data.pnlUsd.toFixed(2)} exitReason=${data.exitReason} strategy=${entry.strategy} isLoss=${String(isLoss)} cooldownMs=${cooldownMs} cooldownUntil=${new Date(cooldownUntil).toISOString()}`);
+    this.recentlyClosedSymbols.set(symbol, entry);
+    logger.info(`RECENTLY_CLOSED_SYMBOL_RECORDED: symbol=${symbol} pnlPct=${data.pnlPct.toFixed(2)} pnlUsd=${data.pnlUsd.toFixed(2)} exitReason=${data.exitReason} strategy=${entry.strategy} isLoss=${String(isLoss)} cooldownMs=${cooldownMs} cooldownUntil=${new Date(cooldownUntil).toISOString()}`);
   }
 
   isRecentlyClosedSymbolInCooldown(symbol: string, now = Date.now()): boolean {
-    const cooldown = this.recentlyClosedSymbols.get(symbol);
+    const cooldown = this.recentlyClosedSymbols.get(symbol.trim().toUpperCase());
     return Boolean(cooldown && now < cooldown.cooldownUntil);
   }
 
@@ -758,7 +760,7 @@ export class MarketScanner {
 
     let staleRecentlyClosedSymbolsRemoved = 0;
     for (const [symbol, cooldown] of Array.from(this.recentlyClosedSymbols.entries())) {
-      if (now < cooldown.cooldownUntil) continue;
+      if (now < cooldown.cooldownUntil || cooldown.pnlPct <= 0) continue;
       this.recentlyClosedSymbols.delete(symbol);
       staleRecentlyClosedSymbolsRemoved++;
     }
@@ -2423,7 +2425,7 @@ export class MarketScanner {
     {
       const now = Date.now();
       for (const [sym, cd] of this.recentlyClosedSymbols) {
-        if (now >= cd.cooldownUntil) this.recentlyClosedSymbols.delete(sym);
+        if (now >= cd.cooldownUntil && cd.pnlPct > 0) this.recentlyClosedSymbols.delete(sym);
       }
       this.mlPredictBuySubmittedAt = this.mlPredictBuySubmittedAt.filter((ts) => now - ts < 60 * 60 * 1000);
     }
@@ -2441,7 +2443,7 @@ export class MarketScanner {
       const capitalAvailableNow = Math.max(0, this.executionCapital - usedCapital);
       const pendingDuplicate = pendingOrderSymbols.includes(c.symbol);
       const openDuplicate = openSymbols.includes(c.symbol);
-      const cooldownActive = this.recentlyClosedSymbols.has(c.symbol);
+      const cooldownActive = this.isRecentlyClosedSymbolInCooldown(c.symbol);
       const mlOpenCountProxy = openSymbols.filter((symbol) => symbol === c.symbol || rankedCandidatesToAnnotate.some((candidate) => candidate.symbol === symbol && candidate.executionSource === 'ML_PREDICT_BUY')).length;
       const refreshedDecision = evaluateMLPredictBuy({
         settings: mlPredictBuySettingsForExecution,
@@ -2501,20 +2503,12 @@ export class MarketScanner {
         logger.info(`ML_AUTO_BUY_BLOCKED_AUDIT: scanId=${scanId} symbol=${c.symbol} mode=${refreshedDecision.mode} source=ML_PREDICT_BUY finalDecision=${refreshedDecision.finalDecision} blockedReason=${refreshedDecision.blockedReason ?? 'unknown'} failedGate=${refreshedDecision.failedGate ?? 'unknown'} entryPlanPresent=${String(!!c.entryPlan)}`);
       }
     }
-    let cooldownBlockedCount = 0;
     // V6: Unicorn Hunter was retired. AutoBots candidates are the only scanner
     // candidates allowed to enter the shared execution pipeline.
     const finalExecutionPool = rankedCandidatesToAnnotate.filter((c) => {
       if (!(c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW')) return false;
       const setup = buildStrategyAuditSnapshotFromCandidate(c);
       if (!setup.finalExecutable) return false;
-      const cd = this.recentlyClosedSymbols.get(c.symbol);
-      if (cd) {
-        const remainingMs = Math.max(0, cd.cooldownUntil - Date.now());
-        logger.warn(`RECENTLY_CLOSED_SYMBOL_BLOCKED: symbol=${c.symbol} closedAt=${new Date(cd.closedAt).toISOString()} cooldownUntil=${new Date(cd.cooldownUntil).toISOString()} remainingMs=${remainingMs} previousPnlPct=${cd.pnlPct.toFixed(2)} previousPnlUsd=${cd.pnlUsd.toFixed(2)} previousExitReason=${cd.exitReason} previousStrategy=${cd.strategy} candidateWouldOtherwiseBuy=true`);
-        cooldownBlockedCount += 1;
-        return false;
-      }
       const ownership = (c as any).tradingTargetOwnership;
       const targetSource = String((c.autoStrategyDecision as any)?.strategySource ?? c.strategySource ?? (c as any).source ?? '').toLowerCase();
       const autoBotsOn = targetSource.includes('autobots') || targetSource.includes('unicorn');
@@ -2525,11 +2519,8 @@ export class MarketScanner {
     const finalWatchPool = rankedCandidatesToAnnotate.filter((c: ScannerCandidate) => c.status === 'WAIT' || c.status === 'BLOCK' || (c.status === 'BUY' && !finalExecutionPool.some((e) => e.symbol === c.symbol)));
     const finalNearMissPool = rankedCandidatesToAnnotate.filter(c => c.status === 'BLOCK' && c.confidence < 0.5);
     const droppedFromPool = finalWatchPool.filter(c => c.status === 'BUY' && !finalExecutionPool.some((e) => e.symbol === c.symbol)).length;
-    if (cooldownBlockedCount > 0) {
-      logger.warn(`RECENTLY_CLOSED_SYMBOL_COOLDOWN_SUMMARY: scanId=${scanId} blockedCount=${cooldownBlockedCount} activeCooldowns=${this.recentlyClosedSymbols.size}`);
-    }
     if (finalExecutionPool.length !== executionPool.length || droppedFromPool > 0) {
-      logger.info(`EXECUTION_POOL_POST_ROUTER_UPDATE: poolBefore=${executionPool.length} poolAfter=${finalExecutionPool.length} watchBefore=${watchPool.length} watchAfter=${finalWatchPool.length} promotionEffect=${finalExecutionPool.length - executionPool.length} dropFixed=${droppedFromPool} cooldownBlocked=${cooldownBlockedCount}`);
+      logger.info(`EXECUTION_POOL_POST_ROUTER_UPDATE: poolBefore=${executionPool.length} poolAfter=${finalExecutionPool.length} watchBefore=${watchPool.length} watchAfter=${finalWatchPool.length} promotionEffect=${finalExecutionPool.length - executionPool.length} dropFixed=${droppedFromPool} cooldownBlocked=owned_by_ExecutionPlanner_symbol_eligibility`);
     }
     const executionPlanningStart = Date.now();
     const executionPlannerSnapshot = {
@@ -2575,7 +2566,16 @@ export class MarketScanner {
       executionAdapter: 'paper_simulated',
       enabledRiskGroups: this.scannerRiskGroups,
       runtimeCanAttemptAutoExecution: canonicalStateForPlanner.canAttemptScannerAutoExecution || mlAutoBuyHandoffEnabled,
+      symbolReentryStateBySymbol: this.recentlyClosedSymbols,
+      globalPacingRemainingMs: autoBuyQueue.cooldownRemainingMs('global'),
     });
+    for (const candidate of finalExecutionPool) {
+      const state = this.recentlyClosedSymbols.get(candidate.symbol);
+      if (state && state.pnlPct <= 0 && candidate.executionEligibility?.symbolEligible && candidate.executionEligibility.recoverySatisfied) {
+        this.recentlyClosedSymbols.delete(candidate.symbol);
+        logger.info(`SYMBOL_RECOVERY_STATE_RELEASED_AUDIT: scanId=${scanId} symbol=${candidate.symbol} previousPnl=${state.pnlPct} recoverySatisfied=true queueEligible=true`);
+      }
+    }
     this.scanStageTimings.executionPlanningMs += Date.now() - executionPlanningStart;
 
     // Execution phase consistency: if pool had candidates but plan says cannot execute, emit skipped audit
@@ -2888,6 +2888,29 @@ export class MarketScanner {
             logger.info(`${isUnicornCandidate ? 'UNICORN' : 'AUTOBOTS'}_EXECUTION_BUDGET_AUDIT: scanId=${scanId} symbol=${sc.symbol} module=${executionModule} selectedExecutable=true moduleSubmitAttemptedThisCycle=${moduleSubmitCount} moduleSubmitLimit=${moduleSubmitLimit} globalSubmitAttemptedThisCycle=${globalSubmitAttemptedThisCycle} submitAllowed=false finalNoBuyReason=${budgetReason}`);
             continue;
           }
+          const currentSymbolEligibility = evaluateSymbolExecutionEligibility({
+            candidate: sc,
+            openSymbols: new Set(currentOpenSymbols.map((symbol) => symbol.toUpperCase())),
+            pendingBuySymbols: new Set(currentPendingSymbols.map((symbol) => symbol.toUpperCase())),
+            reentryState: this.recentlyClosedSymbols.get(sc.symbol),
+            maxSpreadPct: this.maxSpreadPct,
+          });
+          if (!currentSymbolEligibility.symbolEligible) {
+            const symbolReason = currentSymbolEligibility.symbolBlockReason ?? 'SYMBOL_EXECUTION_INELIGIBLE';
+            perSymbolDecisions.push({ symbol: sc.symbol, reason: symbolReason, passed: false });
+            recordPreAdapterBlocker(sc.symbol, symbolReason);
+            logger.info(`EXECUTION_CANDIDATE_REVALIDATION_AUDIT: symbol=${sc.symbol} previousRank=${firstCandidate.rank ?? 'n/a'} currentRank=${firstCandidate.rank ?? 'n/a'} priceFresh=${String((sc.priceAgeMs ?? 0) < this.maxPriceAgeMs)} bookFresh=${String(sc.bookFresh !== false)} entryGateAllowed=${String(sc.entryGateDecision?.decision === 'ALLOW')} strategyValid=${String(sc.finalExecutable === true && sc.buyAllowed === true)} riskAllowed=true symbolReentryEligible=false globalPacingAllowed=${String(autoBuyQueue.cooldownRemainingMs('global') === 0)} cycleLimitAllowed=true submitEligible=false finalReason=${symbolReason}`);
+            continue;
+          }
+          const globalPacingCheck = autoBuyQueue.blockIfCooldownActive(sc.symbol, 'global');
+          if (globalPacingCheck.blocked) {
+            const pacingReason = 'GLOBAL_BUY_PACING_ACTIVE';
+            perSymbolDecisions.push({ symbol: sc.symbol, reason: pacingReason, passed: false });
+            recordPreAdapterBlocker(sc.symbol, pacingReason);
+            const queueState = autoBuyQueue.getState();
+            logger.info(`AUTO_BUY_RATE_LIMIT_ENFORCEMENT_AUDIT now=${Date.now()} symbol=${sc.symbol} module=global lastAutoBuyAt=${queueState.lastBuyAt} elapsedMs=${Date.now() - queueState.lastBuyAt} requiredCooldownMs=${queueState.cooldownMs} buyAllowedByCooldown=false blockedSymbols=none violation=false finalNoBuyReason=${pacingReason}`);
+            continue;
+          }
           logger.info(`EXECUTION_ROUTING_AUDIT: symbol=${firstCandidate.symbol} decisionMode=${executionPlan.decisionMode} executionAdapter=${displayAdapter} plannedAction=${firstCandidate.plannedAction} routedController=${displayController} source=${isUnicornCandidate ? 'UNICORN_HUNTER' : isMlPredictBuyCandidate ? 'ML_PREDICT_BUY' : 'AutoBots'} executionAllowed=${String(adapter === 'paper_simulated' ? paperExecutionAllowed && !!this.paperAutoBuyFn : !!this.liveBuyFn)} executionBlockReason=none`);
           if (adapter === 'paper_simulated' && paperExecutionAllowed && this.paperAutoBuyFn) {
             const revalResult = revalidateCandidate({
@@ -2911,19 +2934,6 @@ export class MarketScanner {
             }
             logger.info(`DEMO_EXECUTION_CONTROLLER_RECEIVED: symbol=${sc.symbol} scanId=${scanId} selectedCount=${buyableCandidates.length} openPositionsBefore=${currentOpenSymbols.length}`);
             if (!revalResult.blocked && revalResult.attempted) {
-              // Inter-buy cooldown via execution queue
-              const cooldownCheck = autoBuyQueue.blockIfCooldownActive(sc.symbol, executionModule);
-              if (cooldownCheck.blocked) {
-                const cooldownReason = isUnicornCandidate ? 'UNICORN_BLOCK_COOLDOWN_ACTIVE' : 'cooldown_active';
-                perSymbolDecisions.push({ symbol: sc.symbol, reason: cooldownReason, passed: false });
-                recordPreAdapterBlocker(sc.symbol, cooldownReason);
-                if (isUnicornCandidate) unicornSelectedButNotSubmittedReason = cooldownReason;
-                const queueState = autoBuyQueue.getState();
-                const moduleLastBuyAt = queueState.lastBuyAtByModule[executionModule] ?? 0;
-                logger.info(`AUTO_BUY_RATE_LIMIT_ENFORCEMENT_AUDIT now=${Date.now()} symbol=${sc.symbol} module=${executionModule} lastAutoBuyAt=${moduleLastBuyAt} elapsedMs=${Date.now() - moduleLastBuyAt} requiredCooldownMs=${queueState.cooldownMs} buyAllowedByCooldown=false blockedSymbols=${sc.symbol} violation=false finalNoBuyReason=${cooldownReason}`);
-                continue;
-              }
-
               // ── FULL PRE-BUY FRESH SNAPSHOT ──
               // Refresh all critical fields from live market data before strategy recalculation
               const oldPrice = sc.price;
@@ -3152,6 +3162,7 @@ export class MarketScanner {
               preAdapterAllowedCount++;
               if (!submitEligibleSymbols.includes(sc.symbol)) submitEligibleSymbols.push(sc.symbol);
               perSymbolDecisions.push({ symbol: sc.symbol, reason: 'pre_adapter_allowed', passed: true });
+              logger.info(`EXECUTION_CANDIDATE_REVALIDATION_AUDIT: symbol=${sc.symbol} previousRank=${firstCandidate.rank ?? 'n/a'} currentRank=${firstCandidate.rank ?? 'n/a'} priceFresh=${String((sc.priceAgeMs ?? 0) < this.maxPriceAgeMs)} bookFresh=${String(sc.bookFresh !== false)} entryGateAllowed=${String(sc.entryGateDecision?.decision === 'ALLOW')} strategyValid=${String(freshFinalExecutable && freshBuyAllowed)} riskAllowed=true symbolReentryEligible=true globalPacingAllowed=true cycleLimitAllowed=true submitEligible=true finalReason=none`);
               try {
                 transactionAuditSymbols.push(sc.symbol);
                 logger.info(`DEMO_EXECUTION_CONTROLLER_HANDOFF: symbol=${sc.symbol} scanId=${scanId} adapterCalled=pending transactionAuditExpected=true`);
@@ -3159,9 +3170,9 @@ export class MarketScanner {
                   logger.info(`UNICORN_BUY_SUBMIT_AUDIT: symbol=${sc.symbol} scanId=${scanId} stage=${sc.lifecycleStatus ?? sc.status} score=${(sc as any).unicornScore ?? sc.rawScore ?? 'n/a'} sourceOwner=${sc.runtimeSnapshot?.sourceOwner ?? 'unknown'} ownerType=${(sc as any).ownerType ?? 'unknown'} strategy=${sc.selectedStrategy ?? 'missing'} finalExecutionStrategy=${(sc as any).finalExecutionStrategy ?? 'missing'} entryRule=${(sc as any).finalEntryRule ?? (sc as any).entryRule ?? sc.mainReason ?? 'missing'} setupResult=${(sc as any).setupResult ?? firstCandidate.scannerAutoEntryConfigSnapshot?.setupResult ?? 'missing'} buyAllowed=true finalExecutable=true submitAttempted=true blockedReason=none unicornSelectedThisCycle=${executionPlan.unicornSelectedThisCycle ?? unicornSelectedExecutableCount} unicornSubmittedThisCycle=${unicornSubmitAttemptedThisCycle} maxUnicornBuysPerCycle=${moduleSubmitLimit} autoBotsSubmittedThisCycle=${autobotsSubmitAttemptedThisCycle} maxAutoBotsBuysPerCycle=${maxAutobotsSubmitsPerCycle} slotOwner=UnicornHunter autobotsSlotUsed=false unicornSlotUsed=${String(unicornSubmitAttemptedThisCycle > 0)} openUnicornPositions=${(this.executionOpenPositionSourcesFn?.() ?? []).filter((position) => `${position.source ?? ''} ${position.ownerName ?? ''}`.toLowerCase().includes('unicorn')).length} maxUnicornOpenPositions=${this.unicornHunterSettings.maxOpenUnicornPositions} unicornTradesToday=${this.unicornTradesToday} maxUnicornTradesPerDay=${this.unicornHunterSettings.maxUnicornTradesPerDay} cooldownRemainingMs=0 nextUnicornBuyAllowedAt=now invariantOk=true failureReason=none`);
                 }
                 const runResult = await this.paperAutoBuyFn(firstCandidate, sc);
-                autoBuyQueue.recordBuySubmitted(sc.symbol, executionModule);
                 paperAutoResult = { ...revalResult, ...runResult };
                 if (paperAutoResult.adapterCalled) {
+                  autoBuyQueue.recordBuySubmitted(sc.symbol, executionModule);
                   adapterCalledCount++;
                   submitAttemptedSymbols.push(sc.symbol);
                   globalSubmitAttemptedThisCycle++;
@@ -3269,6 +3280,7 @@ export class MarketScanner {
               try {
                 transactionAuditSymbols.push(sc.symbol);
                 await this.liveBuyFn(sc.symbol, sc, firstCandidate);
+                autoBuyQueue.recordBuySubmitted(sc.symbol, executionModule);
                 liveExecutionResult = { ...liveRevalResult, executed: true, adapterCalled: true, adapterResult: 'SUBMITTED' };
                 adapterCalledCount++;
                 submitAttemptedSymbols.push(sc.symbol);
@@ -3280,6 +3292,7 @@ export class MarketScanner {
                 orderFilledCount++;
                 logger.info(`LIVE_BUY_EXECUTED: symbol=${firstCandidate.symbol} rank=${firstCandidate.rank} routedController=BinanceLiveExecutionController`);
               } catch (buyError) {
+                autoBuyQueue.recordBuySubmitted(sc.symbol, executionModule);
                 liveExecutionResult = { ...liveRevalResult, executed: false, blocked: true, reason: `Live buy failed: ${buyError instanceof Error ? buyError.message : String(buyError)}`, adapterCalled: true, adapterResult: 'CALL_FAILED' };
                 adapterCalledCount++;
                 submitAttemptedSymbols.push(sc.symbol);
@@ -3346,6 +3359,7 @@ export class MarketScanner {
       const remainingSlots = Math.max(0, Math.min(openSlotsRemaining, capitalSlotsRemaining));
       const backfillPool = rankedCandidatesToAnnotate
         .filter(c => c.status === 'BUY' && c.entryGateDecision?.decision === 'ALLOW')
+        .filter(c => (executionPlan.queueEligibleSymbols ?? []).includes(c.symbol))
         .filter(c => !attemptedSymbols.includes(c.symbol))
         .filter(c => !currentOpen.includes(c.symbol))
         .sort((a, b) => (b.rawScore ?? 0) - (a.rawScore ?? 0));
@@ -3369,7 +3383,7 @@ export class MarketScanner {
         } as unknown as PlannedCandidate;
         const reval = revalidateCandidate({
           candidate: { ...bc, riskDecision: undefined } as ScannerCandidate, planEntry: bfEntryPlan,
-          openSymbols: currentOpen, pendingLockSymbols: [],
+          openSymbols: currentOpen, pendingLockSymbols: this.executionPendingSymbolsFn?.() ?? pendingOrderSymbols,
           capital: this.executionCapital, usedCapital: usedCapitalAfter, maxPositions: this.executionMaxPositions,
           executionAdapter: 'paper_simulated', paperAutoEnabled: true,
           scannerRunning: true,
@@ -3389,9 +3403,9 @@ export class MarketScanner {
             continue;
           }
           // Queue-based cooldown for backfill
-          const cb = autoBuyQueue.blockIfCooldownActive(bc.symbol, bfModule);
+          const cb = autoBuyQueue.blockIfCooldownActive(bc.symbol, 'global');
           if (cb.blocked) {
-            const cooldownReason = bfIsUnicorn ? 'UNICORN_COOLDOWN_ACTIVE' : 'cooldown_active';
+            const cooldownReason = 'GLOBAL_BUY_PACING_ACTIVE';
             skippedSymbols.push(bc.symbol);
             skipReasonsBySymbol[bc.symbol] = cooldownReason;
             if (bfIsUnicorn) unicornSelectedButNotSubmittedReason = cooldownReason;
@@ -3416,8 +3430,8 @@ export class MarketScanner {
             transactionAuditSymbols.push(bc.symbol);
             backfillCandidateSymbols.push(bc.symbol);
             const bfResult = await this.paperAutoBuyFn(bfEntryPlan, bc);
-            autoBuyQueue.recordBuySubmitted(bc.symbol, bfModule);
             if (bfResult.adapterCalled) {
+              autoBuyQueue.recordBuySubmitted(bc.symbol, bfModule);
               adapterCalledCount++;
               submitAttemptedSymbols.push(bc.symbol);
               globalSubmitAttemptedThisCycle++;
@@ -3541,7 +3555,9 @@ export class MarketScanner {
         if (isUnicornDecision) return normalizeUnicornFinalBlockReason(rawReason);
         const compact = String(rawReason).toUpperCase();
         if (compact.includes('MAX_NEW_BUYS_PER_CYCLE')) return 'MAX_NEW_BUYS_PER_CYCLE_REACHED';
-        if (compact.includes('COOLDOWN') || compact.includes('PACING')) return 'BUY_PACING_OR_COOLDOWN_ACTIVE';
+        if (compact.includes('GLOBAL_BUY_PACING') || compact.includes('PACING') || compact.includes('RATE_LIMIT') || compact.includes('SPACING')) return 'GLOBAL_BUY_PACING_ACTIVE';
+        if (compact.includes('REENTRY_COOLDOWN')) return 'SYMBOL_REENTRY_COOLDOWN_ACTIVE';
+        if (compact.includes('RECOVERY_REQUIRED')) return 'SYMBOL_RECOVERY_REQUIRED';
         if (compact.includes('DUPLICATE')) return 'DUPLICATE_OPEN_POSITION';
         if (compact.includes('PENDING')) return 'PENDING_ORDER';
         if (compact.includes('CAPITAL')) return 'CAPITAL_BLOCKED';
@@ -3588,13 +3604,13 @@ export class MarketScanner {
     executionPlan.maxUnicornBuysPerCycle = maxUnicornSubmitsPerCycle;
     executionPlan.maxAutoBotsBuysPerCycle = maxAutobotsSubmitsPerCycle;
     const openUnicornPositionsForAudit = (this.executionOpenPositionSourcesFn?.() ?? []).filter((position) => `${position.source ?? ''} ${position.ownerName ?? ''}`.toLowerCase().includes('unicorn')).length;
-    const autoBotsCooldownRemainingMs = autoBuyQueue.cooldownRemainingMs('autobots');
+    const autoBotsCooldownRemainingMs = autoBuyQueue.cooldownRemainingMs('global');
     const unicornCooldownRemainingMs = autoBuyQueue.cooldownRemainingMs('unicorn_hunter');
     const nextAutoBotsBuyAllowedAt = autoBotsCooldownRemainingMs > 0 ? new Date(Date.now() + autoBotsCooldownRemainingMs).toISOString() : 'now';
     const nextUnicornBuyAllowedAt = unicornCooldownRemainingMs > 0 ? new Date(Date.now() + unicornCooldownRemainingMs).toISOString() : 'now';
     const autoBotsSelectedThisCycle = executionPlan.selectedCandidates.filter((candidate) => !isUnicornPlannedCandidate(candidate)).length;
     const unicornSelectedThisCycle = executionPlan.selectedCandidates.filter((candidate) => isUnicornPlannedCandidate(candidate)).length;
-    const autoBotsBlockedReason = autobotsSubmitAttemptedThisCycle >= maxAutobotsSubmitsPerCycle ? 'MAX_NEW_BUYS_PER_CYCLE_REACHED' : autoBotsCooldownRemainingMs > 0 ? 'BUY_PACING_OR_COOLDOWN_ACTIVE' : 'none';
+    const autoBotsBlockedReason = autobotsSubmitAttemptedThisCycle >= maxAutobotsSubmitsPerCycle ? 'MAX_NEW_BUYS_PER_CYCLE_REACHED' : autoBuyQueue.cooldownRemainingMs('global') > 0 ? 'GLOBAL_BUY_PACING_ACTIVE' : 'none';
     const unicornBlockedReason = unicornSelectedButNotSubmittedReason !== 'none'
       ? normalizeUnicornFinalBlockReason(unicornSelectedButNotSubmittedReason)
       : unicornSubmitAttemptedThisCycle >= maxUnicornSubmitsPerCycle
@@ -3623,7 +3639,8 @@ export class MarketScanner {
       const selectedReasons = selectedBuyCandidates.map((candidate) => selectedDecisionReason(candidate.symbol));
       const reasonText = [...selectedReasons, ...Object.values(skipReasonsBySymbol), ...executionPlan.noBuyReasons].join('|').toLowerCase();
       const buyPacingActive = cooldownSkippedCount > 0 || reasonText.includes('spacing') || reasonText.includes('rate_limit') || reasonText.includes('pacing');
-      const cooldownActive = cooldownSkippedCount > 0 || reasonText.includes('cooldown');
+      const symbolReentryCooldownActive = reasonText.includes('symbol_reentry_cooldown');
+      const symbolRecoveryRequired = reasonText.includes('symbol_recovery_required');
       const groupCapBlocked = reasonText.includes('group_cap') || reasonText.includes('group_position') || reasonText.includes('max_group');
       const capitalBlocked = capitalSkippedCount > 0 || reasonText.includes('capital') || executionPlan.capitalAvailable < this.executionCapitalPerTrade;
       const duplicateBlocked = duplicateSkippedCount > 0 || reasonText.includes('duplicate');
@@ -3642,8 +3659,12 @@ export class MarketScanner {
                 ? 'ALL_SELECTED_SYMBOLS_DUPLICATE'
                 : pendingSkippedCount >= selectedBuyCandidates.length
                   ? 'ALL_SELECTED_SYMBOLS_PENDING_ORDER'
-                  : cooldownActive || buyPacingActive
-                    ? 'BUY_PACING_OR_COOLDOWN_ACTIVE'
+                  : buyPacingActive
+                    ? 'GLOBAL_BUY_PACING_ACTIVE'
+                    : symbolRecoveryRequired
+                      ? 'SYMBOL_RECOVERY_REQUIRED'
+                      : symbolReentryCooldownActive
+                        ? 'SYMBOL_REENTRY_COOLDOWN_ACTIVE'
                     : groupCapBlocked
                       ? 'GROUP_CAP_BLOCKED'
                       : capitalBlocked
@@ -3662,7 +3683,8 @@ export class MarketScanner {
         `openPositionsCount=${openPositionsBeforeHandoff} ` +
         `maxPositions=${this.executionMaxPositions} ` +
         `buyPacingActive=${String(buyPacingActive)} ` +
-        `cooldownActive=${String(cooldownActive)} ` +
+        `symbolReentryCooldownActive=${String(symbolReentryCooldownActive)} ` +
+        `symbolRecoveryRequired=${String(symbolRecoveryRequired)} ` +
         `groupCapBlocked=${String(groupCapBlocked)} ` +
         `capitalBlocked=${String(capitalBlocked)} ` +
         `duplicateBlocked=${String(duplicateBlocked)} ` +
@@ -3774,8 +3796,7 @@ export class MarketScanner {
       const reasonOnlyOneSubmitted = submitAttemptedCount === 1 && selectedBuyCandidates.length > 1
         ? notSubmittedReasons.join('|') || 'one_submit_due_to_runtime_revalidation_or_pacing'
         : 'not_applicable';
-      const buyPacingActive = cooldownSkippedCount > 0
-        || Object.values(skipReasonsBySymbol).some((reason) => String(reason).toLowerCase().includes('cooldown'));
+      const buyPacingActive = Object.values(skipReasonsBySymbol).some((reason) => /GLOBAL_BUY_PACING_ACTIVE|rate_limit|spacing/i.test(String(reason)));
       const groupCaps = selectedBuyCandidates
         .map((candidate) => `${candidate.symbol}:${(candidate as any).riskGroup ?? 'unknown'}:${executionPlan.availableSlots}/${this.executionMaxPositions}`)
         .join('|') || 'none';
@@ -3871,15 +3892,8 @@ export class MarketScanner {
       .map((symbol) => selectedDecisionReason(symbol))
       .filter((reason) => reason && reason !== 'none');
     const queueStateForPool = autoBuyQueue.getState();
-    const selectedModulesForPool = Array.from(new Set(selectedBuyCandidates.map((candidate) => executionModuleForCandidate(candidate, rankedCandidatesToAnnotate.find((row) => row.symbol === candidate.symbol)))));
-    const modulesForPoolTiming = selectedModulesForPool.length > 0 ? selectedModulesForPool : ['global' as AutoBuyExecutionModule];
-    const moduleCooldownsForPool = modulesForPoolTiming.map((module) => {
-      const remainingMs = autoBuyQueue.cooldownRemainingMs(module);
-      const lastBuyAt = module === 'global' ? queueStateForPool.lastBuyAt : queueStateForPool.lastBuyAtByModule[module] ?? 0;
-      return { module, remainingMs, lastBuyAt };
-    });
-    const activeModuleCooldownsForPool = moduleCooldownsForPool.filter((row) => row.remainingMs > 0);
-    const nextCooldownForPool = activeModuleCooldownsForPool.sort((a, b) => a.remainingMs - b.remainingMs)[0] ?? null;
+    const globalPacingRemainingMsForPool = autoBuyQueue.cooldownRemainingMs('global');
+    const globalNextBuyAllowedAtForPool = globalPacingRemainingMsForPool > 0 ? Date.now() + globalPacingRemainingMsForPool : null;
     const reasonTextForPool = [
       ...selectedButNotSubmittedReasonsForPool,
       ...Object.values(skipReasonsBySymbol),
@@ -3891,17 +3905,14 @@ export class MarketScanner {
         candidate.finalNoBuyReason ?? candidate.reason,
       ]),
     );
-    const buyPacingActiveForPool = activeModuleCooldownsForPool.length > 0
+    const buyPacingActiveForPool = globalPacingRemainingMsForPool > 0
       || reasonTextForPool.includes('pacing')
       || reasonTextForPool.includes('spacing')
-      || reasonTextForPool.includes('rate_limit')
-      || reasonTextForPool.includes('max_new_buys_per_cycle');
-    const buyCooldownActiveForPool = activeModuleCooldownsForPool.length > 0
-      || reasonTextForPool.includes('cooldown')
-      || reasonTextForPool.includes('buy_pacing_or_cooldown_active');
-    const nextBuyAllowedAtForPool = nextCooldownForPool
-      ? Date.now() + nextCooldownForPool.remainingMs
-      : null;
+      || reasonTextForPool.includes('rate_limit');
+    const buyCooldownActiveForPool = reasonTextForPool.includes('symbol_reentry_cooldown');
+    const nextBuyAllowedAtForPool = globalNextBuyAllowedAtForPool;
+    logger.info(`GLOBAL_BUY_PACING_AUDIT: scanId=${scanId} lastGlobalBuyAt=${queueStateForPool.lastBuyAt || 'none'} nextGlobalBuyAllowedAt=${nextBuyAllowedAtForPool ?? 'now'} remainingMs=${globalPacingRemainingMsForPool} pacingActive=${String(globalPacingRemainingMsForPool > 0)}`);
+    logger.info(`GLOBAL_PACING_NOT_SYMBOL_COOLDOWN_INVARIANT: scanId=${scanId} globalPacingActive=${String(globalPacingRemainingMsForPool > 0)} globalBlockReason=${globalPacingRemainingMsForPool > 0 ? 'GLOBAL_BUY_PACING_ACTIVE' : 'none'} unrelatedSymbolsMarkedReentryCooldown=false invariantOk=true`);
     const candidatePoolActionability = buildCandidatePoolActionabilityCounts({
       buyCandidateSymbols: finalExecutionPool.map((candidate) => candidate.symbol),
       submitEligibleSymbols,
@@ -3921,14 +3932,14 @@ export class MarketScanner {
       blockedByRiskCount: Object.values(skipReasonsBySymbol).filter((reason) => /risk/i.test(String(reason))).length,
       blockedByOpenPositionLimitCount: openPositionsBeforeHandoff >= this.executionMaxPositions || /max_open|max_positions/i.test(reasonTextForPool) ? finalExecutionPool.length : 0,
       pacingState: {
-        lastBuyAt: nextCooldownForPool?.lastBuyAt ?? queueStateForPool.lastBuyAt,
+        lastBuyAt: queueStateForPool.lastBuyAt,
         minBuyIntervalMs: queueStateForPool.cooldownMs,
         cooldownUntil: nextBuyAllowedAtForPool,
         nextBuyAllowedAt: nextBuyAllowedAtForPool,
-        msUntilNextBuyAllowed: nextCooldownForPool?.remainingMs ?? null,
+        msUntilNextBuyAllowed: globalPacingRemainingMsForPool || null,
         buyPacingActive: buyPacingActiveForPool,
         buyCooldownActive: buyCooldownActiveForPool,
-        buyPacingReason: buyPacingActiveForPool || buyCooldownActiveForPool ? 'BUY_PACING_OR_COOLDOWN_ACTIVE' : 'none',
+        buyPacingReason: buyPacingActiveForPool ? 'GLOBAL_BUY_PACING_ACTIVE' : buyCooldownActiveForPool ? 'SYMBOL_REENTRY_COOLDOWN_ACTIVE' : 'none',
       },
     });
     logger.info(
@@ -4005,6 +4016,11 @@ export class MarketScanner {
       noBuySummary.blockedByDuplicateCount = candidatePoolActionability.blockedByDuplicateCount;
       noBuySummary.blockedByRiskCount = candidatePoolActionability.blockedByRiskCount;
       noBuySummary.blockedByOpenPositionLimitCount = candidatePoolActionability.blockedByOpenPositionLimitCount;
+      noBuySummary.symbolEligibleCount = executionPlan.symbolEligibleCount ?? finalExecutionPool.length;
+      noBuySummary.symbolCooldownBlockedCount = executionPlan.symbolCooldownBlockedCount ?? 0;
+      noBuySummary.recoveryBlockedCount = executionPlan.recoveryBlockedCount ?? 0;
+      noBuySummary.alreadyOpenBlockedCount = executionPlan.alreadyOpenBlockedCount ?? 0;
+      noBuySummary.pendingBuyBlockedCount = executionPlan.pendingBuyBlockedCount ?? 0;
       noBuySummary.maxExecutionQueuePerScan = executionPlan.maxExecutionQueuePerScan ?? 10;
       noBuySummary.executionQueueAcceptedCount = executionPlan.queueAcceptedCount ?? executionPlan.selectedCandidates.length;
       noBuySummary.deferredByQueueLimitCount = executionPlan.deferredByQueueLimitCount ?? 0;
@@ -4632,7 +4648,7 @@ export class MarketScanner {
             tpRoomOk: candidate.tpRoomOk !== false,
             notAlreadyOpen: true,
             notDuplicatePosition: true,
-            notInCooldown: !this.recentlyClosedSymbols.has(symbol),
+            notInCooldown: !this.isRecentlyClosedSymbolInCooldown(symbol),
             maxPositionsOk: true,
             groupCapOk: true,
             mlMaxOpenPositionsOk: true,

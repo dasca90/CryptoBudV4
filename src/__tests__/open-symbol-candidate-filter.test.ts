@@ -179,8 +179,8 @@ const openPlan = buildExecutionPlan({
 
 ok(openPlan.executionPoolSize === 0, 'open symbol is removed from active execution pool count');
 ok(openPlan.selectedCandidates.length === 0, 'open symbol does not reach ExecutionPlanner selected new buy');
-ok(openPlan.noBuyReasons.includes('FILTERED_ALREADY_OPEN_POSITION'), 'open symbol gets exact filtered already-open reason');
-ok(openPlan.skippedCandidates.some((candidate) => candidate.symbol === 'SOLUSDT' && candidate.finalNoBuyReason === 'FILTERED_ALREADY_OPEN_POSITION'), 'planner keeps diagnostic skipped record for filtered open symbol');
+ok(openPlan.noBuyReasons.includes('SYMBOL_ALREADY_OPEN'), 'open symbol gets explicit symbol-eligibility reason');
+ok(openPlan.skippedCandidates.some((candidate) => candidate.symbol === 'SOLUSDT' && candidate.finalNoBuyReason === 'SYMBOL_ALREADY_OPEN'), 'planner keeps diagnostic skipped record for filtered open symbol');
 
 const newSui = candidate('SUIUSDT');
 const newPlan = buildExecutionPlan({
@@ -203,7 +203,7 @@ const newPlan = buildExecutionPlan({
 });
 
 ok(newPlan.executionPoolSize === 1, 'non-open AutoBots candidate remains in active execution pool');
-ok(!newPlan.noBuyReasons.includes('FILTERED_ALREADY_OPEN_POSITION'), 'non-open AutoBots candidate is not classified as already-open');
+ok(!newPlan.noBuyReasons.includes('SYMBOL_ALREADY_OPEN'), 'non-open AutoBots candidate is not classified as already-open');
 
 const pm = new PositionManager();
 pm.addPosition('SOLUSDT', { coin: 'SOLUSDT', symbol: 'SOLUSDT', quantity: 1, avgEntryPrice: 100, currentPrice: 101, tradeId: 'open-sol' } as any);

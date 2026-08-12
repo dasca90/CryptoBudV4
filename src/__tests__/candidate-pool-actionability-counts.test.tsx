@@ -19,40 +19,40 @@ const allCooldownBlocked = buildCandidatePoolActionabilityCounts({
   submitEligibleSymbols: [],
   submitAttemptedSymbols: [],
   selectedButNotSubmittedSymbols: symbols12,
-  skippedReasonsBySymbol: Object.fromEntries(symbols12.map((symbol) => [symbol, 'BUY_PACING_OR_COOLDOWN_ACTIVE'])),
-  selectedButNotSubmittedReasons: ['BUY_PACING_OR_COOLDOWN_ACTIVE'],
+  skippedReasonsBySymbol: Object.fromEntries(symbols12.map((symbol) => [symbol, 'GLOBAL_BUY_PACING_ACTIVE'])),
+  selectedButNotSubmittedReasons: ['GLOBAL_BUY_PACING_ACTIVE'],
   pacingState: {
     lastBuyAt: 1000,
     minBuyIntervalMs: 30_000,
     nextBuyAllowedAt: 31_000,
     msUntilNextBuyAllowed: 30_000,
     buyPacingActive: true,
-    buyCooldownActive: true,
-    buyPacingReason: 'BUY_PACING_OR_COOLDOWN_ACTIVE',
+    buyCooldownActive: false,
+    buyPacingReason: 'GLOBAL_BUY_PACING_ACTIVE',
   },
 });
 eq(allCooldownBlocked.buyCandidateCount, 12, 'raw BUY candidates are counted as detected BUY candidates');
 eq(allCooldownBlocked.actionableBuyCountNow, 0, 'cooldown-blocked candidates are not actionable');
 eq(allCooldownBlocked.blockedByPacingCount, 12, 'all BUY candidates blocked by pacing are counted');
-eq(allCooldownBlocked.blockedByCooldownCount, 12, 'all BUY candidates blocked by cooldown are counted');
+eq(allCooldownBlocked.blockedByCooldownCount, 0, 'global pacing does not become symbol cooldown');
 eq(allCooldownBlocked.msUntilNextBuyAllowed, 30_000, 'countdown is sourced from canonical pacing state');
-ok(allCooldownBlocked.selectedButNotSubmittedReasons.includes('BUY_PACING_OR_COOLDOWN_ACTIVE'), 'selected-but-not-submitted pacing reason is preserved');
+ok(allCooldownBlocked.selectedButNotSubmittedReasons.includes('GLOBAL_BUY_PACING_ACTIVE'), 'selected-but-not-submitted pacing reason is preserved');
 
 const partialCooldownBlocked = buildCandidatePoolActionabilityCounts({
   buyCandidateSymbols: symbols12,
   submitEligibleSymbols: symbols8,
   submitAttemptedSymbols: [],
   selectedButNotSubmittedSymbols: symbols4,
-  skippedReasonsBySymbol: Object.fromEntries(symbols4.map((symbol) => [symbol, 'cooldown_active'])),
-  selectedButNotSubmittedReasons: ['cooldown_active'],
+  skippedReasonsBySymbol: Object.fromEntries(symbols4.map((symbol) => [symbol, 'SYMBOL_REENTRY_COOLDOWN_ACTIVE'])),
+  selectedButNotSubmittedReasons: ['SYMBOL_REENTRY_COOLDOWN_ACTIVE'],
   pacingState: {
     msUntilNextBuyAllowed: 42_000,
-    buyPacingActive: true,
+    buyPacingActive: false,
     buyCooldownActive: true,
   },
 });
 eq(partialCooldownBlocked.actionableBuyCountNow, 8, 'partial cooldown leaves eight actionable candidates');
-eq(partialCooldownBlocked.blockedByPacingCount, 4, 'partial cooldown counts four pacing-blocked candidates');
+eq(partialCooldownBlocked.blockedByPacingCount, 0, 'symbol cooldown is not counted as global pacing');
 eq(partialCooldownBlocked.blockedByCooldownCount, 4, 'partial cooldown counts four cooldown-blocked candidates');
 
 const noCooldown = buildCandidatePoolActionabilityCounts({
@@ -78,30 +78,30 @@ const html = renderToStaticMarkup(
       executionPoolSize: 12,
       watchPoolSize: 0,
       nearMissPoolSize: 0,
-      topReasons: ['BUY_PACING_OR_COOLDOWN_ACTIVE'],
+      topReasons: ['GLOBAL_BUY_PACING_ACTIVE'],
       nearestCandidates: [],
       requiredNextActions: [],
       buyReadyCount: 12,
       buyCandidateCount: 12,
       actionableBuyCountNow: 0,
       blockedByPacingCount: 12,
-      blockedByCooldownCount: 12,
+      blockedByCooldownCount: 0,
       selectedButNotSubmittedCount: 12,
       submitAttemptedCount: 0,
-      selectedButNotSubmittedReasons: ['BUY_PACING_OR_COOLDOWN_ACTIVE'],
+      selectedButNotSubmittedReasons: ['GLOBAL_BUY_PACING_ACTIVE'],
       nextBuyAllowedAt: Date.now() + 42_000,
       msUntilNextBuyAllowed: 42_000,
       buyPacingActive: true,
-      buyCooldownActive: true,
-      buyPacingReason: 'BUY_PACING_OR_COOLDOWN_ACTIVE',
+      buyCooldownActive: false,
+      buyPacingReason: 'GLOBAL_BUY_PACING_ACTIVE',
       countSourceUsed: 'MarketScanner.ExecutionPlanner.AutoBuyExecutionQueue',
     }}
   />,
 );
 ok(html.includes('BUY candidates'), 'Candidate Pool labels raw BUY count as BUY candidates');
 ok(html.includes('Actionable now'), 'Candidate Pool renders actionable count label');
-ok(html.includes('Blocked pacing'), 'Candidate Pool renders pacing block count label');
-ok(html.includes('BUY_PACING_OR_COOLDOWN_ACTIVE'), 'Candidate Pool renders pacing/cooldown reason visibly');
+ok(html.includes('Global pacing'), 'Candidate Pool renders global pacing label');
+ok(html.includes('GLOBAL_BUY_PACING_ACTIVE'), 'Candidate Pool renders the explicit global pacing reason visibly');
 ok(html.includes('Next buy'), 'Candidate Pool renders next buy timing label');
 
 const scannerSrc = readFileSync('src/core/scanner/MarketScanner.ts', 'utf8');
